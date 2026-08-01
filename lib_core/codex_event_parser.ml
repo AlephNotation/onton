@@ -110,7 +110,7 @@ let build_args ~model ~cwd_path ~prompt ~resume_session =
     | Some m when not (String.is_empty m) -> [ "-m"; m ]
     | _ -> []
   in
-  let global = [ "codex"; "-C"; cwd_path ] in
+  let global = [ "codex"; "-C"; cwd_path; "--disable"; "shell_snapshot" ] in
   let trailing = [ "--dangerously-bypass-approvals-and-sandbox" ] in
   match resume_session with
   | Some session_id ->
@@ -134,6 +134,8 @@ let%test "build_args fresh (no resume, no model)" =
       "codex";
       "-C";
       "/tmp/work";
+      "--disable";
+      "shell_snapshot";
       "exec";
       "do stuff";
       "--json";
@@ -150,6 +152,8 @@ let%test "build_args fresh with model" =
       "codex";
       "-C";
       "/tmp/work";
+      "--disable";
+      "shell_snapshot";
       "exec";
       "do stuff";
       "--json";
@@ -168,6 +172,8 @@ let%test "build_args with resume session passes prompt and bypass flag" =
       "codex";
       "-C";
       "/tmp/work";
+      "--disable";
+      "shell_snapshot";
       "exec";
       "resume";
       "sess-1";
@@ -186,6 +192,8 @@ let%test "build_args with resume session and model" =
       "codex";
       "-C";
       "/tmp/work";
+      "--disable";
+      "shell_snapshot";
       "exec";
       "resume";
       "sess-1";
