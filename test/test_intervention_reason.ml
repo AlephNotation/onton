@@ -299,6 +299,16 @@ let () =
              (agent ()) transitions
          in
          let _history = Patch_agent.anchor_history a in
+         let automerge_deadline = Patch_agent.automerge_deadline a in
+         let automerge_enabled = Patch_agent.automerge_enabled a in
+         let automerge_failure_count = Patch_agent.automerge_failure_count a in
+         let current_message_id = Patch_agent.current_message_id a in
+         let current_op_state = Patch_agent.current_op_state a in
+         let llm_session_id = Patch_agent.llm_session_id a in
+         let review_failure = Patch_agent.review_failure a in
+         let review_requested_for_oid =
+           Patch_agent.review_requested_for_oid a
+         in
          let _in_merge_queue = Patch_agent.in_merge_queue a in
          let _priority = Patch_agent.highest_priority a in
          let _approved =
@@ -345,5 +355,13 @@ let () =
              ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
          in
          Bool.equal needs_from_fields (Option.is_some reason_from_fields)
-         && Bool.equal rebase_needs_intervention (Option.is_some rebase_reason)));
+         && Bool.equal rebase_needs_intervention (Option.is_some rebase_reason)
+         && Bool.equal automerge_enabled flag
+         && Option.is_none automerge_deadline
+         && automerge_failure_count = 0
+         && Option.is_some current_message_id
+         && Option.is_some current_op_state
+         && Option.is_some llm_session_id
+         && Bool.equal (Option.is_some review_failure) flag
+         && Bool.equal (Option.is_some review_requested_for_oid) (not flag)));
   print_endline "PASS: patch_agent surface threaded"

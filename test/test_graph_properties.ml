@@ -52,6 +52,17 @@ let dependencies_are_deduplicated =
           List.equal Types.Patch_id.equal expected
             (Graph.deps graph patch.Types.Patch.id)))
 
+let depends_on_matches_direct_dependencies =
+  QCheck2.Test.make ~name:"depends_on is direct dependency membership"
+    ~count:500 graph_case (fun (_patches, graph) ->
+      List.for_all (Graph.all_patch_ids graph) ~f:(fun patch_id ->
+          List.for_all (Graph.all_patch_ids graph) ~f:(fun dependency ->
+              Bool.equal
+                (Graph.depends_on graph patch_id ~dep:dependency)
+                (List.mem
+                   (Graph.deps graph patch_id)
+                   dependency ~equal:Types.Patch_id.equal))))
+
 let reverse_edges_are_consistent =
   QCheck2.Test.make ~name:"dependents are the inverse of dependencies"
     ~count:500 graph_case (fun (_patches, graph) ->
@@ -126,6 +137,7 @@ let () =
     [
       ids_are_exactly_the_plan;
       dependencies_are_deduplicated;
+      depends_on_matches_direct_dependencies;
       reverse_edges_are_consistent;
       ancestors_are_transitive;
       dependency_gate_matches_definition;

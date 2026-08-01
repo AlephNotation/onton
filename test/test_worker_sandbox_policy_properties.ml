@@ -95,6 +95,40 @@ let denied_credentials_never_survive =
                 || String.is_prefix entry ~prefix:"GITHUB_TOKEN="
                 || String.is_prefix entry ~prefix:"SSH_AUTH_SOCK=")))
 
+let runtime_files_are_added_exactly =
+  Test.make ~name:"runtime files extend the exact-file capability" ~count:300
+    Gen.(list nat_small)
+    (fun suffixes ->
+      let files =
+        List.map suffixes ~f:(fun suffix ->
+            Printf.sprintf "/runtime/bin-%d" suffix)
+      in
+      match
+        Worker_sandbox_policy.create ~worktree:"/worktree" ~read_only_paths:[]
+          ~read_only_dirs:[] ~writable_files:[] ~writable_dirs:[]
+          ~creatable_dirs:[] ~runtime_files:[] ~runtime_roots:[]
+          ~state_dir:"/state" ~network:Worker_sandbox_policy.Denied
+      with
+      | Error _ -> false
+      | Ok policy -> (
+          match Worker_sandbox_policy.add_runtime_files policy files with
+          | Error _ -> false
+          | Ok policy ->
+              List.equal String.equal policy.runtime_files
+                (List.dedup_and_sort files ~compare:String.compare)))
+
+let environment_allowlist_is_explicit =
+  Test.make ~name:"provider environment allowlist is explicit" ~count:300
+    Gen.bool (fun allow_openai ->
+      let providers = if allow_openai then [ "OPENAI_API_KEY" ] else [] in
+      Bool.equal
+        (Worker_sandbox_policy.allowed_environment_name
+           ~allowed_provider_names:providers "OPENAI_API_KEY")
+        allow_openai
+      && not
+           (Worker_sandbox_policy.allowed_environment_name
+              ~allowed_provider_names:providers "GITHUB_TOKEN"))
+
 let () =
   List.iter
     [
@@ -103,4 +137,6 @@ let () =
       profile_is_deterministic;
       empty_create_capability_is_fail_closed;
       denied_credentials_never_survive;
+      runtime_files_are_added_exactly;
+      environment_allowlist_is_explicit;
     ] ~f:(fun test -> Test.check_exn test)

@@ -1,4 +1,4 @@
-(* @archlint.module shell
+(* @archlint.module interface
    @archlint.domain patch-validator *)
 
 open Onton_core.Types
@@ -24,9 +24,6 @@ type prepare_failure =
   | Validation_failed of failure
   | Git_failed of command_failure
 [@@deriving show, eq]
-
-val outside_scope : allowed:string list -> changed:string list -> string list
-(** Pure exact-path scope check, with duplicates removed from the result. *)
 
 val run_checks :
   process_mgr:Eio_unix.Process.mgr_ty Eio.Resource.t ->

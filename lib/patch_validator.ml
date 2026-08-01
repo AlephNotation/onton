@@ -28,11 +28,6 @@ type prepare_failure =
 
 let timeout_seconds = 600.0
 
-let outside_scope ~allowed ~changed =
-  let allowed = Set.of_list (module String) allowed in
-  List.filter changed ~f:(fun path -> not (Set.mem allowed path))
-  |> List.dedup_and_sort ~compare:String.compare
-
 let run_command ~process_mgr ~clock ~fs ~cwd args =
   let stdout = Buffer.create 4096 in
   let stderr = Buffer.create 4096 in
@@ -97,7 +92,7 @@ let run ~process_mgr ~clock ~fs ~cwd ~base_branch patch =
   match changed_files ~process_mgr ~clock ~fs ~cwd ~base_branch with
   | Error _ as error -> error
   | Ok changed -> (
-      match outside_scope ~allowed:patch.Patch.files ~changed with
+      match Patch_scope.outside_scope ~allowed:patch.Patch.files ~changed with
       | _ :: _ as paths -> Error (Outside_scope paths)
       | [] -> run_checks ~process_mgr ~clock ~fs ~cwd patch.Patch.checks)
 

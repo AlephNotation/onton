@@ -6,7 +6,27 @@
 (test
  (name test_patch_validator)
  (modules test_patch_validator)
- (libraries onton onton_core eio eio_main eio.unix unix))
+ (libraries onton onton_core eio eio_main eio.unix unix qcheck-core))
+
+(test
+ (name test_gameplan_parser_properties)
+ (modules test_gameplan_parser_properties)
+ (libraries onton_core qcheck-core))
+
+(test
+ (name test_github_effect_properties)
+ (modules test_github_effect_properties)
+ (libraries onton_core qcheck-core))
+
+(test
+ (name test_patch_pr_status_properties)
+ (modules test_patch_pr_status_properties)
+ (libraries onton_core qcheck-core))
+
+(test
+ (name test_telemetry_properties)
+ (modules test_telemetry_properties)
+ (libraries onton_core qcheck-core))
 
 (test
  (name test_worker_sandbox_policy)
@@ -418,7 +438,7 @@
 (test
  (name test_github_outbox)
  (modules test_github_outbox)
- (libraries onton onton_core))
+ (libraries onton onton_core qcheck-core))
 
 (test
  (name test_poller_properties)

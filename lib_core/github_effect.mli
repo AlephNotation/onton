@@ -1,3 +1,6 @@
+(* @archlint.module interface
+   @archlint.domain github-effect *)
+
 open Base
 
 (** A durable command for the GitHub adapter. Commands carry every input the

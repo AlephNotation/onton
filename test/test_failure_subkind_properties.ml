@@ -31,6 +31,26 @@ let gen_run_classification =
         (string_small_of printable);
     ]
 
+let gen_subkind =
+  let open QCheck2.Gen in
+  oneof
+    [
+      pure Failure_subkind.Ok;
+      pure Failure_subkind.Auth_unavailable;
+      map
+        (fun status -> Failure_subkind.Api_error { status })
+        (option int_small);
+      pure Failure_subkind.Network_error;
+      pure Failure_subkind.Timed_out;
+      pure Failure_subkind.Context_exhausted;
+      pure Failure_subkind.No_session_to_resume;
+      pure Failure_subkind.Empty_response;
+      pure Failure_subkind.Process_error;
+      map
+        (fun detail -> Failure_subkind.Other detail)
+        (string_small_of printable);
+    ]
+
 let prop_classify_total =
   QCheck2.Test.make ~name:"Failure_subkind.classify is total" ~count:500
     QCheck2.Gen.(
@@ -45,8 +65,32 @@ let prop_classify_total =
         true
       with _ -> false)
 
+let prop_subkind_codec_roundtrips =
+  QCheck2.Test.make ~name:"Failure_subkind JSON codec roundtrips" ~count:500
+    gen_subkind (fun subkind ->
+      Failure_subkind.equal subkind
+        (Failure_subkind.t_of_yojson (Failure_subkind.yojson_of_t subkind)))
+
+let prop_init_info_codec_roundtrips =
+  QCheck2.Test.make ~name:"Failure_subkind init metadata roundtrips" ~count:500
+    gen_init_info (fun init ->
+      Failure_subkind.equal_init_info init
+        (Failure_subkind.init_info_of_yojson
+           (Failure_subkind.yojson_of_init_info init)))
+
+let prop_to_string_is_nonempty =
+  QCheck2.Test.make ~name:"Failure_subkind labels are nonempty" ~count:500
+    gen_subkind (fun subkind ->
+      not (String.is_empty (Failure_subkind.to_string subkind)))
+
 let () =
   let errcode =
-    QCheck_base_runner.run_tests ~verbose:true [ prop_classify_total ]
+    QCheck_base_runner.run_tests ~verbose:true
+      [
+        prop_classify_total;
+        prop_subkind_codec_roundtrips;
+        prop_init_info_codec_roundtrips;
+        prop_to_string_is_nonempty;
+      ]
   in
   if errcode <> 0 then Stdlib.exit errcode

@@ -237,21 +237,6 @@ let parse_json_string input =
   | json -> (
       try Ok (parse_json json) with Parse_error message -> Error message)
 
-let read_file path =
-  try
-    let channel = Stdlib.In_channel.open_text path in
-    let contents =
-      Exn.protect
-        ~finally:(fun () -> Stdlib.In_channel.close channel)
-        ~f:(fun () -> Stdlib.In_channel.input_all channel)
-    in
-    Ok contents
-  with Sys_error message ->
-    Error (Printf.sprintf "Cannot read %s: %s" path message)
-
-let parse_json_file path = Result.bind (read_file path) ~f:parse_json_string
-let parse_file = parse_json_file
-
 let valid_example =
   {|
   {

@@ -1,5 +1,5 @@
-(* @archlint.module shell
-   @archlint.domain pi-event-parser *)
+(* @archlint.module exempt
+   @archlint.exempt-reason effect-facade *)
 
 open Base
 

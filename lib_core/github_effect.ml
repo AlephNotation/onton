@@ -1,3 +1,6 @@
+(* @archlint.module core
+   @archlint.domain github-effect *)
+
 open Base
 open Types
 

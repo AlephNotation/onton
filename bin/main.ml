@@ -408,7 +408,7 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
   match (project, gameplan_path) with
   | None, None -> Error [ "Provide --plan PLAN to start or PROJECT to resume." ]
   | _, Some gp_path -> (
-      match Gameplan_parser.parse_file gp_path with
+      match Gameplan_loader.parse_file gp_path with
       | Error msg -> Error [ Printf.sprintf "Error parsing plan: %s" msg ]
       | Ok parsed -> (
           let gameplan = parsed.Gameplan_parser.gameplan in
@@ -495,7 +495,7 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
         if not (Stdlib.Sys.file_exists stored_gp_path) then
           Error [ Printf.sprintf "Stored plan not found for project %S." proj ]
         else
-          match Gameplan_parser.parse_file stored_gp_path with
+          match Gameplan_loader.parse_file stored_gp_path with
           | Error msg ->
               Error [ Printf.sprintf "Error parsing stored plan: %s" msg ]
           | Ok parsed -> (

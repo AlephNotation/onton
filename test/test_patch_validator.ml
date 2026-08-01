@@ -8,8 +8,19 @@ open Onton_core.Types
 let check run proves = Check.{ run; proves }
 
 let () =
+  QCheck2.Test.check_exn
+    (QCheck2.Test.make ~name:"scope reports exactly undeclared paths" ~count:300
+       QCheck2.Gen.(pair (list string_small) (list string_small))
+       (fun (allowed, changed) ->
+         let actual = Onton_core.Patch_scope.outside_scope ~allowed ~changed in
+         let allowed = Set.of_list (module String) allowed in
+         let expected =
+           List.filter changed ~f:(fun path -> not (Set.mem allowed path))
+           |> List.dedup_and_sort ~compare:String.compare
+         in
+         List.equal String.equal actual expected));
   let outside =
-    Patch_validator.outside_scope ~allowed:[ "lib/a.ml" ]
+    Onton_core.Patch_scope.outside_scope ~allowed:[ "lib/a.ml" ]
       ~changed:[ "test/b.ml"; "lib/a.ml"; "test/b.ml" ]
   in
   assert (List.equal String.equal outside [ "test/b.ml" ]);

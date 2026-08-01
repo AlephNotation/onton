@@ -1,4 +1,4 @@
-(* @archlint.module stateTest
+(* @archlint.module test
    @archlint.domain orchestrator *)
 
 open Base

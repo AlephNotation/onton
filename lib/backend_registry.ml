@@ -17,6 +17,9 @@ let display_name_of_claude_model = function
 let make_factory ~(process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t) ~clock
     ~timeout ~setsid_exec : backend:string -> model:string option -> kind =
  fun ~backend ~model ->
+  let decision = Backend_routing.decide ~backend ~model in
+  let backend = decision.Backend_routing.backend in
+  let model = decision.Backend_routing.model in
   match backend with
   | "claude" ->
       Ephemeral

@@ -1,5 +1,5 @@
 (* @archlint.module core
-   @archlint.domain failure-subkind *)
+   @archlint.domain telemetry *)
 
 open Base
 open Ppx_yojson_conv_lib.Yojson_conv.Primitives

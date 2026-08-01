@@ -1,3 +1,6 @@
+(* @archlint.module test
+   @archlint.domain orchestrator *)
+
 open Base
 open Onton_core.Types
 module Github_effect = Onton_core.Github_effect
@@ -54,6 +57,87 @@ let roundtrip snap =
   with
   | Ok restored -> restored
   | Error message -> failwith message
+
+let property_controller_owned_outbox_surface () =
+  QCheck2.Test.check_exn
+    (QCheck2.Test.make
+       ~name:"controller-owned GitHub outbox transitions compose" ~count:300
+       QCheck2.Gen.(pair (int_range 1 10000) bool)
+       (fun (number, permanent) ->
+         let generated_pr = Pr_number.of_int number in
+         let generated_base =
+           Branch.of_string (Printf.sprintf "base-%d" number)
+         in
+         let orch = empty_orchestrator () in
+         let orch =
+           Onton.Patch_controller.apply_replacement_pr orch patch_id
+             ~pr_number:generated_pr ~base_branch:generated_base ~merged:false
+         in
+         let orch =
+           Onton.Orchestrator.set_base_branch orch patch_id generated_base
+         in
+         let orch =
+           Onton.Orchestrator.record_delivered_ci_run_ids orch patch_id
+             [ number ]
+         in
+         let orch =
+           Onton.Orchestrator.reset_pr_body_artifact_miss_count orch patch_id
+         in
+         let agent_exists =
+           Option.is_some (Onton.Orchestrator.find_agent orch patch_id)
+         in
+         let first =
+           command (Github_effect.Direct_merge { pr_number = generated_pr })
+         in
+         let second =
+           command (Github_effect.Enqueue { pr_number = generated_pr })
+         in
+         let orch = Onton.Orchestrator.enqueue_github_effect orch first in
+         let orch = Onton.Orchestrator.enqueue_github_effect orch second in
+         let found =
+           Onton.Orchestrator.find_github_effect orch first.Github_effect.id
+         in
+         let runnable =
+           Onton.Orchestrator.runnable_github_effects orch ~now:0.0
+         in
+         let orch, claimed =
+           Onton.Orchestrator.claim_github_effect orch ~now:0.0
+             first.Github_effect.id
+         in
+         match claimed with
+         | None -> false
+         | Some claimed ->
+             let orch =
+               Onton.Patch_controller.finish_github_failure orch ~now:0.0
+                 claimed ~permanent ~error:"generated failure"
+             in
+             let updated =
+               Github_effect.retry ~now:1.0 ~delay:1.0 ~error:"retry" second
+             in
+             let orch = Onton.Orchestrator.update_github_effect orch updated in
+             let orch =
+               Onton.Orchestrator.remove_github_effects_for_patch orch patch_id
+                 ~f:(fun candidate ->
+                   Effect_id.equal candidate.Github_effect.id
+                     updated.Github_effect.id)
+             in
+             let orch =
+               Onton.Orchestrator.remove_github_effect orch
+                 first.Github_effect.id
+             in
+             let _rebase_orch, rebase_resolution =
+               Onton.Orchestrator.reject_rebase_publication orch patch_id
+             in
+             let _conflict_orch, conflict_resolution =
+               Onton.Orchestrator.reject_conflict_publication orch patch_id
+             in
+             agent_exists && Option.is_some found
+             && List.length runnable = 2
+             && List.is_empty (Onton.Orchestrator.all_github_effects orch)
+             && Onton.Orchestrator.equal_rebase_push_resolution
+                  rebase_resolution Onton.Orchestrator.Rebase_push_error
+             && Onton.Orchestrator.equal_conflict_resolution conflict_resolution
+                  Onton.Orchestrator.Conflict_retry_push))
 
 let test_identity_and_claim () =
   let action = Onton_core.Github_effect.Direct_merge { pr_number } in
@@ -541,6 +625,7 @@ let test_failed_outcome_write_keeps_claim () =
   check (!stores = 4) "unexpected number of durable writes"
 
 let () =
+  property_controller_owned_outbox_surface ();
   test_identity_and_claim ();
   test_restart_replays_running ();
   test_all_actions_and_statuses_roundtrip ();
