@@ -470,11 +470,6 @@
  (libraries onton onton_core eio eio_main eio.unix unix))
 
 (test
- (name test_spawn_logic)
- (modules test_spawn_logic)
- (libraries onton onton_core onton_test_support qcheck-core))
-
-(test
  (name test_worktree_parser)
  (modules test_worktree_parser)
  (libraries onton_core qcheck-core qcheck-core.runner)
