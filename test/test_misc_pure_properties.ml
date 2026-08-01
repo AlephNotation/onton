@@ -47,20 +47,14 @@ let add_resolved_and_pending state ~comment ~patch_id =
       |> State.Comments.set_resolved ~comment ~value:true
       |> State.Comments.set_pending ~comment ~patch_id ~value:true)
 
-let valid_parser_json ~project_name ~patches_json ~dependency_graph_json =
+let valid_parser_json ~project_name ~patches_json =
   Printf.sprintf
     {|{
-  "projectName": %S,
-  "problemStatement": "",
-  "solutionSummary": "",
-  "finalStateSpec": "",
-  "currentStateAnalysis": "",
-  "explicitOpinions": [],
-  "acceptanceCriteria": [],
-  "dependencyGraph": %s,
+  "project": %S,
+  "repository": "flowglad/onton",
   "patches": %s
 }|}
-    project_name dependency_graph_json patches_json
+    project_name patches_json
 
 let sample_pr_state ~merge_queue_required ~merge_queue_entry =
   Pr_state.
@@ -287,21 +281,23 @@ let () =
 
   let prop_gameplan_parser_parses_single_patch =
     Test.make ~name:"gameplan_parser: parses valid single patch JSON" ~count:100
-      Gen.(string_size ~gen:printable (int_range 1 20))
+      Gen.(string_size ~gen:(char_range 'a' 'z') (int_range 1 20))
       (fun project_name ->
         let json =
           valid_parser_json ~project_name
             ~patches_json:
               {|[
-  {"number": 1, "title": "Patch 1", "changes": ["one"]}
+  {"id": "1", "goal": "one behavior works", "dependsOn": [],
+   "files": ["lib/one.ml"],
+   "checks": [{"run": "dune runtest", "proves": "behavior works"}]}
 ]|}
-            ~dependency_graph_json:"[]"
         in
         match Gameplan_parser.parse_json_string json with
         | Error _ -> false
         | Ok parsed ->
             List.length parsed.gameplan.patches = 1
-            && Map.is_empty parsed.dependency_graph
+            && List.is_empty
+                 (Map.find_exn parsed.dependency_graph (Patch_id.of_string "1"))
             && Patch_id.equal (List.hd_exn parsed.gameplan.patches).id
                  (Patch_id.of_string "1"))
   in
@@ -313,18 +309,17 @@ let () =
           valid_parser_json ~project_name:"cyclic"
             ~patches_json:
               {|[
-  {"number": 1, "title": "Patch 1", "changes": []},
-  {"number": 2, "title": "Patch 2", "changes": []}
-]|}
-            ~dependency_graph_json:
-              {|[
-  {"patch": 1, "dependsOn": [2]},
-  {"patch": 2, "dependsOn": [1]}
+  {"id": "1", "goal": "one works", "dependsOn": ["2"],
+   "files": ["lib/one.ml"],
+   "checks": [{"run": "dune runtest", "proves": "one works"}]},
+  {"id": "2", "goal": "two works", "dependsOn": ["1"],
+   "files": ["lib/two.ml"],
+   "checks": [{"run": "dune runtest", "proves": "two works"}]}
 ]|}
         in
         match Gameplan_parser.parse_json_string json with
         | Ok _ -> false
-        | Error msg -> String.is_substring msg ~substring:"Cycle detected")
+        | Error msg -> String.is_substring msg ~substring:"dependency cycle")
   in
 
   let prop_gameplan_parser_rejects_missing_dependency_target =
@@ -334,15 +329,14 @@ let () =
           valid_parser_json ~project_name:"missing-dep"
             ~patches_json:
               {|[
-  {"number": 1, "title": "Patch 1", "changes": []}
-]|}
-            ~dependency_graph_json:{|[
-  {"patch": 1, "dependsOn": [99]}
+  {"id": "1", "goal": "one works", "dependsOn": ["99"],
+   "files": ["lib/one.ml"],
+   "checks": [{"run": "dune runtest", "proves": "one works"}]}
 ]|}
         in
         match Gameplan_parser.parse_json_string json with
         | Ok _ -> false
-        | Error msg -> String.is_substring msg ~substring:"nonexistent patch")
+        | Error msg -> String.is_substring msg ~substring:"unknown patch")
   in
 
   let prop_prompt_substitute_single_pass_and_unknown_preserved =

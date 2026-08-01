@@ -26,13 +26,15 @@ end
 
 module Make (_ : Worktree.S) (_ : ENV) : sig
   val run :
+    sandbox_for_worktree:(worktree:string -> (Worker_sandbox.t, string) result) ->
     kind:Types.Operation_kind.t option ->
     patch_id:Types.Patch_id.t ->
     prompt:string ->
     agent:Patch_agent.t ->
     on_pr_detected:(Types.Pr_number.t -> unit) ->
+    validate_before_push:
+      (worktree:string -> base_branch:Types.Branch.t -> (unit, string) result) ->
     backend:Llm_backend.t ->
-    complexity:int option ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list
   (** Returns the supervisor disposition and the list of [(tool_name, status)]
       pairs for any tool calls that did not reach a [completed] state (used by
@@ -62,13 +64,15 @@ module Make (_ : Worktree.S) (_ : ENV) : sig
 
   val run_long_lived :
     sw:Eio.Switch.t ->
+    sandbox_for_worktree:(worktree:string -> (Worker_sandbox.t, string) result) ->
     kind:Types.Operation_kind.t option ->
     patch_id:Types.Patch_id.t ->
     prompt:string ->
     agent:Patch_agent.t ->
     on_pr_detected:(Types.Pr_number.t -> unit) ->
+    validate_before_push:
+      (worktree:string -> base_branch:Types.Branch.t -> (unit, string) result) ->
     session:long_lived_session ->
-    complexity:int option ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list
   (** Long-lived backend counterpart to {!run}. It shares the same supervisor
       bookkeeping and delivers the rendered turn over [backend.prompt] instead

@@ -90,20 +90,11 @@ let () =
       Types.Patch.
         {
           id = pid;
-          title = "P";
-          description = "";
+          goal = "recover the missing worktree";
           branch = Types.Branch.of_string "wm";
           dependencies = [];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         };
     ]
   in
@@ -111,14 +102,14 @@ let () =
   (* Drive the agent to busy without a PR (start path). *)
   let orch = Orchestrator.fire orch (Orchestrator.Start (pid, main)) in
   let agent_before = Orchestrator.agent orch pid in
-  assert_true "agent_before busy" agent_before.Patch_agent.busy;
+  assert_true "agent_before busy" (Patch_agent.is_busy agent_before);
   let attempts_before = agent_before.Patch_agent.start_attempts_without_pr in
   let orch =
     Orchestrator.apply_session_result orch pid
       Orchestrator.Session_worktree_missing
   in
   let agent_after = Orchestrator.agent orch pid in
-  assert_true "agent_after not busy" (not agent_after.Patch_agent.busy);
+  assert_true "agent_after not busy" (not (Patch_agent.is_busy agent_after));
   let attempts_after = agent_after.Patch_agent.start_attempts_without_pr in
   if not (Int.equal attempts_after (attempts_before + 1)) then
     failwith

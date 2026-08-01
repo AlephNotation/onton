@@ -9,20 +9,11 @@ let patch i =
   Patch.
     {
       id = Patch_id.of_string (Printf.sprintf "patch-%d" i);
-      title = Printf.sprintf "Patch %d" i;
-      description = "";
+      goal = Printf.sprintf "Patch %d completes" i;
       branch = Branch.of_string (Printf.sprintf "branch-%d" i);
       dependencies = [];
-      spec = "";
-      acceptance_criteria = [];
       files = [];
-      classification = "";
-      changes = [];
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
+      checks = [];
     }
 
 let agent_for_patch ?(merged = false) (p : Patch.t) =
@@ -136,7 +127,7 @@ let () =
       ~name:"prune duplicate patch ids are classified by their shared agent"
       ~count:500 Gen.bool (fun merged ->
         let p = patch 1 in
-        let patches = [ p; { p with title = "duplicate id" } ] in
+        let patches = [ p; { p with goal = "duplicate id" } ] in
         let expected =
           if merged then Prune_decision.All_terminal
           else Prune_decision.Not_terminal

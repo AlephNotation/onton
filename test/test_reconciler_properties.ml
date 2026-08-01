@@ -184,20 +184,11 @@ let prop_detect_rebases_skips_merge_queue_target =
       let patch id dependencies : Types.Patch.t =
         {
           id;
-          title = Types.Patch_id.to_string id;
-          description = "";
+          goal = "patch " ^ Types.Patch_id.to_string id ^ " completes";
           branch = Types.Branch.of_string (Types.Patch_id.to_string id);
           dependencies;
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         }
       in
       let graph = Graph.of_patches [ patch p1 []; patch p2 [ p1 ] ] in
@@ -616,20 +607,11 @@ let prop_stale_base_suppressed_while_in_merge_queue =
       let patch : Types.Patch.t =
         {
           id = p;
-          title = "t";
-          description = "";
+          goal = "patch completes";
           branch = Types.Branch.of_string "p1";
           dependencies = [];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         }
       in
       let graph = Graph.of_patches [ patch ] in
@@ -669,20 +651,11 @@ let prop_detect_stale_bases_enqueues_wrong_base =
       let patch id branch dependencies : Types.Patch.t =
         {
           id;
-          title = Types.Patch_id.to_string id;
-          description = "";
+          goal = "patch " ^ Types.Patch_id.to_string id ^ " completes";
           branch;
           dependencies;
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         }
       in
       let graph =
@@ -724,20 +697,11 @@ let prop_reconcile_e2e_catches_drift =
       let patch : Types.Patch.t =
         {
           id = pid "p1";
-          title = "t";
-          description = "";
+          goal = "patch completes";
           branch = Types.Branch.of_string "p1";
           dependencies = [];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         }
       in
       let graph = Graph.of_patches [ patch ] in
@@ -766,20 +730,11 @@ let prop_reconcile_dedup_rebase =
       let patch : Types.Patch.t =
         {
           id = pid "p1";
-          title = "t";
-          description = "";
+          goal = "patch completes";
           branch = Types.Branch.of_string "p1";
           dependencies = [];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         }
       in
       let graph = Graph.of_patches [ patch ] in
@@ -809,20 +764,11 @@ let prop_reconcile_dedup_rebase =
 let mk_patch ~id ~deps : Types.Patch.t =
   {
     id = pid id;
-    title = "";
-    description = "";
+    goal = "patch " ^ id ^ " completes";
     branch = Types.Branch.of_string id;
     dependencies = List.map deps ~f:pid;
-    spec = "";
-    acceptance_criteria = [];
     files = [];
-    classification = "";
-    changes = [];
-    test_stubs_introduced = [];
-    test_stubs_implemented = [];
-    complexity = None;
-    precedents = [];
-    required_context = [];
+    checks = [];
   }
 
 (* P -> {d1, d2, d3}, with d2 a stacked child of d1 and d3 an independent

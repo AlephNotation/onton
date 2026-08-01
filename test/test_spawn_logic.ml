@@ -19,35 +19,20 @@ let main = Branch.of_string "main"
 
 let make_gameplan patches =
   Gameplan.
-    {
-      project_name = "test-project";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
-      patches;
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-    }
+    { project_name = "test-project"; repo_owner = ""; repo_name = ""; patches }
 
 (* ========== Helper: prepare orchestrator with PRs and queued ops ========== *)
 
 (** Tick once to start eligible patches, then complete them and assign PR
     numbers so they become eligible for Respond/Rebase actions. *)
 let prepare_with_prs orch patches =
-  let orch, _effects, _actions =
+  let orch, _actions =
     Patch_controller.tick orch ~project_name:"test-project"
       ~gameplan:(make_gameplan patches)
   in
   List.fold patches ~init:orch ~f:(fun o (p : Patch.t) ->
       let a = Orchestrator.agent o p.Patch.id in
-      if a.Patch_agent.busy then
+      if Patch_agent.is_busy a then
         let o = Orchestrator.set_pr_number o p.Patch.id (Pr_number.of_int 1) in
         Orchestrator.complete o p.Patch.id
       else o)
@@ -86,7 +71,7 @@ let () =
           List.for_all spawns ~f:(fun s ->
               let pid = Onton.Spawn_logic.patch_id_of s in
               let a = Orchestrator.agent orch pid in
-              (not a.Patch_agent.busy) && not a.Patch_agent.merged)
+              (not (Patch_agent.is_busy a)) && not a.Patch_agent.merged)
         with _ -> false)
   in
 
@@ -127,7 +112,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions =
+              let orch, _actions =
                 Patch_controller.tick orch ~project_name:"test-project"
                   ~gameplan:(make_gameplan patches)
               in
@@ -245,7 +230,8 @@ let () =
               let a = Orchestrator.agent orch pid in
               if
                 (not (Patch_agent.has_pr a))
-                && (not a.Patch_agent.busy) && (not a.Patch_agent.merged)
+                && (not (Patch_agent.is_busy a))
+                && (not a.Patch_agent.merged)
                 && Graph.deps_satisfied graph pid ~has_merged ~has_pr:(fun p ->
                     Patch_agent.has_pr (Orchestrator.agent orch p))
                 && List.for_all
@@ -313,7 +299,8 @@ let () =
               let a = Orchestrator.agent orch pid in
               if
                 (not (Patch_agent.has_pr a))
-                && (not a.Patch_agent.busy) && (not a.Patch_agent.merged)
+                && (not (Patch_agent.is_busy a))
+                && (not a.Patch_agent.merged)
                 && Graph.deps_satisfied graph pid ~has_merged ~has_pr:(fun p ->
                     Patch_agent.has_pr (Orchestrator.agent orch p))
                 && List.for_all
@@ -379,7 +366,7 @@ let () =
                   (* No respond is ok whenever Respond preconditions fail *)
                   (not (Patch_agent.has_pr a))
                   || Patch_agent.needs_intervention a
-                  || a.Patch_agent.busy || a.Patch_agent.merged)
+                  || Patch_agent.is_busy a || a.Patch_agent.merged)
         with _ -> false)
   in
 

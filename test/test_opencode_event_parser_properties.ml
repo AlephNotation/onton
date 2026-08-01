@@ -27,15 +27,6 @@ let opencode_build_args_preserve_prompt =
       in
       List.mem prompt args)
 
-let opencode_auto_model_is_total =
-  QCheck2.Test.make
-    ~name:"opencode auto_model returns a model for any complexity" ~count:200
-    QCheck2.Gen.(option (int_range (-5) 10))
-    (fun complexity ->
-      match Opencode_event_parser.auto_model ~complexity with
-      | Some m -> String.length m > 0
-      | None -> false)
-
 (* [normalize_input_json] renames [filePath] -> [file_path] for read/write/edit
    tools and is the identity for other tools. Generating a value, we assert the
    value round-trips to itself for a non-rewriting tool. *)
@@ -50,7 +41,6 @@ let opencode_normalize_input_json_identity_for_unknown_tool =
 let opencode_parser_public_surface_is_linked =
   QCheck2.Test.make ~name:"opencode parser public surface is linked"
     QCheck2.Gen.unit (fun () ->
-      ignore Opencode_event_parser.auto_model;
       ignore Opencode_event_parser.build_args;
       ignore Opencode_event_parser.normalize_input_json;
       ignore Opencode_event_parser.parse_event;
@@ -60,6 +50,5 @@ let () =
   QCheck2.Test.check_exn opencode_normalizes_known_tool_names;
   QCheck2.Test.check_exn opencode_parse_event_is_total;
   QCheck2.Test.check_exn opencode_build_args_preserve_prompt;
-  QCheck2.Test.check_exn opencode_auto_model_is_total;
   QCheck2.Test.check_exn opencode_normalize_input_json_identity_for_unknown_tool;
   QCheck2.Test.check_exn opencode_parser_public_surface_is_linked

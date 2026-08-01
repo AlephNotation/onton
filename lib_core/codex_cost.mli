@@ -65,8 +65,8 @@ type model_pricing = {
 
 val model_pricing : string option -> model_pricing option
 (** Pricing table for known Codex model names. [None] for unknown / unset models
-    — callers treat that as "cost tracking disabled". Keep in sync with
-    {!Codex_backend.auto_model}. *)
+    — callers treat that as "cost tracking disabled". Keep in sync with the
+    configured model. *)
 
 val cost_nano_usd_for_tokens : int -> int64 -> int64
 (** [cost_nano_usd_for_tokens tokens nano_usd_per_1k] =

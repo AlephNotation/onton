@@ -114,13 +114,6 @@ let parse_event (line : string) : Types.Stream_event.t list =
           [ Types.Stream_event.Error msg ]
       | _ -> [])
 
-let auto_model ~complexity =
-  match complexity with
-  | Some 1 -> Some "anthropic/claude-haiku-4-5"
-  | Some 2 -> Some "anthropic/claude-sonnet-4-6"
-  | Some 3 -> Some "anthropic/claude-opus-4-7"
-  | Some _ | None -> Some "anthropic/claude-opus-4-7"
-
 let%test "build_args without continue (no model)" =
   let args =
     build_args ~model:None ~cwd_path:"/tmp/work" ~prompt:"do stuff"

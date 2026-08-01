@@ -25,17 +25,18 @@ open Base
 
     Checklist for future long-lived-specific changes:
     - Update this contract when adding or changing an RPC event mapping.
-    - Keep prompt-layer file paths at [<worktree>/.patch-agent/].
+    - Keep prompt-layer files inside the selected worker sandbox state root;
+      never place controller-authored inputs in the Git worktree.
     - Revisit crash semantics before adding auto-respawn.
     - Add or update property/integration tests for any new lifecycle behavior.
 
     This backend receives the same layered prompt text that the existing
     ephemeral backends receive from [Patch_controller]. The gameplan and patch
-    layers are written once to [<worktree>/.patch-agent/], and each rendered
-    turn layer is delivered over the persistent patch-agent stdio RPC. Event
-    framing is delegated to [Patch_agent_rpc], and event interpretation is
-    delegated to [Patch_agent_event_mapper]. This module owns only process,
-    pipe, file, timeout, and lifecycle management.
+    layers are written once beneath the selected patch/backend/provider state
+    root, and each rendered turn layer is delivered over the persistent
+    patch-agent stdio RPC. Event framing is delegated to [Patch_agent_rpc], and
+    event interpretation is delegated to [Patch_agent_event_mapper]. This module
+    owns only process, pipe, file, timeout, and lifecycle management.
 
     The [start] config's [worktree] must be a native absolute path, because it
     is passed both as the subprocess working directory and as patch-agent's

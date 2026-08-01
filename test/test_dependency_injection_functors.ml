@@ -58,19 +58,11 @@ module Fake_env : Worktree_setup.ENV = struct
           Gameplan.project_name = "";
           repo_owner = "";
           repo_name = "";
-          problem_statement = "";
-          solution_summary = "";
-          final_state_spec = "";
           patches = [];
-          current_state_analysis = "";
-          explicit_opinions = "";
-          acceptance_criteria = [];
-          open_questions = [];
-          functional_changes = [];
-          context_resources = [];
-          reachability_traces = [];
         }
-      ~main_branch:(Branch.of_string "main") ()
+      ~main_branch:(Branch.of_string "main")
+      ~durable_store:(fun _ -> Ok ())
+      ()
 
   (* Eio resources require the scheduler; they are never dereferenced here
      because Worktree_setup.Make defines functions only. *)
@@ -131,26 +123,30 @@ module SD = Session_driver.Make (Fake_worktree) (Fake_sd_env)
    Runtime, clock, fs, project_name, owner, repo, transcripts, user_config,
    and mutexes are gone from the call surface — they live in Fake_sd_env now. *)
 let _check_narrowed_run :
+    sandbox_for_worktree:(worktree:string -> (Worker_sandbox.t, string) result) ->
     kind:Operation_kind.t option ->
     patch_id:Patch_id.t ->
     prompt:string ->
     agent:Patch_agent.t ->
     on_pr_detected:(Pr_number.t -> unit) ->
+    validate_before_push:
+      (worktree:string -> base_branch:Branch.t -> (unit, string) result) ->
     backend:Llm_backend.t ->
-    complexity:int option ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list =
   SD.run
 
 (* Compile-time assertion: run_long_lived accepts only per-session inputs. *)
 let _check_narrowed_run_long_lived :
     sw:Eio.Switch.t ->
+    sandbox_for_worktree:(worktree:string -> (Worker_sandbox.t, string) result) ->
     kind:Operation_kind.t option ->
     patch_id:Patch_id.t ->
     prompt:string ->
     agent:Patch_agent.t ->
     on_pr_detected:(Pr_number.t -> unit) ->
+    validate_before_push:
+      (worktree:string -> base_branch:Branch.t -> (unit, string) result) ->
     session:SD.long_lived_session ->
-    complexity:int option ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list =
   SD.run_long_lived
 
@@ -163,21 +159,13 @@ let () =
       Gameplan.project_name = "test";
       repo_owner = "";
       repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
       patches = [];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
     }
   in
   let runtime =
-    Runtime.create ~gameplan ~main_branch:(Branch.of_string "main") ()
+    Runtime.create ~gameplan ~main_branch:(Branch.of_string "main")
+      ~durable_store:(fun _ -> Ok ())
+      ()
   in
   let module Env : Worktree_setup.ENV = struct
     let runtime = runtime
@@ -229,13 +217,16 @@ let () =
      Runtime, clock, fs, project_name, owner, repo, transcripts, user_config,
      and mutexes are gone from the call surface — they live in SD_Env now. *)
   let check_narrowed_run :
+      sandbox_for_worktree:
+        (worktree:string -> (Worker_sandbox.t, string) result) ->
       kind:Operation_kind.t option ->
       patch_id:Patch_id.t ->
       prompt:string ->
       agent:Patch_agent.t ->
       on_pr_detected:(Pr_number.t -> unit) ->
+      validate_before_push:
+        (worktree:string -> base_branch:Branch.t -> (unit, string) result) ->
       backend:Llm_backend.t ->
-      complexity:int option ->
       [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list =
     SD.run
   in
@@ -294,24 +285,26 @@ let () =
       : patch_id:_ -> agent:_ -> ?branch:_ -> ?base_ref:_ -> unit -> _);
   ignore
     (SD3.run
-      : kind:_ ->
-        patch_id:_ ->
-        prompt:_ ->
-        agent:_ ->
-        on_pr_detected:_ ->
-        backend:_ ->
-        complexity:_ ->
-        _);
-  ignore
-    (SD3.run_long_lived
-      : sw:_ ->
+      : sandbox_for_worktree:_ ->
         kind:_ ->
         patch_id:_ ->
         prompt:_ ->
         agent:_ ->
         on_pr_detected:_ ->
+        validate_before_push:_ ->
+        backend:_ ->
+        _);
+  ignore
+    (SD3.run_long_lived
+      : sw:_ ->
+        sandbox_for_worktree:_ ->
+        kind:_ ->
+        patch_id:_ ->
+        prompt:_ ->
+        agent:_ ->
+        on_pr_detected:_ ->
+        validate_before_push:_ ->
         session:_ ->
-        complexity:_ ->
         _);
   print_endline
     "Patch 3: Make_fibers env derivation (WS + SD from shared fiber env): OK"

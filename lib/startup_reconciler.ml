@@ -58,7 +58,7 @@ let recover_worktrees_with (module W : Worktree.S) ~patches =
     sessions that need resetting. *)
 let find_stale_busy ~agents =
   List.filter_map agents ~f:(fun (agent : Patch_agent.t) ->
-      if agent.busy then Some agent.patch_id else None)
+      if Patch_agent.is_busy agent then Some agent.patch_id else None)
 
 module Make (F : Forge.S) (W : Worktree.S) = struct
   (** Query GitHub REST API for a branch, returning discovery info for the first

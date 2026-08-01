@@ -1,5 +1,5 @@
 (* @archlint.module interface
-   @archlint.domain gameplan-parser *)
+   @archlint.domain plan-parser *)
 
 open Base
 
@@ -9,7 +9,3 @@ type t = {
 }
 
 val parse_json_string : string -> (t, string) Result.t
-val parse_json_file : string -> (t, string) Result.t
-
-val parse_file : string -> (t, string) Result.t
-(** [parse_file path] parses a JSON gameplan file. *)

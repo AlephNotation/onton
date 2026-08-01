@@ -8,15 +8,44 @@ open Operation_kind
 type session_fallback = Fresh_available | Tried_fresh | Given_up
 [@@deriving show, eq, sexp_of, compare, yojson]
 
+type session_state =
+  | Not_started
+  | Started of { resume_id : string option; fallback : session_fallback }
+[@@deriving show, eq, sexp_of, compare]
+
 type op_state = Queued | Running
 [@@deriving show, eq, sexp_of, compare, yojson]
+
+type activity =
+  | Inactive
+  | Interrupted of {
+      operation : Operation_kind.t option;
+      message_id : Message_id.t option;
+    }
+  | Active of {
+      operation : Operation_kind.t option;
+      phase : op_state;
+      message_id : Message_id.t option;
+    }
+[@@deriving show, eq, sexp_of, compare]
+
+type automerge_state =
+  | Disabled
+  | Enabled of { deadline : float option; failure_count : int }
+[@@deriving show, eq, sexp_of, compare]
+
+type review_state =
+  | Review_not_requested
+  | Review_requested of string
+  | Review_failed of { head_oid : string; error : string }
+[@@deriving show, eq, sexp_of, compare]
 
 type t = {
   patch_id : Patch_id.t;
   branch : Branch.t;
   pr_status : Patch_pr_status.t;
-  has_session : bool;
-  busy : bool;
+  session : session_state;
+  activity : activity;
   merged : bool;
   queue : Operation_kind.t list;
   satisfies : bool;
@@ -26,7 +55,6 @@ type t = {
   notified_base_branch : Branch.t option;
   ci_failure_count : int;
   max_ci_failures : int;
-  session_fallback : session_fallback;
   human_messages : string list;
   inflight_human_messages : string list;
   ci_checks : Ci_check.t list;
@@ -99,35 +127,11 @@ type t = {
           older entries serve as divergence fallbacks for
           {!Rebase_decision.plan}. Capped at {!Anchor_history.cap}. *)
   checks_passing : bool;
-  current_op : Operation_kind.t option;
-  current_op_state : op_state;
-      (** Sub-state of [current_op]. [Queued] when the action fiber is alive but
-          the actual work has not begun (waiting on the Claude semaphore, or in
-          pre-work setup). [Running] once the work has started. Meaningful only
-          when [busy] is true; reset to [Queued] on [complete]. Drives the TUI
-          "(queued)" suffix so a saturated semaphore is distinguishable from an
-          actively-running session. *)
-  current_message_id : Message_id.t option;
   generation : int;
   worktree_path : string option;
   branch_blocked : bool;
-  llm_session_id : string option;
-  automerge_enabled : bool;
-  automerge_deadline : float option;
-      (** Unix timestamp at which the supervisor should merge the PR if the
-          patch is still approved. [None] when automerge is disabled or the
-          patch has not yet been observed in the approved state. *)
-  automerge_inflight : bool;
-      (** [true] between the moment [reconcile_automerge] claims a merge
-          decision and the moment the merge call resolves (success or failure).
-          Prevents a second overlapping tick from issuing the same merge call.
-      *)
-  review_requested_for_oid : string option;
-  review_request_inflight : bool;
-  automerge_failure_count : int;
-      (** Consecutive merge-call failures. After [automerge_max_failures] the
-          patch is no longer an automerge candidate until the user re-toggles
-          automerge or a successful merge resets the counter. *)
+  automerge : automerge_state;
+  review : review_state;
   delivered_ci_run_ids : int list;
       (** CheckRun [databaseId]s that have already been delivered to the agent
           as CI feedback. Maintained sorted and deduplicated. Used so a single
@@ -141,9 +145,65 @@ type t = {
 let pp fmt t = Sexp.pp_hum fmt (sexp_of_t t)
 let show t = Sexp.to_string_hum (sexp_of_t t)
 let has_pr t = Patch_pr_status.has_pr t.pr_status
-let is_pr_present t = Patch_pr_status.is_pr_present t.pr_status
-let is_pr_missing t = Patch_pr_status.is_missing t.pr_status
 let pr_number t = Patch_pr_status.pr_number t.pr_status
+
+let is_busy t =
+  match t.activity with Inactive | Interrupted _ -> false | Active _ -> true
+
+let current_op t =
+  match t.activity with
+  | Inactive -> None
+  | Interrupted interrupted -> interrupted.operation
+  | Active active -> active.operation
+
+let current_op_state t =
+  match t.activity with
+  | Inactive -> None
+  | Interrupted _ -> Some Queued
+  | Active active -> Some active.phase
+
+let current_message_id t =
+  match t.activity with
+  | Inactive -> None
+  | Interrupted interrupted -> interrupted.message_id
+  | Active active -> active.message_id
+
+let has_session t =
+  match t.session with Not_started -> false | Started _ -> true
+
+let session_fallback t =
+  match t.session with
+  | Not_started -> Fresh_available
+  | Started session -> session.fallback
+
+let llm_session_id t =
+  match t.session with
+  | Not_started -> None
+  | Started session -> session.resume_id
+
+let automerge_enabled t =
+  match t.automerge with Disabled -> false | Enabled _ -> true
+
+let automerge_deadline t =
+  match t.automerge with Disabled -> None | Enabled state -> state.deadline
+
+let automerge_failure_count t =
+  match t.automerge with Disabled -> 0 | Enabled state -> state.failure_count
+
+let review_requested_for_oid t =
+  match t.review with
+  | Review_requested oid -> Some oid
+  | Review_not_requested | Review_failed _ -> None
+
+let review_failure t =
+  match t.review with
+  | Review_failed { head_oid; error } -> Some (head_oid, error)
+  | Review_not_requested | Review_requested _ -> None
+
+let start_session = function
+  | Not_started -> Started { resume_id = None; fallback = Fresh_available }
+  | Started _ as session -> session
+
 let default_max_ci_failures = 3
 
 (* Single source of truth for the needs-intervention reason. Returns the
@@ -153,14 +213,13 @@ let default_max_ci_failures = 3
    drift. The label strings are stable and intended to land verbatim in the
    event log so operators can grep for "why is this patch stuck?" by
    reason. *)
-let intervention_reason_of_fields ~merged ~has_pr ~is_pr_missing
-    ~session_given_up ~human_in_queue ~ci_failure_count ~max_ci_failures
+let intervention_reason_of_fields ~merged ~has_pr ~session_given_up
+    ~human_in_queue ~ci_failure_count ~max_ci_failures
     ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
     ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
     ~pr_body_artifact_miss_count ~review_unresolved_cycle_count =
   if merged then None
   else if session_given_up then Some "session_fallback=given_up"
-  else if is_pr_missing then Some "pr_missing"
     (* The Human exemption lets a newly-arrived human message be delivered
        even to an agent with a high ci_failure_count or other failure state.
        However, the exemption does NOT apply when session_fallback = Given_up:
@@ -190,31 +249,44 @@ let intervention_reason_of_fields ~merged ~has_pr ~is_pr_missing
   else None
 
 let intervention_reason t =
-  intervention_reason_of_fields ~merged:t.merged ~has_pr:(has_pr t)
-    ~is_pr_missing:(is_pr_missing t)
-    ~session_given_up:(equal_session_fallback t.session_fallback Given_up)
-    ~human_in_queue:
-      (List.mem t.queue Operation_kind.Human ~equal:Operation_kind.equal)
-    ~ci_failure_count:t.ci_failure_count ~max_ci_failures:t.max_ci_failures
-    ~start_attempts_without_pr:t.start_attempts_without_pr
-    ~conflict_noop_count:t.conflict_noop_count
-    ~no_commits_push_count:t.no_commits_push_count
-    ~context_exhaustion_count:t.context_exhaustion_count
-    ~push_failure_count:t.push_failure_count
-    ~rebase_failure_count:t.rebase_failure_count
-    ~pr_body_artifact_miss_count:t.pr_body_artifact_miss_count
-    ~review_unresolved_cycle_count:t.review_unresolved_cycle_count
+  let ordinary =
+    intervention_reason_of_fields ~merged:t.merged ~has_pr:(has_pr t)
+      ~session_given_up:(equal_session_fallback (session_fallback t) Given_up)
+      ~human_in_queue:
+        (List.mem t.queue Operation_kind.Human ~equal:Operation_kind.equal)
+      ~ci_failure_count:t.ci_failure_count ~max_ci_failures:t.max_ci_failures
+      ~start_attempts_without_pr:t.start_attempts_without_pr
+      ~conflict_noop_count:t.conflict_noop_count
+      ~no_commits_push_count:t.no_commits_push_count
+      ~context_exhaustion_count:t.context_exhaustion_count
+      ~push_failure_count:t.push_failure_count
+      ~rebase_failure_count:t.rebase_failure_count
+      ~pr_body_artifact_miss_count:t.pr_body_artifact_miss_count
+      ~review_unresolved_cycle_count:t.review_unresolved_cycle_count
+  in
+  match ordinary with
+  | Some _ as reason -> reason
+  | None -> (
+      match (t.head_oid, t.review) with
+      | Some current, Review_failed { head_oid; _ }
+        when String.equal current head_oid ->
+          Some "review_request_failed"
+      | Some _, Review_not_requested
+      | Some _, Review_requested _
+      | Some _, Review_failed _
+      | None, _ ->
+          None)
 
 let needs_intervention t = Option.is_some (intervention_reason t)
 
-let needs_intervention_of_fields ~merged ~has_pr ~is_pr_missing
-    ~session_given_up ~human_in_queue ~ci_failure_count ~max_ci_failures
+let needs_intervention_of_fields ~merged ~has_pr ~session_given_up
+    ~human_in_queue ~ci_failure_count ~max_ci_failures
     ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
     ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
     ~pr_body_artifact_miss_count ~review_unresolved_cycle_count =
   Option.is_some
-    (intervention_reason_of_fields ~merged ~has_pr ~is_pr_missing
-       ~session_given_up ~human_in_queue ~ci_failure_count ~max_ci_failures
+    (intervention_reason_of_fields ~merged ~has_pr ~session_given_up
+       ~human_in_queue ~ci_failure_count ~max_ci_failures
        ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
        ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
        ~pr_body_artifact_miss_count ~review_unresolved_cycle_count)
@@ -224,8 +296,8 @@ let create ~branch ?(max_ci_failures = default_max_ci_failures) patch_id =
     patch_id;
     branch;
     pr_status = Patch_pr_status.Absent;
-    has_session = false;
-    busy = false;
+    session = Not_started;
+    activity = Inactive;
     merged = false;
     queue = [];
     satisfies = false;
@@ -235,7 +307,6 @@ let create ~branch ?(max_ci_failures = default_max_ci_failures) patch_id =
     notified_base_branch = None;
     ci_failure_count = 0;
     max_ci_failures;
-    session_fallback = Fresh_available;
     human_messages = [];
     inflight_human_messages = [];
     ci_checks = [];
@@ -265,81 +336,11 @@ let create ~branch ?(max_ci_failures = default_max_ci_failures) patch_id =
     branch_rebased_onto_sha = None;
     anchor_history = Anchor_history.empty;
     checks_passing = false;
-    current_op = None;
-    current_op_state = Queued;
-    current_message_id = None;
     generation = 0;
     worktree_path = None;
     branch_blocked = false;
-    llm_session_id = None;
-    automerge_enabled = false;
-    automerge_deadline = None;
-    automerge_inflight = false;
-    review_requested_for_oid = None;
-    review_request_inflight = false;
-    automerge_failure_count = 0;
-    delivered_ci_run_ids = [];
-  }
-
-let create_adhoc ~patch_id ~branch ~pr_number ~max_ci_failures =
-  {
-    patch_id;
-    branch;
-    pr_status = Patch_pr_status.Present pr_number;
-    has_session = false;
-    busy = false;
-    merged = false;
-    queue = [];
-    satisfies = false;
-    changed = false;
-    has_conflict = false;
-    base_branch = None;
-    notified_base_branch = None;
-    ci_failure_count = 0;
-    max_ci_failures;
-    session_fallback = Fresh_available;
-    human_messages = [];
-    inflight_human_messages = [];
-    ci_checks = [];
-    merge_ready = false;
-    head_oid = None;
-    review_decision = None;
-    unresolved_comment_count = 0;
-    mergeability_unknown = false;
-    merge_queue_required = false;
-    merge_queue_entry = None;
-    merge_commit_sha = None;
-    (* Defaults to [true] ("no known missing sibling"): the poller recomputes
-       this every tick before any fan-in start can become eligible, and a fresh
-       agent has no merged deps yet. Fail-open at birth, recomputed-to-truth. *)
-    base_contains_merged_siblings = true;
-    is_draft = false;
-    pr_body_delivered = true;
-    pr_body_artifact_miss_count = 0;
-    review_unresolved_cycle_count = 0;
-    start_attempts_without_pr = 0;
-    conflict_noop_count = 0;
-    no_commits_push_count = 0;
-    context_exhaustion_count = 0;
-    push_failure_count = 0;
-    rebase_failure_count = 0;
-    branch_rebased_onto = None;
-    branch_rebased_onto_sha = None;
-    anchor_history = Anchor_history.empty;
-    checks_passing = false;
-    current_op = None;
-    current_op_state = Queued;
-    current_message_id = None;
-    generation = 0;
-    worktree_path = None;
-    branch_blocked = false;
-    llm_session_id = None;
-    automerge_enabled = false;
-    automerge_deadline = None;
-    automerge_inflight = false;
-    review_requested_for_oid = None;
-    review_request_inflight = false;
-    automerge_failure_count = 0;
+    automerge = Disabled;
+    review = Review_not_requested;
     delivered_ci_run_ids = [];
   }
 
@@ -360,17 +361,26 @@ let add_human_messages t msgs =
   { t with human_messages = List.append t.human_messages msgs }
 
 let set_session_failed t =
-  match t.session_fallback with
-  | Fresh_available -> { t with session_fallback = Tried_fresh }
-  | Tried_fresh | Given_up -> t
+  match t.session with
+  | Not_started -> t
+  | Started ({ fallback = Fresh_available; _ } as session) ->
+      { t with session = Started { session with fallback = Tried_fresh } }
+  | Started { fallback = Tried_fresh | Given_up; _ } -> t
 
 let set_tried_fresh t =
-  match t.session_fallback with
-  | Fresh_available -> { t with session_fallback = Tried_fresh }
-  | Tried_fresh -> { t with session_fallback = Given_up }
-  | Given_up -> t
+  match t.session with
+  | Not_started -> t
+  | Started ({ fallback = Fresh_available; _ } as session) ->
+      { t with session = Started { session with fallback = Tried_fresh } }
+  | Started ({ fallback = Tried_fresh; _ } as session) ->
+      { t with session = Started { session with fallback = Given_up } }
+  | Started { fallback = Given_up; _ } -> t
 
-let clear_session_fallback t = { t with session_fallback = Fresh_available }
+let clear_session_fallback t =
+  match t.session with
+  | Not_started -> t
+  | Started session ->
+      { t with session = Started { session with fallback = Fresh_available } }
 
 (** Handle a Claude session failure. Pure decision logic:
     - Start path (no PR) + fresh failure: reset to Fresh_available for retry
@@ -379,7 +389,10 @@ let clear_session_fallback t = { t with session_fallback = Fresh_available }
 let on_session_failure t ~is_fresh =
   if (not (has_pr t)) && is_fresh then
     (* Start path fresh failure: full reset for clean retry *)
-    { t with session_fallback = Fresh_available; llm_session_id = None }
+    {
+      t with
+      session = Started { resume_id = None; fallback = Fresh_available };
+    }
   else if is_fresh then set_tried_fresh t
   else set_session_failed t
 
@@ -404,7 +417,10 @@ let on_context_exhausted t =
   {
     t with
     context_exhaustion_count = t.context_exhaustion_count + 1;
-    llm_session_id = None;
+    session =
+      (match t.session with
+      | Not_started -> Not_started
+      | Started session -> Started { session with resume_id = None });
   }
 
 let reset_context_exhaustion_count t = { t with context_exhaustion_count = 0 }
@@ -433,7 +449,7 @@ let reset_review_unresolved_cycle_count t =
 
 let set_base_branch t branch =
   let notified =
-    if t.has_session then
+    if has_session t then
       match t.notified_base_branch with None -> Some branch | some -> some
     else t.notified_base_branch
   in
@@ -489,7 +505,8 @@ let set_worktree_path t path = { t with worktree_path = Some path }
    reads [Unknown], surfaced as [mergeStateStatus = UNKNOWN]) — see
    [Patch_controller.automerge_transient_hold]. *)
 let is_approved_modulo_merge_ready t ~main_branch =
-  is_pr_present t && (not t.busy)
+  has_pr t
+  && (not (is_busy t))
   && (not (needs_intervention t))
   && (not t.is_draft) && (not t.branch_blocked)
   && Option.equal Branch.equal t.base_branch (Some main_branch)
@@ -502,16 +519,20 @@ let should_request_review t ~main_branch =
   && (not t.mergeability_unknown)
   && t.checks_passing
   && t.unresolved_comment_count = 0
-  && (not t.is_draft) && (not t.busy)
+  && (not t.is_draft)
+  && (not (is_busy t))
   && (not (needs_intervention t))
   && Option.equal Branch.equal t.base_branch (Some main_branch)
   && Option.equal String.equal t.review_decision (Some "REVIEW_REQUIRED")
-  && (match t.head_oid with
-    | None -> false
-    | Some head_oid ->
-        not
-          (Option.equal String.equal (Some head_oid) t.review_requested_for_oid))
-  && not t.review_request_inflight
+  &&
+  match t.head_oid with
+  | None -> false
+  | Some head_oid -> (
+      match t.review with
+      | Review_not_requested -> true
+      | Review_requested requested -> not (String.equal head_oid requested)
+      | Review_failed { head_oid = failed; _ } ->
+          not (String.equal head_oid failed))
 
 let increment_ci_failure_count t =
   { t with ci_failure_count = t.ci_failure_count + 1 }
@@ -536,63 +557,93 @@ let record_delivered_ci_run_ids t ids =
 
 let set_branch_blocked t = { t with branch_blocked = true }
 let clear_branch_blocked t = { t with branch_blocked = false }
-let set_current_message_id t current_message_id = { t with current_message_id }
+
+let set_current_message_id t message_id =
+  match t.activity with
+  | Inactive ->
+      if Option.is_none message_id then t
+      else invalid_arg "Patch_agent.set_current_message_id: patch is idle"
+  | Interrupted interrupted ->
+      { t with activity = Interrupted { interrupted with message_id } }
+  | Active active -> { t with activity = Active { active with message_id } }
+
 let bump_generation t = { t with generation = t.generation + 1 }
-let set_llm_session_id t llm_session_id = { t with llm_session_id }
+
+let set_llm_session_id t resume_id =
+  match (t.session, resume_id) with
+  | Not_started, None -> t
+  | Not_started, Some _ ->
+      { t with session = Started { resume_id; fallback = Fresh_available } }
+  | Started session, _ ->
+      { t with session = Started { session with resume_id } }
 
 let mark_inflight_human_messages_delivered t =
-  if Option.equal Operation_kind.equal t.current_op (Some Operation_kind.Human)
+  if
+    Option.equal Operation_kind.equal (current_op t) (Some Operation_kind.Human)
   then { t with inflight_human_messages = [] }
   else t
 
 let set_automerge_enabled t v =
-  if Bool.equal t.automerge_enabled v then t
-  else
-    (* Toggling automerge always resets the failure counter and clears any
-       inflight flag, so a previously-capped patch can retry and any stale
-       inflight state (e.g. from a crashed supervisor) cannot permanently block
-       reconciliation. Disabling additionally clears the pending deadline. *)
-    let automerge_deadline = if v then t.automerge_deadline else None in
-    {
-      t with
-      automerge_enabled = v;
-      automerge_deadline;
-      automerge_inflight = false;
-      automerge_failure_count = 0;
-    }
+  match (t.automerge, v) with
+  | Disabled, false | Enabled _, true -> t
+  | Disabled, true ->
+      { t with automerge = Enabled { deadline = None; failure_count = 0 } }
+  | Enabled _, false -> { t with automerge = Disabled }
 
 let set_automerge_deadline t deadline =
-  { t with automerge_deadline = Some deadline }
+  match t.automerge with
+  | Disabled -> t
+  | Enabled state ->
+      { t with automerge = Enabled { state with deadline = Some deadline } }
 
-let clear_automerge_deadline t = { t with automerge_deadline = None }
-let set_automerge_inflight t v = { t with automerge_inflight = v }
+let clear_automerge_deadline t =
+  match t.automerge with
+  | Disabled -> t
+  | Enabled state ->
+      { t with automerge = Enabled { state with deadline = None } }
 
-let set_review_requested_for_oid t oid =
-  { t with review_requested_for_oid = oid }
+let mark_review_requested t head_oid =
+  { t with review = Review_requested head_oid }
 
-let set_review_request_inflight t v = { t with review_request_inflight = v }
+let mark_review_failed t ~head_oid ~error =
+  { t with review = Review_failed { head_oid; error } }
 
 let increment_automerge_failure_count t =
-  { t with automerge_failure_count = t.automerge_failure_count + 1 }
+  match t.automerge with
+  | Disabled -> t
+  | Enabled state ->
+      {
+        t with
+        automerge =
+          Enabled { state with failure_count = state.failure_count + 1 };
+      }
 
-let reset_automerge_failure_count t = { t with automerge_failure_count = 0 }
+let reset_automerge_failure_count t =
+  match t.automerge with
+  | Disabled -> t
+  | Enabled state ->
+      { t with automerge = Enabled { state with failure_count = 0 } }
 
 let resume_current_message t ~op =
   {
     t with
-    busy = true;
-    has_session = true;
-    current_op = op;
-    current_op_state = Queued;
+    session = start_session t.session;
+    activity = Active { operation = op; phase = Queued; message_id = None };
   }
 
 let mark_running t =
-  if not t.busy then t else { t with current_op_state = Running }
+  match t.activity with
+  | Inactive | Interrupted _ -> t
+  | Active active ->
+      { t with activity = Active { active with phase = Running } }
 
 let reset_intervention_state t =
   {
     t with
-    session_fallback = Fresh_available;
+    session =
+      (match t.session with
+      | Not_started -> Not_started
+      | Started session -> Started { session with fallback = Fresh_available });
     ci_failure_count = 0;
     start_attempts_without_pr = 0;
     conflict_noop_count = 0;
@@ -602,33 +653,44 @@ let reset_intervention_state t =
     rebase_failure_count = 0;
     pr_body_artifact_miss_count = 0;
     review_unresolved_cycle_count = 0;
+    review =
+      (match t.review with
+      | Review_failed _ -> Review_not_requested
+      | Review_not_requested -> Review_not_requested
+      | Review_requested oid -> Review_requested oid);
   }
 
-let reset_busy t = if not t.busy then t else { t with busy = false }
+let reset_busy t =
+  match t.activity with
+  | Inactive | Interrupted _ -> t
+  | Active active ->
+      {
+        t with
+        activity =
+          Interrupted
+            { operation = active.operation; message_id = active.message_id };
+      }
 
-let restore ~patch_id ~branch ~pr_status ~has_session ~busy ~merged ~queue
+let restore ~patch_id ~branch ~pr_status ~session ~activity ~merged ~queue
     ~satisfies ~changed ~has_conflict ~base_branch ~notified_base_branch
     ~ci_failure_count ?(max_ci_failures = default_max_ci_failures)
-    ~session_fallback ~human_messages ~inflight_human_messages ~ci_checks
-    ~merge_ready ?(head_oid = None) ?(review_decision = None)
-    ?(unresolved_comment_count = 0) ~mergeability_unknown ~merge_queue_required
-    ~merge_queue_entry ~merge_commit_sha ~base_contains_merged_siblings
-    ~is_draft ~pr_body_delivered ~pr_body_artifact_miss_count
+    ~human_messages ~inflight_human_messages ~ci_checks ~merge_ready
+    ?(head_oid = None) ?(review_decision = None) ?(unresolved_comment_count = 0)
+    ~mergeability_unknown ~merge_queue_required ~merge_queue_entry
+    ~merge_commit_sha ~base_contains_merged_siblings ~is_draft
+    ~pr_body_delivered ~pr_body_artifact_miss_count
     ?(review_unresolved_cycle_count = 0) ~start_attempts_without_pr
     ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
     ~push_failure_count ~rebase_failure_count ~branch_rebased_onto
-    ~branch_rebased_onto_sha ~anchor_history ~checks_passing ~current_op
-    ~current_op_state ~current_message_id ~generation ~worktree_path
-    ~branch_blocked ~llm_session_id ~automerge_enabled ~automerge_deadline
-    ~automerge_inflight ?(review_requested_for_oid = None)
-    ?(review_request_inflight = false) ~automerge_failure_count
+    ~branch_rebased_onto_sha ~anchor_history ~checks_passing ~generation
+    ~worktree_path ~branch_blocked ~automerge ?(review = Review_not_requested)
     ~delivered_ci_run_ids () =
   {
     patch_id;
     branch;
     pr_status;
-    has_session;
-    busy;
+    session;
+    activity;
     merged;
     queue;
     satisfies;
@@ -638,7 +700,6 @@ let restore ~patch_id ~branch ~pr_status ~has_session ~busy ~merged ~queue
     notified_base_branch;
     ci_failure_count;
     max_ci_failures;
-    session_fallback;
     human_messages;
     inflight_human_messages;
     ci_checks;
@@ -665,19 +726,11 @@ let restore ~patch_id ~branch ~pr_status ~has_session ~busy ~merged ~queue
     branch_rebased_onto_sha;
     anchor_history;
     checks_passing;
-    current_op;
-    current_op_state;
-    current_message_id;
     generation;
     worktree_path;
     branch_blocked;
-    llm_session_id;
-    automerge_enabled;
-    automerge_deadline;
-    automerge_inflight;
-    review_requested_for_oid;
-    review_request_inflight;
-    automerge_failure_count;
+    automerge;
+    review;
     delivered_ci_run_ids;
   }
 
@@ -693,9 +746,9 @@ let set_pr_number t pr_number =
        base_branch / notified_base_branch — those are owned by [start]
        (bootstrap) and the poller (renumbering). *)
   match Patch_pr_status.classify_set_present t.pr_status pr_number with
-  | Patch_pr_status.Set_present_recover_same ->
+  | Patch_pr_status.Preserve_existing ->
       { t with pr_status = Patch_pr_status.set_present t.pr_status pr_number }
-  | Patch_pr_status.Set_present_adopt_new ->
+  | Patch_pr_status.Adopt_new ->
       {
         t with
         pr_status = Patch_pr_status.set_present t.pr_status pr_number;
@@ -703,6 +756,7 @@ let set_pr_number t pr_number =
         merge_ready = false;
         head_oid = None;
         review_decision = None;
+        review = Review_not_requested;
         unresolved_comment_count = 0;
         mergeability_unknown = false;
         pr_body_delivered = false;
@@ -714,17 +768,14 @@ let set_pr_number t pr_number =
       }
 
 let clear_pr t =
-  (* Gameplan-recreate path: a gameplan patch's PR was closed and the next
-     [Start] should open a fresh one. Tightens to Present-only via
-     [Patch_pr_status.clear_for_recreate]. Calling this on Absent or Missing
-     is a caller bug — see [mark_pr_missing] for the ad-hoc-vanished path. *)
   {
     t with
-    pr_status = Patch_pr_status.clear_for_recreate t.pr_status;
+    pr_status = Patch_pr_status.clear t.pr_status;
     is_draft = false;
     merge_ready = false;
     head_oid = None;
     review_decision = None;
+    review = Review_not_requested;
     unresolved_comment_count = 0;
     mergeability_unknown = false;
     checks_passing = false;
@@ -735,42 +786,13 @@ let clear_pr t =
     delivered_ci_run_ids = [];
   }
 
-let mark_pr_missing t =
-  (* Minimal transition. Clears only the world-state assertions that are no
-     longer authoritative (is_draft, merge_ready, checks_passing, ci_checks);
-     preserves everything else so a Missing -> Present recovery via
-     [set_pr_number] (same-number, [Set_present_recover_same]) is a near
-     no-op.
-
-     Queue is preserved: the planner gates Rebase/Respond on [is_pr_present]
-     so PR-coupled entries cannot fire on a Missing agent. [busy] /
-     [current_op] are preserved too — any inflight session runs to
-     completion against the recorded number; its outcome is applied to the
-     agent normally (the session-level retry counters track real failures
-     even when GitHub returns 404). *)
-  {
-    t with
-    pr_status = Patch_pr_status.mark_missing t.pr_status;
-    is_draft = false;
-    merge_ready = false;
-    head_oid = None;
-    review_decision = None;
-    unresolved_comment_count = 0;
-    mergeability_unknown = false;
-    checks_passing = false;
-    ci_checks = [];
-  }
-
 let start t ~base_branch =
   if has_pr t then invalid_arg "Patch_agent.start: patch already has a PR";
-  if t.busy then invalid_arg "Patch_agent.start: patch is already busy";
+  if is_busy t then invalid_arg "Patch_agent.start: patch is already busy";
   {
     t with
-    has_session = true;
-    busy = true;
-    current_op = None;
-    current_op_state = Queued;
-    current_message_id = None;
+    session = start_session t.session;
+    activity = Active { operation = None; phase = Queued; message_id = None };
     satisfies = true;
     base_branch = Some base_branch;
     notified_base_branch = Some base_branch;
@@ -804,11 +826,10 @@ let record_anchor t anchor =
 let anchor_history t = t.anchor_history
 
 let rebase t ~base_branch =
-  if not (is_pr_present t) then
-    invalid_arg "Patch_agent.rebase: patch has no PR (or PR is missing)";
+  if not (has_pr t) then invalid_arg "Patch_agent.rebase: patch has no PR";
   if t.merged then invalid_arg "Patch_agent.rebase: patch is merged";
 
-  if t.busy then invalid_arg "Patch_agent.rebase: patch is busy";
+  if is_busy t then invalid_arg "Patch_agent.rebase: patch is busy";
   if not (List.mem t.queue Operation_kind.Rebase ~equal:Operation_kind.equal)
   then invalid_arg "Patch_agent.rebase: Rebase not in queue";
   (match highest_priority t with
@@ -820,11 +841,9 @@ let rebase t ~base_branch =
   in
   {
     t with
-    has_session = true;
-    busy = true;
-    current_op = Some Rebase;
-    current_op_state = Queued;
-    current_message_id = None;
+    session = start_session t.session;
+    activity =
+      Active { operation = Some Rebase; phase = Queued; message_id = None };
     queue;
     base_branch = Some base_branch;
     notified_base_branch =
@@ -837,11 +856,10 @@ let rebase t ~base_branch =
   }
 
 let respond t k =
-  if not (is_pr_present t) then
-    invalid_arg "Patch_agent.respond: patch has no PR (or PR is missing)";
+  if not (has_pr t) then invalid_arg "Patch_agent.respond: patch has no PR";
   if t.merged then invalid_arg "Patch_agent.respond: patch is merged";
 
-  if t.busy then invalid_arg "Patch_agent.respond: patch is busy";
+  if is_busy t then invalid_arg "Patch_agent.respond: patch is busy";
   if needs_intervention t then
     invalid_arg "Patch_agent.respond: patch needs intervention";
   if Operation_kind.equal k Operation_kind.Rebase then
@@ -869,11 +887,8 @@ let respond t k =
      (i.e. had at least one failure conclusion) and ran to completion. *)
   {
     t with
-    has_session = true;
-    busy = true;
-    current_op = Some k;
-    current_op_state = Queued;
-    current_message_id = None;
+    session = start_session t.session;
+    activity = Active { operation = Some k; phase = Queued; message_id = None };
     queue;
     satisfies;
     changed;
@@ -888,16 +903,8 @@ let respond t k =
   }
 
 let complete t =
-  if not t.busy then t
-  else
-    {
-      t with
-      busy = false;
-      current_op = None;
-      current_op_state = Queued;
-      current_message_id = None;
-      inflight_human_messages = [];
-    }
+  if not (is_busy t) then t
+  else { t with activity = Inactive; inflight_human_messages = [] }
 
 (* -- Tests for session failure recovery -- *)
 
@@ -905,37 +912,67 @@ let%test
     "on_session_failure: start path fresh resets to Fresh_available and clears \
      session" =
   let t = create ~branch:(Branch.of_string "b1") (Patch_id.of_string "1") in
-  let t = { t with busy = true; session_fallback = Tried_fresh } in
+  let t =
+    {
+      t with
+      activity = Active { operation = None; phase = Running; message_id = None };
+      session = Started { resume_id = None; fallback = Tried_fresh };
+    }
+  in
   let t = on_session_failure t ~is_fresh:true in
-  equal_session_fallback t.session_fallback Fresh_available
+  equal_session_fallback (session_fallback t) Fresh_available
 
 let%test "on_session_failure: resume failure escalates to Tried_fresh" =
   let t = create ~branch:(Branch.of_string "b1") (Patch_id.of_string "1") in
-  let t = { t with busy = true; session_fallback = Fresh_available } in
+  let t =
+    {
+      t with
+      activity = Active { operation = None; phase = Running; message_id = None };
+      session = Started { resume_id = None; fallback = Fresh_available };
+    }
+  in
   let t = on_session_failure t ~is_fresh:false in
-  equal_session_fallback t.session_fallback Tried_fresh
+  equal_session_fallback (session_fallback t) Tried_fresh
 
 let%test "on_session_failure: respond path fresh escalates to Tried_fresh" =
   let t = create ~branch:(Branch.of_string "b1") (Patch_id.of_string "1") in
   let t = set_pr_number t (Pr_number.of_int 1) in
-  let t = { t with busy = true; session_fallback = Fresh_available } in
+  let t =
+    {
+      t with
+      activity = Active { operation = None; phase = Running; message_id = None };
+      session = Started { resume_id = None; fallback = Fresh_available };
+    }
+  in
   let t = on_session_failure t ~is_fresh:true in
-  equal_session_fallback t.session_fallback Tried_fresh
+  equal_session_fallback (session_fallback t) Tried_fresh
 
 let%test
     "on_session_failure: respond path second fresh failure escalates to \
      Given_up" =
   let t = create ~branch:(Branch.of_string "b1") (Patch_id.of_string "1") in
   let t = set_pr_number t (Pr_number.of_int 1) in
-  let t = { t with busy = true; session_fallback = Tried_fresh } in
+  let t =
+    {
+      t with
+      activity = Active { operation = None; phase = Running; message_id = None };
+      session = Started { resume_id = None; fallback = Tried_fresh };
+    }
+  in
   let t = on_session_failure t ~is_fresh:true in
-  equal_session_fallback t.session_fallback Given_up
+  equal_session_fallback (session_fallback t) Given_up
 
 let%test
     "on_session_failure: start fresh failure + complete does not set \
      needs_intervention" =
   let t = create ~branch:(Branch.of_string "b1") (Patch_id.of_string "1") in
-  let t = { t with busy = true; session_fallback = Tried_fresh } in
+  let t =
+    {
+      t with
+      activity = Active { operation = None; phase = Running; message_id = None };
+      session = Started { resume_id = None; fallback = Tried_fresh };
+    }
+  in
   let t = on_session_failure t ~is_fresh:true in
   let t = complete t in
   not (needs_intervention t)

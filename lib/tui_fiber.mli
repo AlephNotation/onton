@@ -15,13 +15,8 @@ module Tui_env : sig
     val tui_state : Tui_state.t
     val backend_name : string
     val version : string
-    val resolve_routing : complexity:int option -> Backend_routing.decision
+    val backend_decision : Backend_routing.decision
     val find_pr_number : patch_id:Patch_id.t -> Pr_number.t option
-
-    val register_pr_number :
-      patch_id:Patch_id.t -> pr_number:Pr_number.t -> unit
-
-    val unregister_pr_number : patch_id:Patch_id.t -> unit
   end
 end
 

@@ -8,10 +8,10 @@ open Onton_core
 (** Smoke integration tests for all LLM backends.
 
     Each test spawns [printf] to emit representative NDJSON on stdout, feeds it
-    through [Llm_backend.spawn_and_stream] with the backend's parser, and
-    asserts the expected [Stream_event.t] list is collected. This exercises the
-    full subprocess → line-reading → parsing → callback pipeline without
-    requiring any LLM CLI to be installed. *)
+    through [Llm_backend.For_test.spawn_and_stream_raw] with the backend's
+    parser, and asserts the expected [Stream_event.t] list is collected. This
+    exercises the full subprocess → line-reading → parsing → callback pipeline
+    without requiring any LLM CLI to be installed. *)
 
 let smoke ?setsid_exec ~process_mgr ~clock ~cwd ~ndjson ~process_line () =
   let events = ref [] in
@@ -21,8 +21,9 @@ let smoke ?setsid_exec ~process_mgr ~clock ~cwd ~ndjson ~process_line () =
   let env = Unix.environment () in
   let patch_id = Types.Patch_id.of_string "smoke" in
   let result =
-    Llm_backend.spawn_and_stream ~process_mgr ~clock ~timeout:60.0 ~cwd ~env
-      ~setsid_exec ~args ~session_uuid:None ~patch_id ~process_line ~on_event
+    Llm_backend.For_test.spawn_and_stream_raw ~process_mgr ~clock ~timeout:60.0
+      ~cwd ~env ~setsid_exec ~process_group:false ~args ~session_uuid:None
+      ~patch_id ~process_line ~on_event
   in
   (result, List.rev !events)
 
@@ -110,8 +111,9 @@ let () =
       ]
     in
     let result =
-      Llm_backend.spawn_and_stream ~process_mgr ~clock ~timeout:60.0 ~cwd
-        ~env:(Unix.environment ()) ~setsid_exec:None ~args ~session_uuid:None
+      Llm_backend.For_test.spawn_and_stream_raw ~process_mgr ~clock
+        ~timeout:60.0 ~cwd ~env:(Unix.environment ()) ~setsid_exec:None
+        ~process_group:false ~args ~session_uuid:None
         ~patch_id:(Types.Patch_id.of_string "smoke")
         ~process_line:(process_line_strip Codex_backend.parse_event)
         ~on_event
@@ -149,8 +151,9 @@ let () =
     let events = ref [] in
     let on_event ev = events := ev :: !events in
     let result =
-      Llm_backend.spawn_and_stream ~process_mgr ~clock ~timeout:60.0 ~cwd
-        ~env:(Unix.environment ()) ~setsid_exec:None
+      Llm_backend.For_test.spawn_and_stream_raw ~process_mgr ~clock
+        ~timeout:60.0 ~cwd ~env:(Unix.environment ()) ~setsid_exec:None
+        ~process_group:false
         ~args:[ "printf"; "%s"; "not-json\n" ]
         ~session_uuid:None
         ~patch_id:(Types.Patch_id.of_string "smoke")
@@ -265,8 +268,9 @@ let () =
     in
     let started = Unix.gettimeofday () in
     let result =
-      Llm_backend.spawn_and_stream ~process_mgr ~clock ~timeout:30.0 ~cwd
-        ~env:(Unix.environment ()) ~setsid_exec:None ~args ~session_uuid:None
+      Llm_backend.For_test.spawn_and_stream_raw ~process_mgr ~clock
+        ~timeout:30.0 ~cwd ~env:(Unix.environment ()) ~setsid_exec:None
+        ~process_group:false ~args ~session_uuid:None
         ~patch_id:(Types.Patch_id.of_string "smoke")
         ~process_line:process_line_claude ~on_event
     in
@@ -291,8 +295,9 @@ let () =
     let args = [ "sh"; "-c"; "sleep 30" ] in
     let started = Unix.gettimeofday () in
     let result =
-      Llm_backend.spawn_and_stream ~process_mgr ~clock ~timeout:1.0 ~cwd
-        ~env:(Unix.environment ()) ~setsid_exec:None ~args ~session_uuid:None
+      Llm_backend.For_test.spawn_and_stream_raw ~process_mgr ~clock ~timeout:1.0
+        ~cwd ~env:(Unix.environment ()) ~setsid_exec:None ~process_group:false
+        ~args ~session_uuid:None
         ~patch_id:(Types.Patch_id.of_string "smoke")
         ~process_line:process_line_claude ~on_event
     in
@@ -346,8 +351,9 @@ exit 0|}
         in
         let args = [ "sh"; "-c"; script ] in
         let result =
-          Llm_backend.spawn_and_stream ~process_mgr ~clock ~timeout:30.0 ~cwd
-            ~env:(Unix.environment ()) ~setsid_exec:(Some shim) ~args
+          Llm_backend.For_test.spawn_and_stream_raw ~process_mgr ~clock
+            ~timeout:30.0 ~cwd ~env:(Unix.environment ())
+            ~setsid_exec:(Some shim) ~process_group:false ~args
             ~session_uuid:None
             ~patch_id:(Types.Patch_id.of_string "smoke")
             ~process_line:process_line_claude ~on_event

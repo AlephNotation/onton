@@ -12,20 +12,11 @@ let make_patch pid branch =
   Patch.
     {
       id = pid;
-      title = "Patch";
-      description = "";
+      goal = "test controller state transitions";
       branch;
       dependencies = [];
-      spec = "";
-      acceptance_criteria = [];
       files = [];
-      classification = "";
-      changes = [];
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
+      checks = [];
     }
 
 let make_gameplan patch =
@@ -34,34 +25,29 @@ let make_gameplan patch =
       project_name = "test-project";
       repo_owner = "";
       repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
       patches = [ patch ];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
     }
 
 let messages_equal a b = List.equal Orchestrator.equal_patch_agent_message a b
 
+let plan_tick_messages_with_commands orch ~project_name ~gameplan =
+  let orch, messages =
+    Patch_controller.plan_tick_messages orch ~project_name ~gameplan
+  in
+  (orch, Orchestrator.all_github_effects orch, messages)
+
 let normalized_plan orch ~gameplan =
   let orch1, effects1, messages1 =
-    Patch_controller.plan_tick_messages orch ~project_name:"test-project"
-      ~gameplan
+    plan_tick_messages_with_commands orch ~project_name:"test-project" ~gameplan
   in
   let orch2, effects2, messages2 =
-    Patch_controller.plan_tick_messages orch1 ~project_name:"test-project"
+    plan_tick_messages_with_commands orch1 ~project_name:"test-project"
       ~gameplan
   in
   Map.equal Patch_agent.equal
     (Orchestrator.agents_map orch1)
     (Orchestrator.agents_map orch2)
-  && List.equal Patch_controller.equal_github_effect effects1 effects2
+  && List.equal Github_effect.equal effects1 effects2
   && messages_equal messages1 messages2
 
 let accept_all_messages orch messages =
@@ -84,8 +70,8 @@ let () =
           let gameplan = make_gameplan patch in
           let orch = Orchestrator.create ~patches:[ patch ] ~main_branch:main in
           let orch1, _effects1, messages1 =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch1 = accept_all_messages orch1 messages1 in
           normalized_plan orch1 ~gameplan
@@ -105,8 +91,8 @@ let () =
           let gameplan = make_gameplan patch in
           let orch = Orchestrator.create ~patches:[ patch ] ~main_branch:main in
           let orch1, _effects1, messages1 =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           match List.hd messages1 with
           | None -> true
@@ -116,7 +102,7 @@ let () =
               in
               let orch1 = Orchestrator.reset_busy orch1 pid in
               let _orch2, _effects2, messages2 =
-                Patch_controller.plan_tick_messages orch1
+                plan_tick_messages_with_commands orch1
                   ~project_name:"test-project" ~gameplan
               in
               List.exists messages2 ~f:(fun msg2 ->
@@ -140,8 +126,8 @@ let () =
           let orch = Orchestrator.create ~patches:[ patch ] ~main_branch:main in
           (* Step 1: Start → get PR *)
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           (* Simulate start completing and PR being discovered *)
@@ -153,21 +139,21 @@ let () =
           in
           (* Step 3: Plan + accept Review_comments *)
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           (* Agent should now be busy with Review_comments *)
           let agent = Orchestrator.agent orch pid in
-          assert agent.Patch_agent.busy;
+          assert (Patch_agent.is_busy agent);
           (* Step 4: Human sends a message while agent is busy *)
           let orch = Orchestrator.send_human_message orch pid "fix the typo" in
           (* Step 5: Review_comments session completes *)
           let orch = Orchestrator.complete orch pid in
           (* Step 6: Next tick should plan Human Respond *)
           let _orch2, _eff2, msgs2 =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           List.exists msgs2 ~f:(fun msg ->
               let is_human_respond =
@@ -199,8 +185,8 @@ let () =
           let orch = Orchestrator.create ~patches:[ patch ] ~main_branch:main in
           (* Start → get PR *)
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch = Orchestrator.complete orch pid in
@@ -208,8 +194,8 @@ let () =
           (* First Human message: send, plan, accept, complete *)
           let orch = Orchestrator.send_human_message orch pid "first message" in
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch = Orchestrator.complete orch pid in
@@ -219,8 +205,8 @@ let () =
             Orchestrator.enqueue orch pid Operation_kind.Review_comments
           in
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           (* Agent busy with Review_comments *)
@@ -232,8 +218,8 @@ let () =
           let orch = Orchestrator.complete orch pid in
           (* Next tick should plan Human Respond for second message *)
           let _orch2, _eff2, msgs2 =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           List.exists msgs2 ~f:(fun msg ->
               let is_human_respond =
@@ -263,8 +249,8 @@ let () =
           let orch = Orchestrator.create ~patches:[ patch ] ~main_branch:main in
           (* Start → get PR *)
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch = Orchestrator.complete orch pid in
@@ -273,14 +259,15 @@ let () =
           let orch = Orchestrator.send_human_message orch pid "fix the typo" in
           (* Plan + accept the Human Respond *)
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let agent = Orchestrator.agent orch pid in
-          assert agent.Patch_agent.busy;
+          assert (Patch_agent.is_busy agent);
           assert (
-            Option.equal Operation_kind.equal agent.Patch_agent.current_op
+            Option.equal Operation_kind.equal
+              (Patch_agent.current_op agent)
               (Some Operation_kind.Human));
           (* Simulate session failure (e.g. No_session_to_resume) *)
           let orch =
@@ -299,8 +286,8 @@ let () =
           in
           (* The retry tick should plan Human Respond again *)
           let _orch2, _eff2, msgs2 =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let replanned =
             List.exists msgs2 ~f:(fun msg ->
@@ -334,8 +321,8 @@ let () =
           let orch = Orchestrator.create ~patches:[ patch ] ~main_branch:main in
           (* Start → get PR *)
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch = Orchestrator.complete orch pid in
@@ -343,14 +330,15 @@ let () =
           (* Send message A, plan + accept → agent busy with Human *)
           let orch = Orchestrator.send_human_message orch pid "message A" in
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let agent = Orchestrator.agent orch pid in
-          assert agent.Patch_agent.busy;
+          assert (Patch_agent.is_busy agent);
           assert (
-            Option.equal Operation_kind.equal agent.Patch_agent.current_op
+            Option.equal Operation_kind.equal
+              (Patch_agent.current_op agent)
               (Some Operation_kind.Human));
           (* Message B arrives while agent is busy *)
           let orch = Orchestrator.send_human_message orch pid "message B" in
@@ -363,8 +351,8 @@ let () =
           in
           (* Next tick must plan a Human Respond for message B *)
           let _orch2, _eff2, msgs2 =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let replanned =
             List.exists msgs2 ~f:(fun msg ->
@@ -395,8 +383,8 @@ let () =
           let orch = Orchestrator.create ~patches:[ patch ] ~main_branch:main in
           (* Start → get PR *)
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch = Orchestrator.complete orch pid in
@@ -404,8 +392,8 @@ let () =
           (* Send human message, plan + accept *)
           let orch = Orchestrator.send_human_message orch pid "check this" in
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let agent = Orchestrator.agent orch pid in
@@ -434,8 +422,8 @@ let () =
           let orch = Orchestrator.create ~patches:[ patch ] ~main_branch:main in
           (* Start → get PR *)
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch = Orchestrator.complete orch pid in
@@ -447,8 +435,8 @@ let () =
             Orchestrator.enqueue orch pid Operation_kind.Review_comments
           in
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch =
@@ -458,8 +446,8 @@ let () =
           (* Send human message, plan, accept, session ok, complete *)
           let orch = Orchestrator.send_human_message orch pid "fix the typo" in
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch =
@@ -468,7 +456,8 @@ let () =
           let orch = Orchestrator.complete orch pid in
           (* Assert session_id survived *)
           let agent = Orchestrator.agent orch pid in
-          Option.equal String.equal agent.Patch_agent.llm_session_id
+          Option.equal String.equal
+            (Patch_agent.llm_session_id agent)
             (Some "sess-1")
         with _ -> false
         end)
@@ -488,8 +477,8 @@ let () =
           let orch = Orchestrator.create ~patches:[ patch ] ~main_branch:main in
           (* Start → get PR *)
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch = Orchestrator.complete orch pid in
@@ -499,8 +488,8 @@ let () =
           (* Enqueue Ci, plan, accept, session no_resume *)
           let orch = Orchestrator.enqueue orch pid Operation_kind.Ci in
           let orch, _eff, msgs =
-            Patch_controller.plan_tick_messages orch
-              ~project_name:"test-project" ~gameplan
+            plan_tick_messages_with_commands orch ~project_name:"test-project"
+              ~gameplan
           in
           let orch = accept_all_messages orch msgs in
           let orch =
@@ -511,9 +500,9 @@ let () =
              [Fresh_available]: a stub-resume that produced zero events did
              not consume retry budget (Fix 1). *)
           let agent = Orchestrator.agent orch pid in
-          Option.is_none agent.Patch_agent.llm_session_id
+          Option.is_none (Patch_agent.llm_session_id agent)
           && Onton_core.Patch_agent.equal_session_fallback
-               agent.Patch_agent.session_fallback
+               (Patch_agent.session_fallback agent)
                Onton_core.Patch_agent.Fresh_available
         with _ -> false
         end)

@@ -1,290 +1,59 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>write-gameplan</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="A guide to the gameplan model: workstreams, gameplans, and supervised execution."
+      content="Onton runs small dependency-aware coding plans against GitHub."
     />
-    <link
-      rel="preload"
-      href="assets/fonts/SF-Pro-subset.woff2"
-      as="font"
-      type="font/woff2"
-      crossorigin
-    />
-    <link
-      rel="preload"
-      href="assets/fonts/ABCArizonaFlare-Regular.woff2"
-      as="font"
-      type="font/woff2"
-      crossorigin
-    />
-    <link
-      rel="preload"
-      href="assets/fonts/Berkeley Mono Variable.otf"
-      as="font"
-      type="font/otf"
-      crossorigin
-    />
+    <title>Onton</title>
     <link rel="stylesheet" href="assets/styles.css" />
   </head>
-  <body data-page="overview">
-    <nav class="navbar">
-      <div class="navbar-inner">
-        <a href="index.html" class="navbar-brand">write-gameplan</a>
-        <div class="navbar-links">
-          <a href="workstream.html">Workstream</a>
-          <a href="gameplan.html">Gameplan</a>
-          <a href="execution.html">Execution</a>
-        </div>
-      </div>
-    </nav>
+  <body>
     <main class="page-shell">
-      <div class="index-layout">
-        <div class="index-main">
-          <section class="hero index-section">
-            <div class="hero-copy">
-              <h1><code>/write-gameplan</code></h1>
-              <p class="lede">
-                This is how <a href="https://flowglad.com">Flowglad</a> does
-                vibe-coding.
-              </p>
-              <p class="lede">
-                It's the composition of a couple coding agent skills with a
-                deterministic agent supervisor, <code>onton</code>, all of which
-                participate in a single shared abstraction:
-                <em>the gameplan</em>.
-              </p>
-            </div>
-          </section>
+      <article class="content-card">
+        <h1>Onton</h1>
+        <p>
+          Onton supervises coding agents in isolated git worktrees. It starts
+          patches when their dependencies are ready, keeps pull requests in
+          sync, reacts to CI and review feedback, and persists enough state to
+          resume after a crash.
+        </p>
 
-          <section class="index-section index-flow-section">
-            <p class="section-label">flow</p>
-            <div class="flow-grid section-block">
-              <div class="flow-diagram">
-                <svg viewBox="0 0 760 464" role="img"
-                     aria-label="Flowchart: write a workstream, optionally write a spec, then loop through milestones running write-gameplan and onton.">
-                  <style>
-                    .fc-node { fill: var(--card-muted); stroke: var(--border); stroke-width: 1.5; }
-                    .fc-node--opt { stroke-dasharray: 7 5; fill: var(--secondary); stroke: var(--brand); stroke-opacity: 0.4; }
-                    .fc-loop-bg { fill: var(--secondary); stroke: var(--border); stroke-width: 1.5; }
-                    .fc-edge { fill: none; stroke: var(--brand); stroke-width: 2.5; stroke-linecap: round; marker-end: url(#fc-ah); }
-                    .fc-edge--dash { stroke-dasharray: 8 5; }
-                    .fc-edge--loop { stroke-width: 2; stroke-opacity: 0.55; stroke-dasharray: 6 4; }
-                    .fc-label--mono { font-family: var(--font-mono); font-size: 15px; fill: var(--foreground); font-weight: 500; text-anchor: middle; dominant-baseline: central; }
-                    .fc-label--loop { font-family: var(--font-mono); font-size: 15px; fill: var(--muted-foreground); font-weight: 500; }
-                    .fc-label--opt { font-family: var(--font-sans); font-size: 11px; fill: var(--muted-foreground); font-weight: 600; text-transform: uppercase; letter-spacing: 0.12em; }
-                    .fc-kicker { fill: var(--secondary); stroke: var(--border); stroke-width: 1.5; }
-                    .fc-kicker-text { font-family: var(--font-sans); font-size: 15px; fill: var(--foreground); font-weight: 700; text-anchor: middle; dominant-baseline: central; }
-                  </style>
-                  <defs>
-                    <marker id="fc-ah" viewBox="0 0 10 7" refX="9" refY="3.5"
-                            markerWidth="9" markerHeight="7" orient="auto-start-reverse">
-                      <polygon points="0 0, 10 3.5, 0 7" fill="var(--brand)" />
-                    </marker>
-                  </defs>
+        <h2>The plan</h2>
+        <p>A plan contains only the information the executor consumes:</p>
+        <pre><code>{
+  "project": "safer-cache",
+  "repository": "acme/service",
+  "patches": [
+    {
+      "id": "cache-key",
+      "goal": "cache keys include the tenant identifier",
+      "dependsOn": [],
+      "files": ["lib/cache_key.ml", "test/cache_key_test.ml"],
+      "checks": [
+        { "run": "dune exec test/cache_key_test.exe",
+          "proves": "tenants cannot share cache entries" }
+      ]
+    }
+  ]
+}</code></pre>
+        <p>
+          Unknown fields, missing evidence, invalid paths, duplicate IDs, and
+          dependency cycles are rejected before execution begins.
+        </p>
 
-                  <!-- Step 1: write workstream -->
-                  <rect class="fc-node" x="170" y="20" width="340" height="64" rx="12" />
-                  <circle class="fc-kicker" cx="194" cy="38" r="14" />
-                  <text class="fc-kicker-text" x="194" y="38">1</text>
-                  <text class="fc-label--mono" x="340" y="52">w = /write-workstream</text>
-
-                  <!-- Edge 1→2 -->
-                  <path class="fc-edge" d="M 340 84 L 340 130" />
-
-                  <!-- Step 2: write spec (optional) -->
-                  <rect class="fc-node--opt" x="220" y="130" width="240" height="64" rx="12" />
-                  <circle class="fc-kicker" cx="244" cy="148" r="14" />
-                  <text class="fc-kicker-text" x="244" y="148">2</text>
-                  <text class="fc-label--mono" x="340" y="162">/write-spec</text>
-                  <text class="fc-label--opt" x="340" y="180" text-anchor="middle">optional</text>
-
-                  <!-- Edge 2→loop -->
-                  <path class="fc-edge fc-edge--dash" d="M 340 194 L 340 260" />
-
-                  <!-- Loop container -->
-                  <rect class="fc-loop-bg" x="100" y="260" width="560" height="140" rx="14" />
-                  <circle class="fc-kicker" cx="128" cy="286" r="14" />
-                  <text class="fc-kicker-text" x="128" y="286">3</text>
-                  <text class="fc-label--loop" x="150" y="291">for m in w.milestones:</text>
-
-                  <!-- Step 3a: write-gameplan -->
-                  <rect class="fc-node" x="124" y="314" width="260" height="62" rx="10" />
-                  <text class="fc-label--mono" x="254" y="345">g = /write-gameplan m</text>
-
-                  <!-- Edge 3a→3b -->
-                  <path class="fc-edge" d="M 384 345 L 413 345" />
-
-                  <!-- Step 3b: onton -->
-                  <rect class="fc-node" x="420" y="314" width="216" height="62" rx="10" />
-                  <text class="fc-label--mono" x="528" y="345">onton --gameplan g</text>
-
-                  <!-- Loop-back: exits right side of loop box, curves down, goes left, curves up into left side -->
-                  <path class="fc-edge fc-edge--loop"
-                        d="M 660 345 L 694 345 Q 714 345 714 365 L 714 420 Q 714 440 694 440 L 66 440 Q 46 440 46 420 L 46 365 Q 46 345 66 345 L 100 345"
-                        marker-end="url(#fc-ah)" />
-                </svg>
-              </div>
-
-              <div class="flow-details">
-                <div class="flow-annotations">
-                  <div class="flow-annotation">
-                    <span class="workflow-kicker">1</span>
-                    <div>
-                      <h3>write a workstream</h3>
-                      <p>
-                        Define the vision, current state, key challenges, and
-                        milestones. The output is a workstream whose milestones
-                        become the unit of iteration.
-                      </p>
-                      <a href="workstream.html">Read the workstream guide</a>
-                    </div>
-                  </div>
-                  <div class="flow-annotation">
-                    <span class="workflow-kicker">2</span>
-                    <div>
-                      <h3>write a spec</h3>
-                      <p>
-                        Optionally: formally specify invariants that should hold
-                        when the feature is complete.
-                      </p>
-                      <a href="https://pantagruel-language.com/"
-                        >Read about the Pantagruel specification language</a
-                      >
-                    </div>
-                  </div>
-                  <div class="flow-annotation">
-                    <span class="workflow-kicker">3</span>
-                    <div>
-                      <h3>write and execute gameplans</h3>
-                      <ol>
-                        <li>Turn a milestone into a concrete gameplan.</li>
-                        <li>Execute the gameplan with the
-                          <code>onton</code> supervisor.</li>
-                      </ol>
-                      <p>Repeat for the next milestone in the workstream.</p>
-                      <a href="gameplan.html">Gameplan guide</a> &middot;
-                      <a href="execution.html">Execution guide</a>
-                    </div>
-                  </div>
-                </div>
-
-                <aside aria-label="Flow sidenote">
-                  <section class="sidenote-card">
-                    <p class="section-label">sidenote</p>
-                    <h2>Theory is the artifact</h2>
-                    <p class="sidenote-intro">
-                      Formal specifications do at least two important kinds of
-                      work in this process:
-                    </p>
-                    <ol class="sidenote-list">
-                      <li>
-                        They give the coding agent an unambiguous change to
-                        implement, with some ambiguity and contradiction removed
-                        from the natural language description.
-                      </li>
-                      <li>
-                        They force the engineer to order the domain conceptually,
-                        making the system’s entities, rules, and consequences
-                        concrete before the implementation phase starts.
-                      </li>
-                    </ol>
-                  </section>
-                </aside>
-              </div>
-            </div>
-          </section>
-
-          <section class="panel index-section main-column-section">
-            <div class="section-stack">
-              <h2>Push human intervention to the left</h2>
-            </div>
-            <div class="key-points key-points-wide">
-              <div class="key-point">
-                <p>
-                  We're all tech leads, now: the gameplan phase is the moment
-                  that the engineer sets the technical direction of the feature.
-                </p>
-                <p>
-                  The engineer works with the model to thrash out any open
-                  questions and to make explicit all the architectural decisions
-                  in the feature.
-                </p>
-              </div>
-              <div class="key-point">
-                <p>
-                  The gameplan patch dependency model prioritizes
-                  <em>parallelism</em> and <em>mergeability</em>.
-                </p>
-                <p>
-                  The less human code review a patch needs, the more mergeable
-                  it is. So gameplans front load tests and refactors and ensure
-                  that user-observable changes are behind a feature flag.
-                </p>
-              </div>
-              <div class="key-point">
-                <p>
-                  Use aggressive automated code review, opinionated linting, and
-                  exhaustive testing to give the model the maximum mechanical
-                  feedback.
-                </p>
-                <p>
-                  The <code>onton</code> supervisor will babysit patches, ensuring
-                  that review is addressed, CI failures fixed, and merge
-                  conflicts are resolved.
-                </p>
-                <p>
-                  After everything is done mechanically that can be, the
-                  engineer merges the patch, automatically kicking off any
-                  downstream patches.
-                </p>
-              </div>
-            </div>
-          </section>
-
-          <section class="panel index-section main-column-section">
-            <div class="section-stack">
-              <h3>Read more</h3>
-            </div>
-            <div class="source-list section-block">
-              <a
-                class="source-card"
-                href="https://github.com/flowglad/onton/blob/main/skills/write-workstream/SKILL.md"
-              >
-                <strong>write-workstream</strong>
-                <span>How milestone planning is structured.</span>
-              </a>
-              <a
-                class="source-card"
-                href="https://github.com/flowglad/onton/blob/main/skills/write-gameplan/SKILL.md"
-              >
-                <strong>write-gameplan</strong>
-                <span>How patches, specs, tests, and DAGs are defined.</span>
-              </a>
-              <a
-                class="source-card"
-                href="https://github.com/flowglad/onton/blob/main/README.md"
-              >
-                <strong>onton README</strong>
-                <span
-                  >Installation and usage of the onton (rhymes with
-                  "wonton") supervisor.</span
-                >
-              </a>
-            </div>
-          </section>
-        </div>
-
-      </div>
+        <h2>Run it</h2>
+        <pre><code>onton --plan plan.json
+onton safer-cache</code></pre>
+        <p>
+          The first command starts a project. The second resumes it from its
+          durable snapshot. See the
+          <a href="https://github.com/flowglad/onton">repository README</a>
+          for installation, configuration, and operational details.
+        </p>
+      </article>
     </main>
-    <footer class="site-footer">
-      <p>&copy; 2026 Flowglad, Inc. &middot; <a href="https://github.com/flowglad/onton">GitHub</a> &middot; BSD-3 License &middot; <a href="mailto:hello@flowglad.com">hello@flowglad.com</a></p>
-    </footer>
-    <script src="assets/components.js" defer></script>
-    <script src="assets/app.js" defer></script>
   </body>
 </html>

@@ -17,12 +17,14 @@ type snapshot = {
 }
 
 type t
+type durable_store = snapshot -> (unit, string) result
 
 val create :
   gameplan:Gameplan.t ->
   main_branch:Branch.t ->
   ?max_ci_failures:int ->
   ?snapshot:snapshot ->
+  durable_store:durable_store ->
   unit ->
   t
 (** Build initial runtime state from a gameplan, optionally restoring a previous
@@ -51,18 +53,18 @@ val update_orchestrator_returning :
     new orchestrator state. Useful when you need an atomic check-and-modify that
     also reports what happened. *)
 
-val add_patch :
-  t ->
-  title:string ->
-  description:string ->
-  dependencies:Patch_id.t list ->
-  (Patch.t, string) result
-(** Atomically add a runtime patch to the gameplan and register its agent.
-    Applies {!Gameplan.add_patch} and, on success,
-    {!Orchestrator.add_planned_patch} within a single lock so the two never
-    diverge. Returns the created patch, or [Error msg] (leaving the snapshot
-    untouched) when a dependency id is unknown. The poller picks the patch up on
-    its next tick. *)
+(** {2 Durable state transitions} *)
+
+val commit : t -> (snapshot -> snapshot * 'a) -> ('a, string) result
+(** Compute a prospective snapshot while holding the runtime lock, atomically
+    write it through the configured durable store, and expose it in memory only
+    after the write succeeds. A failed write leaves the old snapshot intact. *)
+
+val commit_orchestrator :
+  t -> (Orchestrator.t -> Orchestrator.t) -> (unit, string) result
+
+val commit_orchestrator_returning :
+  t -> (Orchestrator.t -> Orchestrator.t * 'a) -> ('a, string) result
 
 val update_activity_log : t -> (Activity_log.t -> Activity_log.t) -> unit
 (** Convenience: update only the activity log. *)

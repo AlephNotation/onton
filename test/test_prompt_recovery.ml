@@ -4,11 +4,11 @@
 open Base
 open Onton
 
-(** Unit tests for the merge-conflict prompt's Recovery section.
+(** Unit tests for the merge-conflict prompt's controller boundary.
 
     Pin the verbatim text the patch agent receives so an accidental change to
-    the prompt is caught at test time rather than discovered when an agent fails
-    to recover from a lost rebase state. *)
+    the prompt is caught at test time rather than granting a worker Git
+    authority during conflict recovery. *)
 
 let assert_contains label haystack ~substring =
   if not (String.is_substring haystack ~substring) then (
@@ -39,13 +39,11 @@ let () =
     Stdlib.print_endline
       "FAIL: omitting conflict_info != passing ?conflict_info:None";
     Stdlib.exit 1);
-  (* No Recovery section in the no-info form. *)
-  assert_not_contains "no conflict_info -> no Recovery section" with_ci_none
-    ~substring:"## Recovery"
+  assert_not_contains "no conflict_info -> no recovery context" with_ci_none
+    ~substring:"## Controller recovery context"
 
-(* Property #12: Onto strategy. Recovery section contains the verbatim
-   `git rebase --onto <target> <old_base>` command, both inputs, and one
-   bullet per unique commit (oldest first). *)
+(* Conflict metadata is diagnostic context only. It must never turn into Git
+   commands that a sandboxed worker is asked to execute. *)
 let () =
   let ci : Worktree.conflict_info =
     Worktree.
@@ -66,38 +64,21 @@ let () =
     Prompt.render_merge_conflict_prompt ~project_name:"" ~base_branch:"main"
       ~conflict_info:ci ()
   in
-  assert_contains "Onto: contains Recovery header" prompt
-    ~substring:"## Recovery (if rebase state is lost)";
-  assert_contains "Onto: instructs agent to fetch first" prompt
-    ~substring:"git fetch origin";
-  assert_contains "Onto: contains exact --onto command against origin/main"
-    prompt ~substring:"git rebase --onto origin/main deadbeefcafef00d";
-  assert_contains "Onto: surfaces orig_head reset command" prompt
-    ~substring:"git reset --hard abcdef0123456789abcdef0123456789abcdef01";
-  assert_contains "Onto: lists oldest commit first (oldest3)" prompt
-    ~substring:"oldest3 [proj] Patch 7: tail";
-  assert_contains "Onto: lists middle commit (middle2)" prompt
-    ~substring:"middle2 [proj] Patch 7: middle";
-  assert_contains "Onto: lists newest commit last (newest1)" prompt
-    ~substring:"newest1 [proj] Patch 7: head";
-  (* Order check: oldest must appear before newest in the rendered text *)
-  let oldest_idx =
-    Option.value_exn
-      (String.substr_index prompt ~pattern:"oldest3 [proj] Patch 7: tail")
-  in
-  let newest_idx =
-    Option.value_exn
-      (String.substr_index prompt ~pattern:"newest1 [proj] Patch 7: head")
-  in
-  if not (oldest_idx < newest_idx) then (
-    Stdlib.print_endline
-      "FAIL: Onto: commits should be rendered oldest-first, but newest \
-       appeared first";
-    Stdlib.exit 1)
+  assert_contains "Onto: contains controller recovery header" prompt
+    ~substring:"## Controller recovery context";
+  assert_contains "Onto: identifies the controller-owned target" prompt
+    ~substring:"target `origin/main`";
+  assert_contains "Onto: retains the original HEAD for controller context"
+    prompt ~substring:"abcdef0123456789abcdef0123456789abcdef01";
+  assert_contains "Onto: tells the worker not to run Git" prompt
+    ~substring:"Do not run Git commands";
+  List.iter [ "git fetch"; "git rebase"; "git reset"; "git add"; "git push" ]
+    ~f:(fun command ->
+      assert_not_contains
+        ("Onto: excludes " ^ command)
+        prompt ~substring:command)
 
-(* Property #13: Plain strategy. Recovery section recommends plain
-   [git rebase <target>] and explicitly notes that no per-patch commit list
-   is available. *)
+(* The strategy does not widen the worker boundary. *)
 let () =
   let ci : Worktree.conflict_info =
     Worktree.
@@ -113,27 +94,18 @@ let () =
     Prompt.render_merge_conflict_prompt ~project_name:"" ~base_branch:"release"
       ~conflict_info:ci ()
   in
-  (* Slice at the Recovery header so substring checks don't accidentally match
-     legacy body text that also mentions --onto / the target branch. *)
   let recovery_section =
     match
-      String.substr_index prompt
-        ~pattern:"## Recovery (if rebase state is lost)"
+      String.substr_index prompt ~pattern:"## Controller recovery context"
     with
     | Some i -> String.subo prompt ~pos:i
     | None -> ""
   in
-  assert_contains "Plain: contains Recovery header" recovery_section
-    ~substring:"## Recovery (if rebase state is lost)";
-  assert_contains "Plain: instructs agent to fetch first" recovery_section
-    ~substring:"git fetch origin";
-  assert_contains "Plain: contains plain rebase command against origin/release"
-    recovery_section ~substring:"git rebase origin/release";
-  assert_not_contains "Plain: Recovery section must NOT contain --onto"
-    recovery_section ~substring:"--onto";
-  assert_not_contains "Plain: empty orig_head -> no reset command in Recovery"
-    recovery_section ~substring:"git reset --hard";
-  assert_contains "Plain: notes no per-patch commit list" recovery_section
-    ~substring:"No per-patch commit list could be isolated"
+  assert_contains "Plain: contains controller recovery header" recovery_section
+    ~substring:"## Controller recovery context";
+  assert_contains "Plain: names the controller-owned target" recovery_section
+    ~substring:"target `origin/release`";
+  assert_not_contains "Plain: contains no worker Git command" recovery_section
+    ~substring:"git "
 
 let () = Stdlib.print_endline "All prompt-recovery tests passed."

@@ -35,12 +35,8 @@ type t = {
   graph : Graph.t;
   agents : Patch_agent.t Map.M(Patch_id).t;
   outbox : patch_agent_message Map.M(Message_id).t;
+  github_outbox : Github_effect.t Map.M(Effect_id).t;
   main_branch : Branch.t;
-  max_ci_failures : int;
-      (* Per-project CI-failure cap stamped onto every agent (including ones
-         added later via [add_agent]/[add_planned_patch]). Set once at startup
-         through [set_max_ci_failures]; defaults to
-         [Patch_agent.default_max_ci_failures]. *)
 }
 
 let create ~patches ~main_branch =
@@ -63,8 +59,8 @@ let create ~patches ~main_branch =
     graph;
     agents;
     outbox = Map.empty (module Message_id);
+    github_outbox = Map.empty (module Effect_id);
     main_branch;
-    max_ci_failures = Patch_agent.default_max_ci_failures;
   }
 
 let agent t patch_id =
@@ -91,7 +87,7 @@ let fire t action =
   match action with
   | Start (pid, base) ->
       let a = agent t pid in
-      if Patch_agent.has_pr a || a.Patch_agent.busy then t
+      if Patch_agent.has_pr a || Patch_agent.is_busy a then t
       else
         update_agent t pid ~f:(fun a -> Patch_agent.start a ~base_branch:base)
   | Respond (pid, k) -> update_agent t pid ~f:(fun a -> Patch_agent.respond a k)
@@ -142,7 +138,7 @@ let complete t patch_id =
   let current_message_id =
     match find_agent t patch_id with
     | None -> None
-    | Some agent -> agent.current_message_id
+    | Some agent -> Patch_agent.current_message_id agent
   in
   let t = update_agent t patch_id ~f:Patch_agent.complete in
   match current_message_id with
@@ -251,16 +247,6 @@ let enqueue_rebase_for_stranded_dependents t patch_id =
               then t
               else enqueue t dep_id Operation_kind.Rebase)
 
-let remove_agent t patch_id =
-  {
-    t with
-    graph = Graph.remove_patch t.graph patch_id;
-    agents = Map.remove t.agents patch_id;
-    outbox =
-      Map.filter t.outbox ~f:(fun msg ->
-          not (Patch_id.equal msg.patch_id patch_id));
-  }
-
 let reconcile_message t msg =
   let t =
     Map.fold t.outbox ~init:t ~f:(fun ~key ~data acc ->
@@ -312,8 +298,66 @@ let message_patch_id (msg : patch_agent_message) = msg.patch_id
 let message_action (msg : patch_agent_message) = msg.action
 let message_status (msg : patch_agent_message) = msg.status
 
+(** {2 Durable GitHub command outbox} *)
+
+let enqueue_github_effect t (command : Github_effect.t) =
+  match Map.find t.github_outbox command.id with
+  | Some _ -> t
+  | None ->
+      {
+        t with
+        github_outbox = Map.set t.github_outbox ~key:command.id ~data:command;
+      }
+
+let find_github_effect t effect_id = Map.find t.github_outbox effect_id
+let all_github_effects t = Map.data t.github_outbox
+
+let runnable_github_effects t ~now =
+  Map.data t.github_outbox
+  |> List.filter ~f:(Github_effect.runnable ~now)
+  |> List.sort ~compare:Github_effect.compare
+
+let claim_github_effect t ~now effect_id =
+  match Map.find t.github_outbox effect_id with
+  | None -> (t, None)
+  | Some command -> (
+      match Github_effect.claim ~now command with
+      | None -> (t, None)
+      | Some claimed ->
+          ( {
+              t with
+              github_outbox =
+                Map.set t.github_outbox ~key:effect_id ~data:claimed;
+            },
+            Some claimed ))
+
+let update_github_effect t command =
+  if Map.mem t.github_outbox command.Github_effect.id then
+    {
+      t with
+      github_outbox = Map.set t.github_outbox ~key:command.id ~data:command;
+    }
+  else t
+
+let remove_github_effect t effect_id =
+  { t with github_outbox = Map.remove t.github_outbox effect_id }
+
+let github_effects_for_patch t patch_id =
+  Map.data t.github_outbox
+  |> List.filter ~f:(fun command ->
+      Patch_id.equal command.Github_effect.patch_id patch_id)
+
+let remove_github_effects_for_patch t patch_id ~f =
+  {
+    t with
+    github_outbox =
+      Map.filter t.github_outbox ~f:(fun command ->
+          (not (Patch_id.equal command.Github_effect.patch_id patch_id))
+          || not (f command));
+  }
+
 let current_message t patch_id =
-  match (agent t patch_id).Patch_agent.current_message_id with
+  match Patch_agent.current_message_id (agent t patch_id) with
   | None -> None
   | Some message_id -> Map.find t.outbox message_id
 
@@ -350,8 +394,8 @@ let start_eligibility t ~base_contains_merged_siblings base =
         | None -> (false, false, false, false)
         | Some a ->
             let running_rebase =
-              a.Patch_agent.busy
-              && Option.equal Operation_kind.equal a.Patch_agent.current_op
+              Patch_agent.is_busy a
+              && Option.equal Operation_kind.equal (Patch_agent.current_op a)
                    (Some Operation_kind.Rebase)
             in
             (* Only treat a queued Rebase as in-flight when it is the next op to
@@ -438,9 +482,10 @@ let runnable_messages t =
           | Respond _ -> true)
       | Acked ->
           let agent = agent t msg.patch_id in
-          Option.equal Message_id.equal agent.current_message_id
+          Option.equal Message_id.equal
+            (Patch_agent.current_message_id agent)
             (Some msg.message_id)
-          && not agent.busy
+          && not (Patch_agent.is_busy agent)
       | Completed | Obsolete -> false)
   |> List.sort ~compare:(fun a b ->
       Int.compare (action_rank a.action) (action_rank b.action))
@@ -475,9 +520,10 @@ let resume_message t message_id =
       | Acked ->
           let agent = agent t msg.patch_id in
           if
-            Option.equal Message_id.equal agent.current_message_id
+            Option.equal Message_id.equal
+              (Patch_agent.current_message_id agent)
               (Some message_id)
-            && not agent.busy
+            && not (Patch_agent.is_busy agent)
           then
             let op =
               match msg.action with
@@ -503,27 +549,6 @@ let set_pr_number t patch_id pr_number =
   update_agent t patch_id ~f:(fun a -> Patch_agent.set_pr_number a pr_number)
 
 let clear_pr t patch_id = update_agent t patch_id ~f:Patch_agent.clear_pr
-
-let mark_pr_missing t patch_id =
-  (* Dispatch on the pure classifier so the integration-level API is
-     idempotent on an already-[Missing] agent. The low-level transition
-     [Patch_agent.mark_pr_missing] stays strict for testability — the
-     classifier above is what callers (production and tests) should
-     consult. *)
-  match find_agent t patch_id with
-  | None -> t
-  | Some a -> (
-      match Patch_pr_status.classify_mark_missing a.Patch_agent.pr_status with
-      | Mark_missing_already -> t
-      | Mark_missing_transition ->
-          update_agent t patch_id ~f:Patch_agent.mark_pr_missing
-      | Mark_missing_illegal ->
-          (* Caller bug: marking an [Absent] agent missing has no meaning.
-             Surface explicitly rather than silently transitioning. *)
-          invalid_arg
-            (Printf.sprintf
-               "Orchestrator.mark_pr_missing: agent %s has no PR (Absent)"
-               (Patch_id.to_string patch_id)))
 
 let set_branch_rebased_onto_sha t patch_id sha =
   update_agent t patch_id ~f:(fun a ->
@@ -661,16 +686,13 @@ let set_automerge_deadline t patch_id deadline =
 let clear_automerge_deadline t patch_id =
   update_agent t patch_id ~f:Patch_agent.clear_automerge_deadline
 
-let set_automerge_inflight t patch_id v =
-  update_agent t patch_id ~f:(fun a -> Patch_agent.set_automerge_inflight a v)
-
-let set_review_requested_for_oid t patch_id oid =
+let mark_review_requested t patch_id head_oid =
   update_agent t patch_id ~f:(fun a ->
-      Patch_agent.set_review_requested_for_oid a oid)
+      Patch_agent.mark_review_requested a head_oid)
 
-let set_review_request_inflight t patch_id v =
+let mark_review_failed t patch_id ~head_oid ~error =
   update_agent t patch_id ~f:(fun a ->
-      Patch_agent.set_review_request_inflight a v)
+      Patch_agent.mark_review_failed a ~head_oid ~error)
 
 let increment_automerge_failure_count t patch_id =
   update_agent t patch_id ~f:Patch_agent.increment_automerge_failure_count
@@ -691,24 +713,19 @@ let apply_automerge_failure_state t patch_id ~retry_deadline ~max_failures =
 let all_agents t = Map.data t.agents
 let graph t = t.graph
 
-let restore ~graph ~agents ~outbox ~main_branch () =
+let restore ~graph ~agents ~outbox
+    ?(github_outbox = Map.empty (module Effect_id)) ~main_branch () =
   let outbox = Map.filter outbox ~f:(fun msg -> Map.mem agents msg.patch_id) in
-  (* The snapshot's per-agent [max_ci_failures] values are trusted here for
-     round-trip identity; [Runtime.create] restamps the whole orchestrator
-     with the resolved config value right after restore, so the running cap
-     always comes from config, not from stale persisted state. *)
-  {
-    graph;
-    agents;
-    outbox;
-    main_branch;
-    max_ci_failures = Patch_agent.default_max_ci_failures;
-  }
+  let github_outbox =
+    Map.filter github_outbox ~f:(fun command ->
+        Map.mem agents command.Github_effect.patch_id)
+  in
+  { graph; agents; outbox; github_outbox; main_branch }
 
 let main_branch t = t.main_branch
 let set_main_branch t branch = { t with main_branch = branch }
 
-(* Stamps every agent (not just the [t] field) so the pure per-agent decisions
+(* Stamp every agent so the pure per-agent decisions
    ([Patch_decision.on_ci_failure], [Patch_agent.needs_intervention]) see the
    configured cap. [Patch_agent.set_max_ci_failures] does not bump
    [generation], so restamping restored agents leaves in-flight outbox
@@ -716,50 +733,11 @@ let set_main_branch t branch = { t with main_branch = branch }
 let set_max_ci_failures t ~max_ci_failures =
   {
     t with
-    max_ci_failures;
     agents =
       Map.map t.agents ~f:(Patch_agent.set_max_ci_failures ~max_ci_failures);
   }
 
 let agents_map t = t.agents
-
-let add_agent t ~patch_id ~branch ~base_branch ~pr_number =
-  if Map.mem t.agents patch_id then t
-  else
-    let deps =
-      if Branch.equal base_branch t.main_branch then []
-      else
-        match find_patch_by_branch t base_branch with
-        | Some dep_pid -> (
-            match find_agent t dep_pid with
-            | Some a when not a.Patch_agent.merged -> [ dep_pid ]
-            | _ -> [])
-        | None -> []
-    in
-    (* Do not seed agent.base_branch: persistence infers branch_rebased_onto
-       from base_branch when the former is absent, which would fabricate a
-       stale-rebase state on round-trip. The poller populates it next tick. *)
-    let agent =
-      Patch_agent.create_adhoc ~patch_id ~branch ~pr_number
-        ~max_ci_failures:t.max_ci_failures
-    in
-    let graph = Graph.add_patch_with_deps t.graph patch_id ~deps in
-    { t with graph; agents = Map.set t.agents ~key:patch_id ~data:agent }
-
-let add_planned_patch t (patch : Patch.t) ~deps =
-  if Map.mem t.agents patch.Patch.id then t
-  else
-    (* Unlike [add_agent], this births a PR-less planned patch (via
-       [Patch_agent.create], the same constructor startup uses) so the poller
-       promotes it to [Ready_start] once its deps are satisfied. The caller is
-       responsible for inserting [patch] into the gameplan in the same snapshot
-       update so prompt composition can find it. *)
-    let agent =
-      Patch_agent.create ~branch:patch.Patch.branch
-        ~max_ci_failures:t.max_ci_failures patch.Patch.id
-    in
-    let graph = Graph.add_patch_with_deps t.graph patch.Patch.id ~deps in
-    { t with graph; agents = Map.set t.agents ~key:patch.Patch.id ~data:agent }
 
 type rebase_effect = Push_branch [@@deriving show, eq, sexp_of]
 
@@ -869,6 +847,9 @@ let apply_rebase_push_result t patch_id
          retrying. *)
       let t = enqueue t patch_id Operation_kind.Rebase in
       (t, Rebase_push_error)
+
+let reject_rebase_publication t patch_id =
+  (enqueue t patch_id Operation_kind.Rebase, Rebase_push_error)
 
 type conflict_rebase_decision =
   | Conflict_resolved
@@ -984,6 +965,10 @@ let apply_conflict_push_result t patch_id decision
       (t, Conflict_needs_agent)
   | Conflict_failed, _ -> (t, Conflict_give_up)
 
+let reject_conflict_publication t patch_id =
+  let t = set_has_conflict t patch_id in
+  (enqueue t patch_id Operation_kind.Merge_conflict, Conflict_retry_push)
+
 type session_result =
   | Session_ok
   | Session_process_error of { is_fresh : bool; detail : string option }
@@ -1053,7 +1038,7 @@ let apply_force_complete t patch_id reason =
          [inflight_human_messages], but reading the stale snapshot would
          silently break if a future helper ever cleared inflight. *)
       let a = agent t patch_id in
-      if not a.Patch_agent.busy then t
+      if not (Patch_agent.is_busy a) then t
       else if List.is_empty a.Patch_agent.inflight_human_messages then
         complete t patch_id
       else complete_failed t patch_id

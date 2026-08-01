@@ -22,8 +22,8 @@ let kill_group ~pid ~signal =
   try Unix.kill (-pid) signal
   with Unix.Unix_error ((ESRCH | EPERM), _, _) -> ()
 
-let spawn_and_stream ~process_mgr ~clock ~timeout ~cwd ~env ~setsid_exec ~args
-    ~session_uuid ~patch_id
+let spawn_and_stream_raw ~process_mgr ~clock ~timeout ~cwd ~env ~setsid_exec
+    ~process_group ~args ~session_uuid ~patch_id
     ~(process_line : string -> Types.Stream_event.t list) ~on_event =
   let args =
     match setsid_exec with Some path -> path :: args | None -> args
@@ -71,7 +71,7 @@ let spawn_and_stream ~process_mgr ~clock ~timeout ~cwd ~env ~setsid_exec ~args
           ~stderr:stderr_w ~env args
       in
       let pid = Eio.Process.pid child in
-      let have_group = Option.is_some setsid_exec in
+      let have_group = process_group || Option.is_some setsid_exec in
       let signal_tree signal =
         if have_group then kill_group ~pid ~signal
         else try Eio.Process.signal child signal with _ -> ()
@@ -222,72 +222,41 @@ let spawn_and_stream ~process_mgr ~clock ~timeout ~cwd ~env ~setsid_exec ~args
         timed_out = true;
       }
 
+let spawn_and_stream ~process_mgr ~clock ~timeout ~cwd
+    ~(spawn : Worker_sandbox.spawn) ~session_uuid ~patch_id ~process_line
+    ~on_event =
+  spawn_and_stream_raw ~process_mgr ~clock ~timeout ~cwd ~env:spawn.environment
+    ~setsid_exec:None ~process_group:spawn.process_group ~args:spawn.argv
+    ~session_uuid ~patch_id ~process_line ~on_event
+
+module For_test = struct
+  let spawn_and_stream_raw = spawn_and_stream_raw
+end
+
 type t = {
   name : string;
   run_streaming :
+    sandbox:Worker_sandbox.t ->
     project_name:string ->
     cwd:Eio.Fs.dir_ty Eio.Path.t ->
     patch_id:Types.Patch_id.t ->
     prompt:string ->
     resume_session:string option ->
     session_uuid:string ->
-    complexity:int option ->
     on_event:(Types.Stream_event.t -> unit) ->
     result;
 }
 
-(** Resolve a model selector for a single backend invocation.
-
-    [Some "auto"] (case-insensitive) routes through the per-backend [auto_model]
-    mapping. [None] / empty / any other string passes through unchanged. This
-    keeps "auto" as a documented sentinel string rather than introducing a new
-    type, so it round-trips cleanly through Project_store and the CLI without
-    any migration.
-
-    [auto_model] is the backend's complexity → model name function. It may
-    return [None] when complexity is missing AND the backend has no sensible
-    fallback — in that case we drop [--model] and let the CLI's own default
-    apply. *)
-let resolve_auto_model ~model ~complexity ~auto_model : string option =
-  let is_auto = function
-    | Some s -> Base.String.equal (Base.String.lowercase s) "auto"
-    | None -> false
-  in
-  if is_auto model then auto_model ~complexity else model
-
-let%test "resolve_auto_model passes None through" =
-  let auto_model ~complexity:_ = Some "fallback" in
-  Option.equal Base.String.equal
-    (resolve_auto_model ~model:None ~complexity:None ~auto_model)
-    None
-
-let%test "resolve_auto_model passes explicit model through unchanged" =
-  let auto_model ~complexity:_ = Some "fallback" in
-  Option.equal Base.String.equal
-    (resolve_auto_model ~model:(Some "sonnet") ~complexity:(Some 1) ~auto_model)
-    (Some "sonnet")
-
-let%test "resolve_auto_model: 'auto' routes through auto_model" =
-  let auto_model ~complexity =
-    match complexity with Some 1 -> Some "fast" | _ -> Some "strong"
-  in
-  Option.equal Base.String.equal
-    (resolve_auto_model ~model:(Some "auto") ~complexity:(Some 1) ~auto_model)
-    (Some "fast")
-
-let%test "resolve_auto_model: 'AUTO' is also recognised (case-insensitive)" =
-  let auto_model ~complexity:_ = Some "picked" in
-  Option.equal Base.String.equal
-    (resolve_auto_model ~model:(Some "AUTO") ~complexity:(Some 2) ~auto_model)
-    (Some "picked")
-
-let%test "resolve_auto_model: 'auto' with no complexity hits fallback tier" =
-  let auto_model ~complexity =
-    match complexity with None -> Some "strong" | _ -> Some "wrong"
-  in
-  Option.equal Base.String.equal
-    (resolve_auto_model ~model:(Some "auto") ~complexity:None ~auto_model)
-    (Some "strong")
+let sandbox_failure ~on_event message =
+  on_event (Types.Stream_event.Error message);
+  {
+    exit_code = 1;
+    stdout = "";
+    stderr = message;
+    got_events = true;
+    saw_final_result = false;
+    timed_out = false;
+  }
 
 let redact_env env = Array.map env ~f:Token_scrub.redact_env_entry
 

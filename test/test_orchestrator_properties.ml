@@ -20,20 +20,11 @@ let patch ?(dependencies = []) id =
   Patch.
     {
       id;
-      title = Patch_id.to_string id;
-      description = "";
+      goal = "Patch " ^ Patch_id.to_string id ^ " completes";
       branch = Branch.of_string (Patch_id.to_string id);
       dependencies;
-      spec = "";
-      acceptance_criteria = [];
       files = [];
-      classification = "";
-      changes = [];
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
+      checks = [];
     }
 
 (* Stub conflict_info: the orchestrator's Conflict arm doesn't inspect the
@@ -51,29 +42,14 @@ let stub_conflict =
 
 let make_gameplan patches =
   Gameplan.
-    {
-      project_name = "test-project";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
-      patches;
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-    }
+    { project_name = "test-project"; repo_owner = ""; repo_name = ""; patches }
 
 let tick orch ~patches =
   Patch_controller.tick orch ~project_name:"test-project"
     ~gameplan:(make_gameplan patches)
 
 let pending_actions orch ~patches =
-  let _orch, _effects, actions =
+  let _orch, actions =
     Patch_controller.plan_tick orch ~project_name:"test-project"
       ~gameplan:(make_gameplan patches)
   in
@@ -90,7 +66,7 @@ let () =
       gen_patch_list_unique (fun patches ->
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           List.for_all actions ~f:(function
             | Orchestrator.Start (pid, _) ->
                 not (Patch_agent.has_pr (Orchestrator.agent orch pid))
@@ -106,11 +82,11 @@ let () =
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
           (* Tick once to start patches, then complete + enqueue to get responds *)
-          let orch, _effects, _actions = tick orch ~patches in
+          let orch, _actions = tick orch ~patches in
           let orch =
             List.fold patches ~init:orch ~f:(fun o (p : Patch.t) ->
                 let a = Orchestrator.agent o p.Patch.id in
-                if a.Patch_agent.busy then
+                if Patch_agent.is_busy a then
                   let o =
                     Orchestrator.set_pr_number o p.Patch.id (Pr_number.of_int 1)
                   in
@@ -118,12 +94,12 @@ let () =
                   Orchestrator.enqueue o p.Patch.id Operation_kind.Ci
                 else o)
           in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           List.for_all actions ~f:(function
             | Orchestrator.Respond (pid, _) ->
                 let a = Orchestrator.agent orch pid in
                 Patch_agent.has_pr a && (not a.Patch_agent.merged)
-                && (not a.Patch_agent.busy)
+                && (not (Patch_agent.is_busy a))
                 && not (Patch_agent.needs_intervention a)
             | Orchestrator.Start (_, _) | Orchestrator.Rebase (_, _) -> true)
         with _ -> false)
@@ -135,12 +111,12 @@ let () =
       (fun patches ->
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let orch, _effects, _actions = tick orch ~patches in
+          let orch, _actions = tick orch ~patches in
           (* Enqueue multiple operations *)
           let orch =
             List.fold patches ~init:orch ~f:(fun o (p : Patch.t) ->
                 let a = Orchestrator.agent o p.Patch.id in
-                if a.Patch_agent.busy then
+                if Patch_agent.is_busy a then
                   let o =
                     Orchestrator.set_pr_number o p.Patch.id (Pr_number.of_int 1)
                   in
@@ -149,7 +125,7 @@ let () =
                   Orchestrator.enqueue o p.Patch.id Operation_kind.Human
                 else o)
           in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           List.for_all actions ~f:(function
             | Orchestrator.Respond (pid, k) -> (
                 let a = Orchestrator.agent orch pid in
@@ -169,8 +145,8 @@ let () =
       gen_patch_list_unique (fun patches ->
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let orch, _effects, _actions = tick orch ~patches in
-          let _orch, _effects, actions2 = tick orch ~patches in
+          let orch, _actions = tick orch ~patches in
+          let _orch, actions2 = tick orch ~patches in
           List.for_all actions2 ~f:(function
             | Orchestrator.Start (pid, _) ->
                 not (Patch_agent.has_pr (Orchestrator.agent orch pid))
@@ -185,7 +161,7 @@ let () =
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
           let pending = pending_actions orch ~patches in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           let action_equal a b =
             match (a, b) with
             | Orchestrator.Start (p1, b1), Orchestrator.Start (p2, b2) ->
@@ -215,7 +191,7 @@ let () =
       gen_patch_list_unique (fun patches ->
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           let started_ids =
             List.filter_map actions ~f:(function
               | Orchestrator.Start (pid, _) -> Some pid
@@ -238,7 +214,7 @@ let () =
       (fun patches ->
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           let pids =
             List.map actions ~f:(function
               | Orchestrator.Start (pid, _) -> pid
@@ -257,7 +233,7 @@ let () =
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
           let count_before = List.length (Orchestrator.all_agents orch) in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           let orch_after =
             List.fold actions ~init:orch ~f:(fun o a -> Orchestrator.fire o a)
           in
@@ -274,9 +250,9 @@ let () =
           (* Tick, complete, and merge everything *)
           let orch =
             List.fold patches ~init:orch ~f:(fun o (p : Patch.t) ->
-                let o, _effects, _actions = tick o ~patches in
+                let o, _actions = tick o ~patches in
                 let a = Orchestrator.agent o p.Patch.id in
-                if a.Patch_agent.busy then
+                if Patch_agent.is_busy a then
                   let o =
                     Orchestrator.set_pr_number o p.Patch.id (Pr_number.of_int 1)
                   in
@@ -284,7 +260,7 @@ let () =
                   Orchestrator.mark_merged o p.Patch.id
                 else o)
           in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           let merged_ids =
             List.filter_map patches ~f:(fun (p : Patch.t) ->
                 if (Orchestrator.agent orch p.Patch.id).Patch_agent.merged then
@@ -310,7 +286,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch =
                 Orchestrator.set_pr_number orch pid (Pr_number.of_int 1)
               in
@@ -323,7 +299,7 @@ let () =
               assert (Patch_agent.needs_intervention a);
               (* Enqueue work — should be blocked by needs_intervention *)
               let orch = Orchestrator.enqueue orch pid Operation_kind.Ci in
-              let _orch, _effects, actions = tick orch ~patches in
+              let _orch, actions = tick orch ~patches in
               not
                 (List.exists actions ~f:(function
                   | Orchestrator.Respond (p, _) -> Patch_id.equal p pid
@@ -342,7 +318,7 @@ let () =
           | [] -> true
           | first :: _ ->
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch =
                 Orchestrator.set_pr_number orch first.Patch.id
                   (Pr_number.of_int 1)
@@ -354,7 +330,7 @@ let () =
               in
               let orch = Orchestrator.complete orch first.Patch.id in
               let orch = Orchestrator.enqueue orch first.Patch.id kind in
-              let _orch, _effects, actions = tick orch ~patches in
+              let _orch, actions = tick orch ~patches in
               List.exists actions ~f:(function
                 | Orchestrator.Respond (pid, k) ->
                     Patch_id.equal pid first.Patch.id
@@ -372,7 +348,7 @@ let () =
       gen_patch_list_unique (fun patches ->
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let orch_after, _effects, actions = tick orch ~patches in
+          let orch_after, actions = tick orch ~patches in
           let started_ids =
             List.filter_map actions ~f:(function
               | Orchestrator.Start (pid, _) -> Some pid
@@ -392,7 +368,7 @@ let () =
                      ~has_pr:(fun p ->
                        Patch_agent.has_pr (Orchestrator.agent orch p))
               then
-                a_after.Patch_agent.busy
+                Patch_agent.is_busy a_after
                 && List.mem started_ids pid ~equal:Patch_id.equal
               else true)
         with _ -> false)
@@ -405,11 +381,11 @@ let () =
       gen_patch_list_unique (fun patches ->
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let orch, _effects, _actions = tick orch ~patches in
+          let orch, _actions = tick orch ~patches in
           let orch =
             List.fold patches ~init:orch ~f:(fun o (p : Patch.t) ->
                 let a = Orchestrator.agent o p.Patch.id in
-                if a.Patch_agent.busy then
+                if Patch_agent.is_busy a then
                   let o =
                     Orchestrator.set_pr_number o p.Patch.id (Pr_number.of_int 1)
                   in
@@ -417,7 +393,7 @@ let () =
                   Orchestrator.enqueue o p.Patch.id Operation_kind.Rebase
                 else o)
           in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           List.for_all actions ~f:(function
             | Orchestrator.Rebase (pid, _) ->
                 let a = Orchestrator.agent orch pid in
@@ -433,11 +409,11 @@ let () =
       (fun patches ->
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let orch, _effects, _actions = tick orch ~patches in
+          let orch, _actions = tick orch ~patches in
           let orch =
             List.fold patches ~init:orch ~f:(fun o (p : Patch.t) ->
                 let a = Orchestrator.agent o p.Patch.id in
-                if a.Patch_agent.busy then
+                if Patch_agent.is_busy a then
                   let o =
                     Orchestrator.set_pr_number o p.Patch.id (Pr_number.of_int 1)
                   in
@@ -445,7 +421,7 @@ let () =
                   Orchestrator.enqueue o p.Patch.id Operation_kind.Rebase
                 else o)
           in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           not
             (List.exists actions ~f:(function
               | Orchestrator.Respond (_, k) ->
@@ -467,7 +443,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch =
                 Orchestrator.set_pr_number orch pid (Pr_number.of_int 1)
               in
@@ -502,7 +478,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let results = [ Worktree.Ok; Worktree.Noop; stub_conflict ] in
               List.for_all results ~f:(fun r ->
                   let orch', _effects =
@@ -523,12 +499,12 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let check r =
                 let orch', _effects =
                   Orchestrator.apply_rebase_result orch pid r new_base
                 in
-                not (Orchestrator.agent orch' pid).Patch_agent.busy
+                not (Patch_agent.is_busy (Orchestrator.agent orch' pid))
               in
               check Worktree.Ok && check Worktree.Noop
         with _ -> false)
@@ -544,7 +520,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch', effects =
                 Orchestrator.apply_rebase_result orch pid stub_conflict new_base
               in
@@ -566,7 +542,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.set_has_conflict orch pid in
               let orch', effects =
                 Orchestrator.apply_rebase_result orch pid Worktree.Ok new_base
@@ -587,7 +563,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.set_has_conflict orch pid in
               let orch', effects =
                 Orchestrator.apply_rebase_result orch pid Worktree.Noop new_base
@@ -607,15 +583,16 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch', effects =
                 Orchestrator.apply_rebase_result orch pid
                   (Worktree.Error "test error") new_base
               in
               let a = Orchestrator.agent orch' pid in
-              (not a.Patch_agent.busy)
+              (not (Patch_agent.is_busy a))
               && Patch_agent.equal_session_fallback
-                   a.Patch_agent.session_fallback Patch_agent.Fresh_available
+                   (Patch_agent.session_fallback a)
+                   Patch_agent.Fresh_available
               && a.Patch_agent.rebase_failure_count = 1
               && List.is_empty effects
         with _ -> false)
@@ -630,7 +607,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _ =
                 Orchestrator.apply_rebase_result orch pid
                   (Worktree.Error "test error 1") new_base
@@ -646,7 +623,8 @@ let () =
                    (Patch_agent.intervention_reason a)
                    (Some "rebase_failure_count>=2")
               && Patch_agent.equal_session_fallback
-                   a.Patch_agent.session_fallback Patch_agent.Fresh_available
+                   (Patch_agent.session_fallback a)
+                   Patch_agent.Fresh_available
         with _ -> false)
   in
 
@@ -659,7 +637,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _ =
                 Orchestrator.apply_rebase_result orch pid
                   (Worktree.Error "test error 1") new_base
@@ -675,7 +653,8 @@ let () =
               a.Patch_agent.rebase_failure_count = 0
               && (not (Patch_agent.needs_intervention a))
               && Patch_agent.equal_session_fallback
-                   a.Patch_agent.session_fallback Patch_agent.Fresh_available
+                   (Patch_agent.session_fallback a)
+                   Patch_agent.Fresh_available
         with _ -> false)
   in
 
@@ -689,7 +668,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.set_session_failed orch pid in
               let orch = Orchestrator.set_tried_fresh orch pid in
               let orch, _ =
@@ -706,7 +685,8 @@ let () =
                    (Patch_agent.intervention_reason a)
                    (Some "session_fallback=given_up")
               && Patch_agent.equal_session_fallback
-                   a.Patch_agent.session_fallback Patch_agent.Given_up
+                   (Patch_agent.session_fallback a)
+                   Patch_agent.Given_up
         with _ -> false)
   in
 
@@ -721,7 +701,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _ =
                 Orchestrator.apply_rebase_result orch pid
                   (Worktree.Error "test error 1") new_base
@@ -816,7 +796,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _effects =
                 Orchestrator.apply_rebase_result orch pid Worktree.Ok new_base
               in
@@ -845,7 +825,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _effects =
                 Orchestrator.apply_rebase_result orch pid Worktree.Ok new_base
               in
@@ -869,7 +849,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _effects =
                 Orchestrator.apply_rebase_result orch pid Worktree.Ok new_base
               in
@@ -903,7 +883,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _effects =
                 Orchestrator.apply_rebase_result orch pid Worktree.Ok new_base
               in
@@ -937,7 +917,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _effects =
                 Orchestrator.apply_rebase_result orch pid Worktree.Ok new_base
               in
@@ -967,7 +947,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _effects =
                 Orchestrator.apply_rebase_result orch pid Worktree.Ok new_base
               in
@@ -991,7 +971,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.set_has_conflict orch pid in
               let orch', decision, effects =
                 Orchestrator.apply_conflict_rebase_result orch pid Worktree.Ok
@@ -1000,7 +980,7 @@ let () =
               let a = Orchestrator.agent orch' pid in
               Orchestrator.equal_conflict_rebase_decision decision
                 Orchestrator.Conflict_resolved
-              && (not a.Patch_agent.busy)
+              && (not (Patch_agent.is_busy a))
               && (not a.Patch_agent.has_conflict)
               && List.equal Orchestrator.equal_rebase_effect effects
                    [ Orchestrator.Push_branch ]
@@ -1018,7 +998,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch', decision, effects =
                 Orchestrator.apply_conflict_rebase_result orch pid Worktree.Noop
                   new_base
@@ -1026,7 +1006,7 @@ let () =
               let a = Orchestrator.agent orch' pid in
               Orchestrator.equal_conflict_rebase_decision decision
                 Orchestrator.Conflict_resolved
-              && (not a.Patch_agent.busy)
+              && (not (Patch_agent.is_busy a))
               && List.equal Orchestrator.equal_rebase_effect effects
                    [ Orchestrator.Push_branch ]
         with _ -> false)
@@ -1043,7 +1023,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch', decision, effects =
                 Orchestrator.apply_conflict_rebase_result orch pid stub_conflict
                   new_base
@@ -1051,7 +1031,7 @@ let () =
               let a = Orchestrator.agent orch' pid in
               Orchestrator.equal_conflict_rebase_decision decision
                 Orchestrator.Deliver_to_agent
-              && a.Patch_agent.busy && a.Patch_agent.has_conflict
+              && Patch_agent.is_busy a && a.Patch_agent.has_conflict
               && List.is_empty effects
         with _ -> false)
   in
@@ -1069,7 +1049,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let check r =
                 let orch', _, _ =
                   Orchestrator.apply_conflict_rebase_result orch pid r new_base
@@ -1093,7 +1073,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch', decision, effects =
                 Orchestrator.apply_conflict_rebase_result orch pid
                   (Worktree.Error "test error") new_base
@@ -1101,9 +1081,10 @@ let () =
               let a = Orchestrator.agent orch' pid in
               Orchestrator.equal_conflict_rebase_decision decision
                 Orchestrator.Conflict_failed
-              && (not a.Patch_agent.busy)
+              && (not (Patch_agent.is_busy a))
               && Patch_agent.equal_session_fallback
-                   a.Patch_agent.session_fallback Patch_agent.Fresh_available
+                   (Patch_agent.session_fallback a)
+                   Patch_agent.Fresh_available
               && a.Patch_agent.rebase_failure_count = 1
               && List.is_empty effects
         with _ -> false)
@@ -1121,7 +1102,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _, _ =
                 Orchestrator.apply_conflict_rebase_result orch pid
                   (Worktree.Error "test error 1") new_base
@@ -1151,7 +1132,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let results = [ Worktree.Ok; Worktree.Noop; stub_conflict ] in
               List.for_all results ~f:(fun r ->
                   let orch', _, _ =
@@ -1176,7 +1157,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _decision, _effects =
                 Orchestrator.apply_conflict_rebase_result orch pid Worktree.Ok
                   new_base
@@ -1188,7 +1169,7 @@ let () =
               let a = Orchestrator.agent orch pid in
               Orchestrator.equal_conflict_resolution resolution
                 Orchestrator.Conflict_done
-              && (not a.Patch_agent.busy)
+              && (not (Patch_agent.is_busy a))
               && not a.Patch_agent.has_conflict
         with _ -> false)
   in
@@ -1206,7 +1187,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _decision, _effects =
                 Orchestrator.apply_conflict_rebase_result orch pid Worktree.Ok
                   new_base
@@ -1244,7 +1225,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, decision, _effects =
                 Orchestrator.apply_conflict_rebase_result orch pid Worktree.Noop
                   new_base
@@ -1283,7 +1264,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, decision, _effects =
                 Orchestrator.apply_conflict_rebase_result orch pid Worktree.Noop
                   new_base
@@ -1314,7 +1295,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _decision, _effects =
                 Orchestrator.apply_conflict_rebase_result orch pid stub_conflict
                   new_base
@@ -1341,7 +1322,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _decision, _effects =
                 Orchestrator.apply_conflict_rebase_result orch pid stub_conflict
                   new_base
@@ -1366,7 +1347,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch, _decision, _effects =
                 Orchestrator.apply_conflict_rebase_result orch pid
                   (Worktree.Error "test") new_base
@@ -1392,7 +1373,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.complete orch pid in
               let poll =
                 Poller.
@@ -1437,7 +1418,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.complete orch pid in
               let poll =
                 Poller.
@@ -1482,7 +1463,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.set_has_conflict orch pid in
               let orch = Orchestrator.complete orch pid in
               let poll =
@@ -1533,7 +1514,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.complete orch pid in
               let poll =
                 Poller.
@@ -1581,7 +1562,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.set_has_conflict orch pid in
               let orch = Orchestrator.complete orch pid in
               let orch =
@@ -1631,7 +1612,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.complete orch pid in
               let poll =
                 Poller.
@@ -1678,7 +1659,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch =
                 Orchestrator.set_pr_number orch pid (Pr_number.of_int 1)
               in
@@ -1735,7 +1716,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch =
                 Orchestrator.set_pr_number orch pid (Pr_number.of_int 1)
               in
@@ -1791,7 +1772,7 @@ let () =
           | first :: _ ->
               let pid = first.Patch.id in
               let orch = Orchestrator.create ~patches ~main_branch:main in
-              let orch, _effects, _actions = tick orch ~patches in
+              let orch, _actions = tick orch ~patches in
               let orch = Orchestrator.complete orch pid in
               let orch = Orchestrator.increment_ci_failure_count orch pid in
               let poll =

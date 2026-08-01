@@ -118,7 +118,7 @@ let initial_base_of m pid =
 let deps_satisfied m pid =
   Graph.deps_satisfied (Orchestrator.graph m.orch)
     pid ~has_merged:(has_merged_in m.orch) ~has_pr:(fun dep ->
-      Patch_agent.is_pr_present (Orchestrator.agent m.orch dep))
+      Patch_agent.has_pr (Orchestrator.agent m.orch dep))
 
 (** Start [pid] from [base]: PR appears, implementation notes are delivered, and
     the session completes, mirroring the SBI bootstrap plus the deps-notes-ready
@@ -179,7 +179,7 @@ let do_rebase_traced m pid base =
   let agent = Orchestrator.agent m.orch pid in
   if
     (not (Patch_agent.has_pr agent))
-    || agent.Patch_agent.merged || agent.Patch_agent.busy
+    || agent.Patch_agent.merged || Patch_agent.is_busy agent
   then (m, None)
   else
     let base_set = absorbed_of m (Branch.to_string base) in
@@ -325,7 +325,7 @@ let apply_command m cmd =
         in
         if
           (not (Patch_agent.has_pr agent))
-          || agent.Patch_agent.merged || agent.Patch_agent.busy
+          || agent.Patch_agent.merged || Patch_agent.is_busy agent
           || (not rebase_in_queue)
           || List.length open_deps > 1
         then m
@@ -354,7 +354,7 @@ let view_of_agent ~sibling_rebase_target (a : Patch_agent.t) :
     Reconciler.id = a.Patch_agent.patch_id;
     has_pr = Patch_agent.has_pr a;
     merged = a.Patch_agent.merged;
-    busy = a.Patch_agent.busy;
+    busy = Patch_agent.is_busy a;
     needs_intervention = Patch_agent.needs_intervention a;
     branch_blocked = a.Patch_agent.branch_blocked;
     in_merge_queue = Patch_agent.in_merge_queue a;
@@ -486,20 +486,11 @@ let no_startable_unstarted m =
 let mk_patch ~id ~deps : Patch.t =
   {
     id = Patch_id.of_string id;
-    title = "";
-    description = "";
+    goal = "patch " ^ id ^ " completes";
     branch = Branch.of_string ("branch-" ^ id);
     dependencies = List.map deps ~f:Patch_id.of_string;
-    spec = "";
-    acceptance_criteria = [];
     files = [];
-    classification = "";
-    changes = [];
-    test_stubs_introduced = [];
-    test_stubs_implemented = [];
-    complexity = None;
-    precedents = [];
-    required_context = [];
+    checks = [];
   }
 
 (* Index:        0       1            2            3

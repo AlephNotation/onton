@@ -124,34 +124,6 @@ let parse_event (line : string) : Types.Stream_event.t list =
     (parse_event_with_cost_tracking ~model:None ~budget_cap_nano_usd:None
        ~cost_state:Codex_cost.initial_cost_state line)
 
-let auto_model ~complexity =
-  match complexity with
-  | Some 1 -> Some "gpt-5.6-luna"
-  | Some 2 -> Some "gpt-5.6-terra"
-  | Some 3 -> Some "gpt-5.6-sol"
-  | Some _ | None -> Some "gpt-5.6-sol"
-
-let%test "auto_model: complexity 1 -> Luna" =
-  Option.equal String.equal
-    (auto_model ~complexity:(Some 1))
-    (Some "gpt-5.6-luna")
-
-let%test "auto_model: complexity 2 -> Terra" =
-  Option.equal String.equal
-    (auto_model ~complexity:(Some 2))
-    (Some "gpt-5.6-terra")
-
-let%test "auto_model: complexity 3 -> Sol" =
-  Option.equal String.equal
-    (auto_model ~complexity:(Some 3))
-    (Some "gpt-5.6-sol")
-
-let%test "auto_model: missing or invalid complexity -> Sol" =
-  Option.equal String.equal (auto_model ~complexity:None) (Some "gpt-5.6-sol")
-  && Option.equal String.equal
-       (auto_model ~complexity:(Some 4))
-       (Some "gpt-5.6-sol")
-
 let%test "build_args fresh (no resume, no model)" =
   let args =
     build_args ~model:None ~cwd_path:"/tmp/work" ~prompt:"do stuff"

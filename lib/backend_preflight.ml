@@ -57,75 +57,24 @@ let check_backend ?getenv_opt ?is_executable backend =
                 PATH, or choose another backend with --backend."
                backend command))
 
-let selected_backends ~default_backend ~effective_model
-    ~(repo_config : Repo_config.t) =
-  let add acc backend =
-    if List.mem acc backend ~equal:String.equal then acc else backend :: acc
-  in
-  let acc = add [] default_backend in
-  let uses_routes =
-    match effective_model with
-    | Some model -> Backend_routing.is_auto_model (Some model)
-    | None -> false
-  in
-  let acc =
-    if uses_routes then
-      List.fold repo_config.complexity_routes ~init:acc
-        ~f:(fun acc (_, route) -> add acc route.Repo_config.backend)
-    else acc
-  in
-  List.rev acc
+let validate ?getenv_opt ?is_executable ~backend () =
+  check_backend ?getenv_opt ?is_executable backend
 
-let validate ?getenv_opt ?is_executable ~default_backend ~effective_model
-    ~repo_config () =
-  let backends =
-    selected_backends ~default_backend ~effective_model ~repo_config
-  in
-  let errors =
-    List.filter_map backends ~f:(fun backend ->
-        match check_backend ?getenv_opt ?is_executable backend with
-        | Ok () -> None
-        | Error msg -> Some msg)
-  in
-  match errors with [] -> Ok () | _ :: _ -> Error errors
+let%test "validate accepts an installed backend" =
+  Result.is_ok
+    (validate
+       ~getenv_opt:(fun _ -> Some "/bin")
+       ~is_executable:(fun path -> String.equal path "/bin/codex")
+       ~backend:"codex" ())
 
-let%test "selected_backends ignores routes unless effective model is auto" =
-  let repo_config =
-    {
-      Repo_config.empty with
-      complexity_routes = [ (1, { backend = "codex"; model = None }) ];
-    }
-  in
-  List.equal String.equal
-    (selected_backends ~default_backend:"claude" ~effective_model:None
-       ~repo_config)
-    [ "claude" ]
-
-let%test "selected_backends includes routes for auto effective model" =
-  let repo_config =
-    {
-      Repo_config.empty with
-      complexity_routes =
-        [
-          (1, { backend = "codex"; model = None });
-          (2, { backend = "claude"; model = Some "sonnet" });
-        ];
-    }
-  in
-  List.equal String.equal
-    (selected_backends ~default_backend:"claude" ~effective_model:(Some "auto")
-       ~repo_config)
-    [ "claude"; "codex" ]
-
-let%test "validate reports missing backend executable" =
-  let repo_config = Repo_config.empty in
+let%test "validate reports a missing backend executable" =
   match
     validate
       ~getenv_opt:(fun _ -> Some "/bin")
       ~is_executable:(fun _ -> false)
-      ~default_backend:"codex" ~effective_model:None ~repo_config ()
+      ~backend:"codex" ()
   with
-  | Error [ msg ] ->
-      String.is_substring msg ~substring:"codex"
-      && String.is_substring msg ~substring:"not found or is not executable"
-  | Ok () | Error _ -> false
+  | Error message ->
+      String.is_substring message ~substring:"codex"
+      && String.is_substring message ~substring:"not found or is not executable"
+  | Ok () -> false

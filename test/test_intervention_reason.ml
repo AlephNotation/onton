@@ -107,51 +107,19 @@ let () =
 
   print_endline "PASS: human_intervention_reason surfaces the actionable reason"
 
-let make_patch ?(deps = []) ~id ~branch ~title () =
-  Patch.
-    {
-      id;
-      title;
-      description = "";
-      branch;
-      dependencies = deps;
-      spec = "";
-      acceptance_criteria = [];
-      files = [];
-      classification = "";
-      changes = [];
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
-    }
+let make_patch ?(deps = []) ~id ~branch ~goal () =
+  Patch.{ id; goal; branch; dependencies = deps; files = []; checks = [] }
 
 let make_gameplan patches =
   Gameplan.
-    {
-      project_name = "test-project";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
-      patches;
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-    }
+    { project_name = "test-project"; repo_owner = ""; repo_name = ""; patches }
 
 let () =
   let patch_id = Patch_id.of_string "patch-1" in
   let patch =
     make_patch ~id:patch_id
       ~branch:(Branch.of_string "codex/fix")
-      ~title:"fix" ()
+      ~goal:"branch state is repaired" ()
   in
   let gameplan = make_gameplan [ patch ] in
   let orchestrator =
@@ -161,8 +129,7 @@ let () =
   in
   let views =
     Tui.views_of_orchestrator ~orchestrator ~gameplan ~activity:[]
-      ~resolve_routing:(fun ~complexity:_ ->
-        { Backend_routing.backend = "claude"; model = None })
+      ~backend_decision:{ Backend_routing.backend = "claude"; model = None }
       ()
   in
   match views with
@@ -177,14 +144,14 @@ let () =
       print_endline "PASS: branch-blocked patches render as needs-help"
   | _ -> assert false
 
-let assert_raw_fields ~merged ~has_pr ~is_pr_missing ~session_given_up
-    ~human_in_queue ~ci_failure_count ~start_attempts_without_pr
-    ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
-    ~push_failure_count ~rebase_failure_count ~pr_body_artifact_miss_count
+let assert_raw_fields ~merged ~has_pr ~session_given_up ~human_in_queue
+    ~ci_failure_count ~start_attempts_without_pr ~conflict_noop_count
+    ~no_commits_push_count ~context_exhaustion_count ~push_failure_count
+    ~rebase_failure_count ~pr_body_artifact_miss_count
     ~review_unresolved_cycle_count ~expected =
   let reason =
-    Patch_agent.intervention_reason_of_fields ~merged ~has_pr ~is_pr_missing
-      ~session_given_up ~human_in_queue ~ci_failure_count
+    Patch_agent.intervention_reason_of_fields ~merged ~has_pr ~session_given_up
+      ~human_in_queue ~ci_failure_count
       ~max_ci_failures:Patch_agent.default_max_ci_failures
       ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
       ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
@@ -193,7 +160,7 @@ let assert_raw_fields ~merged ~has_pr ~is_pr_missing ~session_given_up
   assert (Option.equal String.equal reason expected);
   assert (
     Bool.equal
-      (Patch_agent.needs_intervention_of_fields ~merged ~has_pr ~is_pr_missing
+      (Patch_agent.needs_intervention_of_fields ~merged ~has_pr
          ~session_given_up ~human_in_queue ~ci_failure_count
          ~max_ci_failures:Patch_agent.default_max_ci_failures
          ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
@@ -202,46 +169,42 @@ let assert_raw_fields ~merged ~has_pr ~is_pr_missing ~session_given_up
       (Option.is_some expected))
 
 let () =
-  assert_raw_fields ~merged:false ~has_pr:true ~is_pr_missing:false
-    ~session_given_up:false ~human_in_queue:false ~ci_failure_count:0
-    ~start_attempts_without_pr:0 ~conflict_noop_count:0 ~no_commits_push_count:0
-    ~context_exhaustion_count:0 ~push_failure_count:0 ~rebase_failure_count:2
-    ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
-    ~expected:(Some "rebase_failure_count>=2");
-  assert_raw_fields ~merged:false ~has_pr:true ~is_pr_missing:false
-    ~session_given_up:false ~human_in_queue:true ~ci_failure_count:3
-    ~start_attempts_without_pr:0 ~conflict_noop_count:0 ~no_commits_push_count:0
-    ~context_exhaustion_count:0 ~push_failure_count:0 ~rebase_failure_count:0
-    ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
-    ~expected:None;
+  assert_raw_fields ~merged:false ~has_pr:true ~session_given_up:false
+    ~human_in_queue:false ~ci_failure_count:0 ~start_attempts_without_pr:0
+    ~conflict_noop_count:0 ~no_commits_push_count:0 ~context_exhaustion_count:0
+    ~push_failure_count:0 ~rebase_failure_count:2 ~pr_body_artifact_miss_count:0
+    ~review_unresolved_cycle_count:0 ~expected:(Some "rebase_failure_count>=2");
+  assert_raw_fields ~merged:false ~has_pr:true ~session_given_up:false
+    ~human_in_queue:true ~ci_failure_count:3 ~start_attempts_without_pr:0
+    ~conflict_noop_count:0 ~no_commits_push_count:0 ~context_exhaustion_count:0
+    ~push_failure_count:0 ~rebase_failure_count:0 ~pr_body_artifact_miss_count:0
+    ~review_unresolved_cycle_count:0 ~expected:None;
   (* The review-loop cap fires like every other counter... *)
-  assert_raw_fields ~merged:false ~has_pr:true ~is_pr_missing:false
-    ~session_given_up:false ~human_in_queue:false ~ci_failure_count:0
-    ~start_attempts_without_pr:0 ~conflict_noop_count:0 ~no_commits_push_count:0
-    ~context_exhaustion_count:0 ~push_failure_count:0 ~rebase_failure_count:0
-    ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:2
+  assert_raw_fields ~merged:false ~has_pr:true ~session_given_up:false
+    ~human_in_queue:false ~ci_failure_count:0 ~start_attempts_without_pr:0
+    ~conflict_noop_count:0 ~no_commits_push_count:0 ~context_exhaustion_count:0
+    ~push_failure_count:0 ~rebase_failure_count:0 ~pr_body_artifact_miss_count:0
+    ~review_unresolved_cycle_count:2
     ~expected:(Some "review_unresolved_cycle_count>=2");
   (* ...respects the Human exemption... *)
-  assert_raw_fields ~merged:false ~has_pr:true ~is_pr_missing:false
-    ~session_given_up:false ~human_in_queue:true ~ci_failure_count:0
-    ~start_attempts_without_pr:0 ~conflict_noop_count:0 ~no_commits_push_count:0
-    ~context_exhaustion_count:0 ~push_failure_count:0 ~rebase_failure_count:0
-    ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:2
-    ~expected:None;
+  assert_raw_fields ~merged:false ~has_pr:true ~session_given_up:false
+    ~human_in_queue:true ~ci_failure_count:0 ~start_attempts_without_pr:0
+    ~conflict_noop_count:0 ~no_commits_push_count:0 ~context_exhaustion_count:0
+    ~push_failure_count:0 ~rebase_failure_count:0 ~pr_body_artifact_miss_count:0
+    ~review_unresolved_cycle_count:2 ~expected:None;
   (* ...and stays quiet one increment below the cap. *)
-  assert_raw_fields ~merged:false ~has_pr:true ~is_pr_missing:false
-    ~session_given_up:false ~human_in_queue:false ~ci_failure_count:0
-    ~start_attempts_without_pr:0 ~conflict_noop_count:0 ~no_commits_push_count:0
-    ~context_exhaustion_count:0 ~push_failure_count:0 ~rebase_failure_count:0
-    ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:1
-    ~expected:None;
+  assert_raw_fields ~merged:false ~has_pr:true ~session_given_up:false
+    ~human_in_queue:false ~ci_failure_count:0 ~start_attempts_without_pr:0
+    ~conflict_noop_count:0 ~no_commits_push_count:0 ~context_exhaustion_count:0
+    ~push_failure_count:0 ~rebase_failure_count:0 ~pr_body_artifact_miss_count:0
+    ~review_unresolved_cycle_count:1 ~expected:None;
   let reason_with_custom_cap =
     Patch_agent.intervention_reason_of_fields ~merged:false ~has_pr:true
-      ~is_pr_missing:false ~session_given_up:false ~human_in_queue:false
-      ~ci_failure_count:5 ~max_ci_failures:5 ~start_attempts_without_pr:0
-      ~conflict_noop_count:0 ~no_commits_push_count:0
-      ~context_exhaustion_count:0 ~push_failure_count:0 ~rebase_failure_count:0
-      ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
+      ~session_given_up:false ~human_in_queue:false ~ci_failure_count:5
+      ~max_ci_failures:5 ~start_attempts_without_pr:0 ~conflict_noop_count:0
+      ~no_commits_push_count:0 ~context_exhaustion_count:0 ~push_failure_count:0
+      ~rebase_failure_count:0 ~pr_body_artifact_miss_count:0
+      ~review_unresolved_cycle_count:0
   in
   assert (
     Option.equal String.equal reason_with_custom_cap
@@ -270,7 +233,6 @@ let () =
          let transitions : (Patch_agent.t -> Patch_agent.t) list =
            [
              (fun a -> Patch_agent.set_automerge_enabled a flag);
-             (fun a -> Patch_agent.set_automerge_inflight a flag);
              (fun a -> Patch_agent.set_automerge_deadline a 1.0);
              (fun a -> Patch_agent.clear_automerge_deadline a);
              (fun a -> Patch_agent.increment_automerge_failure_count a);
@@ -281,9 +243,12 @@ let () =
              (fun a ->
                Patch_agent.set_unresolved_comment_count a
                  (if flag then 1 else 0));
+             (fun a -> Patch_agent.mark_review_requested a "deadbeef");
              (fun a ->
-               Patch_agent.set_review_requested_for_oid a (Some "deadbeef"));
-             (fun a -> Patch_agent.set_review_request_inflight a flag);
+               if flag then
+                 Patch_agent.mark_review_failed a ~head_oid:"deadbeef"
+                   ~error:"denied"
+               else a);
              (fun a -> Patch_agent.increment_conflict_noop_count a);
              (fun a -> Patch_agent.reset_conflict_noop_count a);
              (fun a -> Patch_agent.increment_no_commits_push_count a);
@@ -334,6 +299,16 @@ let () =
              (agent ()) transitions
          in
          let _history = Patch_agent.anchor_history a in
+         let automerge_deadline = Patch_agent.automerge_deadline a in
+         let automerge_enabled = Patch_agent.automerge_enabled a in
+         let automerge_failure_count = Patch_agent.automerge_failure_count a in
+         let current_message_id = Patch_agent.current_message_id a in
+         let current_op_state = Patch_agent.current_op_state a in
+         let llm_session_id = Patch_agent.llm_session_id a in
+         let review_failure = Patch_agent.review_failure a in
+         let review_requested_for_oid =
+           Patch_agent.review_requested_for_oid a
+         in
          let _in_merge_queue = Patch_agent.in_merge_queue a in
          let _priority = Patch_agent.highest_priority a in
          let _approved =
@@ -345,8 +320,7 @@ let () =
          let _reason = Patch_agent.intervention_reason a in
          let reason_from_fields =
            Patch_agent.intervention_reason_of_fields ~merged:false ~has_pr:false
-             ~is_pr_missing:false ~session_given_up:false ~human_in_queue:flag
-             ~ci_failure_count:3
+             ~session_given_up:false ~human_in_queue:flag ~ci_failure_count:3
              ~max_ci_failures:Patch_agent.default_max_ci_failures
              ~start_attempts_without_pr:0 ~conflict_noop_count:0
              ~no_commits_push_count:0 ~context_exhaustion_count:0
@@ -355,8 +329,7 @@ let () =
          in
          let needs_from_fields =
            Patch_agent.needs_intervention_of_fields ~merged:false ~has_pr:false
-             ~is_pr_missing:false ~session_given_up:false ~human_in_queue:flag
-             ~ci_failure_count:3
+             ~session_given_up:false ~human_in_queue:flag ~ci_failure_count:3
              ~max_ci_failures:Patch_agent.default_max_ci_failures
              ~start_attempts_without_pr:0 ~conflict_noop_count:0
              ~no_commits_push_count:0 ~context_exhaustion_count:0
@@ -365,8 +338,7 @@ let () =
          in
          let rebase_reason =
            Patch_agent.intervention_reason_of_fields ~merged:false ~has_pr:true
-             ~is_pr_missing:false ~session_given_up:false ~human_in_queue:false
-             ~ci_failure_count:0
+             ~session_given_up:false ~human_in_queue:false ~ci_failure_count:0
              ~max_ci_failures:Patch_agent.default_max_ci_failures
              ~start_attempts_without_pr:0 ~conflict_noop_count:0
              ~no_commits_push_count:0 ~context_exhaustion_count:0
@@ -375,8 +347,7 @@ let () =
          in
          let rebase_needs_intervention =
            Patch_agent.needs_intervention_of_fields ~merged:false ~has_pr:true
-             ~is_pr_missing:false ~session_given_up:false ~human_in_queue:false
-             ~ci_failure_count:0
+             ~session_given_up:false ~human_in_queue:false ~ci_failure_count:0
              ~max_ci_failures:Patch_agent.default_max_ci_failures
              ~start_attempts_without_pr:0 ~conflict_noop_count:0
              ~no_commits_push_count:0 ~context_exhaustion_count:0
@@ -384,5 +355,13 @@ let () =
              ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
          in
          Bool.equal needs_from_fields (Option.is_some reason_from_fields)
-         && Bool.equal rebase_needs_intervention (Option.is_some rebase_reason)));
+         && Bool.equal rebase_needs_intervention (Option.is_some rebase_reason)
+         && Bool.equal automerge_enabled flag
+         && Option.is_none automerge_deadline
+         && automerge_failure_count = 0
+         && Option.is_some current_message_id
+         && Option.is_some current_op_state
+         && Option.is_some llm_session_id
+         && Bool.equal (Option.is_some review_failure) flag
+         && Bool.equal (Option.is_some review_requested_for_oid) (not flag)));
   print_endline "PASS: patch_agent surface threaded"

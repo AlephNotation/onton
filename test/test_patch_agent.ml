@@ -41,13 +41,15 @@ let () =
       Test.make ~name:"create yields clean initial state" gen_pid (fun pid ->
           let t = create ~branch:br0 pid in
           (not (has_pr t))
-          && (not t.has_session) && (not t.busy) && (not t.merged)
+          && (not (has_session t))
+          && (not (is_busy t))
+          && (not t.merged)
           && (not (needs_intervention t))
           && List.is_empty t.queue && (not t.satisfies) && (not t.changed)
           && (not t.has_conflict)
           && Option.is_none t.base_branch
           && t.ci_failure_count = 0
-          && equal_session_fallback t.session_fallback Fresh_available
+          && equal_session_fallback (session_fallback t) Fresh_available
           && t.start_attempts_without_pr = 0
           && List.is_empty t.human_messages
           && List.is_empty t.ci_checks && (not t.merge_ready)
@@ -79,7 +81,7 @@ let () =
         (fun (pid, br) ->
           let a = create ~branch:br pid |> fun a -> start a ~base_branch:br in
           (not (has_pr a))
-          && a.has_session && a.busy && a.satisfies
+          && has_session a && is_busy a && a.satisfies
           && Option.equal Branch.equal a.base_branch (Some br));
       (* -- start twice raises -- *)
       Test.make ~name:"start on already-started raises (busy)"
@@ -106,7 +108,7 @@ let () =
             create ~branch:br pid |> fun a -> start_with_pr a ~base_branch:br
           in
           let a = complete a in
-          not a.busy);
+          not (is_busy a));
       (* -- complete on non-busy is idempotent no-op -- *)
       Test.make ~name:"complete on non-busy is no-op" gen_pid (fun pid ->
           let a = create ~branch:br0 pid in
@@ -153,7 +155,7 @@ let () =
           let a = complete a in
           let a = enqueue a k in
           let a = respond a k in
-          a.busy && a.has_session);
+          is_busy a && has_session a);
       (* -- respond removes op from queue -- *)
       Test.make ~name:"respond removes op from queue"
         Gen.(triple gen_pid gen_branch gen_feedback_op)
@@ -201,7 +203,7 @@ let () =
                       match dispatch a high with
                       | exception _ -> false
                       | a' ->
-                          a'.busy
+                          is_busy a'
                           && (not
                                 (List.mem a'.queue high
                                    ~equal:Operation_kind.equal))
@@ -214,15 +216,15 @@ let () =
         (fun (pid, br) ->
           let a = create ~branch:br0 pid in
           let a = start_with_pr a ~base_branch:br in
-          let busy_after_start = a.busy in
+          let busy_after_start = is_busy a in
           let a = complete a in
-          let idle_after_complete = not a.busy in
+          let idle_after_complete = not (is_busy a) in
           let a = enqueue a Operation_kind.Rebase in
           let a = rebase a ~base_branch:(Branch.of_string "new-base") in
-          let busy_after_rebase = a.busy in
+          let busy_after_rebase = is_busy a in
           let a = complete a in
           busy_after_start && idle_after_complete && busy_after_rebase
-          && (not a.busy)
+          && (not (is_busy a))
           && not (needs_intervention a));
       (* -- respond Human clears satisfies -- *)
       Test.make ~name:"respond Human clears satisfies" ~count:1
@@ -256,8 +258,8 @@ let () =
             let a = complete a in
             let a = enqueue a Operation_kind.Ci in
             let a = respond a Operation_kind.Ci in
-            a.busy
-            && Option.equal Operation_kind.equal a.current_op
+            is_busy a
+            && Option.equal Operation_kind.equal (current_op a)
                  (Some Operation_kind.Ci)
           with _ -> false);
       Test.make ~name:"complete Ci clears busy and current_op" ~count:1
@@ -271,7 +273,7 @@ let () =
             let a = enqueue a Operation_kind.Ci in
             let a = respond a Operation_kind.Ci in
             let a = complete a in
-            (not a.busy) && Option.is_none a.current_op
+            (not (is_busy a)) && Option.is_none (current_op a)
           with _ -> false);
       (* -- respond Merge_conflict preserves has_conflict -- *)
       Test.make ~name:"respond Merge_conflict preserves has_conflict" ~count:1
@@ -686,7 +688,7 @@ let () =
             let one_failure = not (needs_intervention a) in
             let a = increment_rebase_failure_count a in
             one_failure && needs_intervention a
-            && equal_session_fallback a.session_fallback Fresh_available
+            && equal_session_fallback (session_fallback a) Fresh_available
           with _ -> false);
       Test.make ~name:"reset_intervention_state clears rebase_failure_count"
         ~count:1
@@ -752,15 +754,15 @@ let () =
           let a = mark_merged a in
           let a =
             Onton_core.Patch_agent.restore ~patch_id:a.patch_id ~branch:br
-              ~pr_status:Onton_core.Patch_pr_status.Absent ~has_session:false
-              ~busy:false ~merged:false ~queue:[] ~satisfies:false
-              ~changed:false ~has_conflict:false ~base_branch:None
-              ~notified_base_branch:None ~ci_failure_count:0
-              ~session_fallback:Fresh_available ~human_messages:[]
-              ~inflight_human_messages:[] ~ci_checks:a.ci_checks
-              ~merge_ready:false ~mergeability_unknown:false
-              ~merge_queue_required:false ~merge_queue_entry:None
-              ~is_draft:false ~pr_body_delivered:false
+              ~pr_status:Onton_core.Patch_pr_status.Absent
+              ~session:Onton_core.Patch_agent.Not_started
+              ~activity:Onton_core.Patch_agent.Inactive ~merged:false ~queue:[]
+              ~satisfies:false ~changed:false ~has_conflict:false
+              ~base_branch:None ~notified_base_branch:None ~ci_failure_count:0
+              ~human_messages:[] ~inflight_human_messages:[]
+              ~ci_checks:a.ci_checks ~merge_ready:false
+              ~mergeability_unknown:false ~merge_queue_required:false
+              ~merge_queue_entry:None ~is_draft:false ~pr_body_delivered:false
               ~pr_body_artifact_miss_count:0 ~start_attempts_without_pr:0
               ~conflict_noop_count:0 ~no_commits_push_count:0
               ~context_exhaustion_count:0 ~push_failure_count:0
@@ -768,13 +770,9 @@ let () =
               ~branch_rebased_onto_sha:None ~merge_commit_sha:None
               ~base_contains_merged_siblings:true
               ~anchor_history:Onton_core.Anchor_history.empty
-              ~checks_passing:false ~current_op:None
-              ~current_op_state:Onton_core.Patch_agent.Queued
-              ~current_message_id:None ~generation:0 ~worktree_path:None
-              ~branch_blocked:false ~llm_session_id:None
-              ~automerge_enabled:false ~automerge_deadline:None
-              ~automerge_inflight:false ~automerge_failure_count:0
-              ~delivered_ci_run_ids:[] ()
+              ~checks_passing:false ~generation:0 ~worktree_path:None
+              ~branch_blocked:false ~automerge:Disabled ~delivered_ci_run_ids:[]
+              ()
           in
           let a = start a ~base_branch:br in
           List.is_empty a.ci_checks);
@@ -798,23 +796,23 @@ let () =
           List.length a.ci_checks = 1);
       (* -- set_tried_fresh from Fresh_available -> Tried_fresh -- *)
       Test.make ~name:"set_tried_fresh from Fresh_available" gen_pid (fun pid ->
-          let a = create ~branch:br0 pid in
+          let a = create ~branch:br0 pid |> fun a -> start a ~base_branch:br0 in
           let a = set_tried_fresh a in
-          equal_session_fallback a.session_fallback Tried_fresh);
+          equal_session_fallback (session_fallback a) Tried_fresh);
       (* -- set_tried_fresh is no-op from Tried_fresh or Given_up -- *)
       Test.make ~name:"set_tried_fresh advances Tried_fresh to Given_up" gen_pid
         (fun pid ->
-          let a = create ~branch:br0 pid in
+          let a = create ~branch:br0 pid |> fun a -> start a ~base_branch:br0 in
           let a = set_tried_fresh a in
           let a = set_tried_fresh a in
-          equal_session_fallback a.session_fallback Given_up);
+          equal_session_fallback (session_fallback a) Given_up);
       (* -- set_tried_fresh is no-op from Given_up -- *)
       Test.make ~name:"set_tried_fresh no-op from Given_up" gen_pid (fun pid ->
-          let a = create ~branch:br0 pid in
+          let a = create ~branch:br0 pid |> fun a -> start a ~base_branch:br0 in
           let a = set_tried_fresh a in
           let a = set_tried_fresh a in
           let a = set_tried_fresh a in
-          equal_session_fallback a.session_fallback Given_up);
+          equal_session_fallback (session_fallback a) Given_up);
       (* -- rebase sets busy, preserves has_session, updates base_branch,
            drains rebase queue -- *)
       Test.make ~name:"rebase postconditions (has_session=true)"
@@ -827,7 +825,7 @@ let () =
           let a = complete a in
           let a = enqueue a Operation_kind.Rebase in
           let a = rebase a ~base_branch:new_base in
-          a.busy && a.has_session
+          is_busy a && has_session a
           && Option.equal Branch.equal a.base_branch (Some new_base)
           && not
                (List.mem a.queue Operation_kind.Rebase
@@ -842,12 +840,12 @@ let () =
             restore ~patch_id:pid ~branch:br
               ~pr_status:
                 (Onton_core.Patch_pr_status.Present (Pr_number.of_int 1))
-              ~has_session:false ~busy:false ~merged:false ~queue:[]
+              ~session:Onton_core.Patch_agent.Not_started
+              ~activity:Onton_core.Patch_agent.Inactive ~merged:false ~queue:[]
               ~satisfies:true ~changed:false ~has_conflict:false
               ~base_branch:(Some br) ~notified_base_branch:(Some br)
-              ~ci_failure_count:0 ~session_fallback:Fresh_available
-              ~human_messages:[] ~inflight_human_messages:[] ~ci_checks:[]
-              ~merge_ready:false ~mergeability_unknown:false
+              ~ci_failure_count:0 ~human_messages:[] ~inflight_human_messages:[]
+              ~ci_checks:[] ~merge_ready:false ~mergeability_unknown:false
               ~merge_queue_required:false ~merge_queue_entry:None
               ~is_draft:false ~pr_body_delivered:false
               ~pr_body_artifact_miss_count:0 ~start_attempts_without_pr:0
@@ -857,17 +855,13 @@ let () =
               ~branch_rebased_onto_sha:None ~merge_commit_sha:None
               ~base_contains_merged_siblings:true
               ~anchor_history:Onton_core.Anchor_history.empty
-              ~checks_passing:false ~current_op:None
-              ~current_op_state:Onton_core.Patch_agent.Queued
-              ~current_message_id:None ~generation:0 ~worktree_path:None
-              ~branch_blocked:false ~llm_session_id:None
-              ~automerge_enabled:false ~automerge_deadline:None
-              ~automerge_inflight:false ~automerge_failure_count:0
-              ~delivered_ci_run_ids:[] ()
+              ~checks_passing:false ~generation:0 ~worktree_path:None
+              ~branch_blocked:false ~automerge:Disabled ~delivered_ci_run_ids:[]
+              ()
           in
           let a = enqueue a Operation_kind.Rebase in
           let a = rebase a ~base_branch:new_base in
-          a.busy && a.has_session
+          is_busy a && has_session a
           && Option.equal Branch.equal a.base_branch (Some new_base)
           && not
                (List.mem a.queue Operation_kind.Rebase
@@ -1002,8 +996,6 @@ let () =
           let a = set_review_decision a (Some "REVIEW_REQUIRED") in
           let a = set_unresolved_comment_count a 0 in
           let a = set_is_draft a false in
-          let a = set_review_requested_for_oid a None in
-          let a = set_review_request_inflight a false in
           should_request_review a ~main_branch:br0);
       Test.make ~name:"should_request_review false when checks not passing"
         ~count:1
@@ -1068,9 +1060,9 @@ let () =
           let a = set_unresolved_comment_count a 0 in
           let a = set_head_oid a (Some "deadbeef") in
           let a = set_review_decision a (Some "REVIEW_REQUIRED") in
-          let a = set_review_requested_for_oid a (Some "deadbeef") in
+          let a = mark_review_requested a "deadbeef" in
           not (should_request_review a ~main_branch:br0));
-      Test.make ~name:"should_request_review false when a request is inflight"
+      Test.make ~name:"should_request_review fails closed after request failure"
         ~count:1
         Gen.(pure (pid0, br0))
         (fun (pid, br) ->
@@ -1083,7 +1075,9 @@ let () =
           let a = set_unresolved_comment_count a 0 in
           let a = set_head_oid a (Some "deadbeef") in
           let a = set_review_decision a (Some "REVIEW_REQUIRED") in
-          let a = set_review_request_inflight a true in
+          let a =
+            mark_review_failed a ~head_oid:"deadbeef" ~error:"team missing"
+          in
           not (should_request_review a ~main_branch:br0));
       Test.make
         ~name:
@@ -1142,34 +1136,7 @@ let () =
           let a = set_pr_number a (Pr_number.of_int 7) in
           has_pr a && a.is_draft && (not a.pr_body_delivered)
           && a.start_attempts_without_pr = 0);
-      (* -- mark_pr_missing is minimal: clears only world-state assertions -- *)
-      Test.make
-        ~name:"mark_pr_missing preserves queue + counters + delivered_ci"
-        ~count:1
-        Gen.(pure (pid0, br0))
-        (fun (pid, br) ->
-          try
-            let a =
-              create ~branch:br pid |> fun a -> start_with_pr a ~base_branch:br
-            in
-            let a = complete a in
-            let a = enqueue a Operation_kind.Pr_body in
-            let a = enqueue a Operation_kind.Human in
-            let a = record_delivered_ci_run_ids a [ 101; 102 ] in
-            let a = set_pr_body_delivered a true in
-            let before_queue = a.queue in
-            let before_delivered = a.delivered_ci_run_ids in
-            let before_notified = a.notified_base_branch in
-            let a = mark_pr_missing a in
-            is_pr_missing a
-            && List.equal Operation_kind.equal a.queue before_queue
-            && List.equal Int.equal a.delivered_ci_run_ids before_delivered
-            && Option.equal Branch.equal a.notified_base_branch before_notified
-            && a.pr_body_delivered && (not a.is_draft) && (not a.merge_ready)
-            && (not a.checks_passing) && List.is_empty a.ci_checks
-          with _ -> false);
-      (* -- set_pr_number Recover_same preserves bootstrap fields -- *)
-      Test.make ~name:"set_pr_number Recover_same preserves bootstrap fields"
+      Test.make ~name:"observing the same PR preserves bootstrap fields"
         ~count:1
         Gen.(pure (pid0, br0))
         (fun (pid, br) ->
@@ -1182,10 +1149,8 @@ let () =
             let a = record_delivered_ci_run_ids a [ 101; 102 ] in
             let before_delivered = a.delivered_ci_run_ids in
             let before_notified = a.notified_base_branch in
-            let a = mark_pr_missing a in
             let a = set_pr_number a pr in
-            (* same pr -> Recover_same: preserve everything *)
-            is_pr_present a && a.pr_body_delivered
+            has_pr a && a.pr_body_delivered
             && List.equal Int.equal a.delivered_ci_run_ids before_delivered
             && Option.equal Branch.equal a.notified_base_branch before_notified
           with _ -> false);
@@ -1203,7 +1168,7 @@ let () =
             let a = set_pr_body_delivered a true in
             let a = set_pr_number a pr2 in
             (* different pr -> Adopt_new: reset CI history + bootstrap *)
-            is_pr_present a
+            has_pr a
             && List.is_empty a.delivered_ci_run_ids
             && (not a.pr_body_delivered) && a.is_draft
           with _ -> false);
@@ -1312,16 +1277,6 @@ let () =
             let a = set_base_branch a br in
             not (base_branch_changed a)
           with _ -> false);
-      (* -- create_adhoc stores real branch -- *)
-      Test.make ~name:"create_adhoc stores real branch"
-        Gen.(
-          triple gen_pid gen_branch (map Pr_number.of_int (int_range 1 9999)))
-        (fun (pid, br, pr) ->
-          let a =
-            create_adhoc ~patch_id:pid ~branch:br ~pr_number:pr
-              ~max_ci_failures:default_max_ci_failures
-          in
-          Branch.equal a.branch br);
       Test.make ~name:"patch agent public surface is linked" Gen.unit (fun () ->
           ignore add_human_messages;
           ignore anchor_history;
@@ -1354,7 +1309,6 @@ let () =
           ignore resume_current_message;
           ignore set_automerge_deadline;
           ignore set_automerge_enabled;
-          ignore set_automerge_inflight;
           ignore set_base_contains_merged_siblings;
           ignore set_branch_blocked;
           ignore set_branch_rebased_onto;

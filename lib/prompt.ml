@@ -89,78 +89,10 @@ let render_with_override ~(project_name : string) ~(name : string)
 let format_list items =
   List.map items ~f:(fun s -> "- " ^ s) |> String.concat ~sep:"\n"
 
-let optional_section ~header content =
-  if String.is_empty content then ""
-  else "\n## " ^ header ^ "\n" ^ content ^ "\n"
-
-let optional_list_section ~header items =
-  match items with
-  | [] -> ""
-  | _ -> optional_section ~header (format_list items)
-
-let format_precedents (ps : Precedent.t list) : string =
-  if List.is_empty ps then ""
-  else
-    let body =
-      List.map ps ~f:(fun p ->
-          let url_part =
-            match p.Precedent.url with
-            | None | Some "" -> ""
-            | Some u -> Printf.sprintf " — %s" u
-          in
-          let why =
-            if String.is_empty p.why_applicable then ""
-            else " — " ^ p.why_applicable
-          in
-          Printf.sprintf "- **[%s] %s**%s%s" p.kind p.name url_part why)
-      |> String.concat ~sep:"\n"
-    in
-    "\n\
-     ## Established Precedents\n\n\
-     This patch must be grounded in the established precedents below. Treat \
-     reviewing them as required research, not optional background reading. Web \
-     research is part of this task when a source is external.\n\n\
-     **Before making code changes:**\n\n\
-     1. Retrieve and read every listed reference. Follow the canonical URL \
-     when one is provided. When an entry names a paper, RFC, standard, \
-     library, pattern, documentation set, or other external source without a \
-     URL, use web search or the available research tools to locate an \
-     authoritative primary source.\n\
-     2. Identify the concrete API shape, algorithm steps, invariants, and \
-     tradeoffs that apply to this patch. Do not rely only on the title or the \
-     summary below.\n\
-     3. Apply those findings to the implementation. If a source cannot be \
-     retrieved, is ambiguous, or conflicts with the codebase or gameplan, do \
-     not silently substitute recollection: record the limitation and your \
-     resolution in the implementation notes.\n\n\
-     Only begin implementation after completing this review. Each entry's \
-     trailing sentence explains how the source applies to this specific \
-     patch.\n\n" ^ body ^ "\n"
-
-let format_context_resources (resources : Context_resource.t list) : string =
-  if List.is_empty resources then ""
-  else
-    let body =
-      List.map resources ~f:(fun r ->
-          let paths =
-            match r.Context_resource.paths with
-            | [] -> "Paths/references: none listed"
-            | paths -> "Paths/references: " ^ String.concat paths ~sep:", "
-          in
-          let why =
-            if String.is_empty r.why then "Why authoritative: not specified"
-            else "Why authoritative: " ^ r.why
-          in
-          Printf.sprintf "- **%s** (`%s`)\n  - %s\n  - %s" r.id r.kind paths why)
-      |> String.concat ~sep:"\n"
-    in
-    "\n\
-     ## Required Context Before Editing\n\n\
-     Read these authoritative resources before making code changes. Trust this \
-     named context over stale or ambiguous patch prose. Search and read the \
-     listed paths/references before choosing an implementation approach, and \
-     avoid starting a parallel implementation until you have checked them.\n\n"
-    ^ body ^ "\n"
+let format_checks checks =
+  List.map checks ~f:(fun (check : Check.t) ->
+      Printf.sprintf "- `%s`\n  - Proves: %s" check.run check.proves)
+  |> String.concat ~sep:"\n"
 
 let agents_md_section = function
   | Some content when not (String.is_empty (String.strip content)) ->
@@ -195,23 +127,19 @@ let agents_md_section = function
    honoured. *)
 
 (* The gameplan-reference section points agents at the read-only copy
-   published by [Project_store.publish_gameplan_artifact] at startup. The
+   published by [Project_store.publish_plan_artifact] at startup. The
    path is a pure function of the project name (no filesystem probe here),
    so the rendered gameplan layer stays byte-identical across the run. *)
 let gameplan_reference_section ~(project_name : string) : string =
   Printf.sprintf
     "\n\
-     ## Full Gameplan Reference\n\n\
-     A read-only copy of the complete gameplan JSON — every patch's full \
-     description, spec, acceptance criteria, and the functional-change \
-     ownership map — is saved at:\n\n\
+     ## Full Plan Reference\n\n\
+     A read-only copy of the complete execution plan is saved at:\n\n\
      `%s`\n\n\
-     Everything your patch needs is already in this prompt, so most sessions \
-     never read it. Consult it only when you genuinely need cross-patch \
-     context — for example, to check a sibling patch's scope before deciding \
-     whether a change belongs to you. Do not edit the file, and do not take on \
-     work owned by sibling patches.\n"
-    (Project_store.gameplan_artifact_path project_name)
+     Your patch goal, write scope, and checks are already in this prompt. \
+     Consult the full plan only to understand sibling scope. Do not edit it or \
+     take on work owned by another patch.\n"
+    (Project_store.plan_artifact_path project_name)
 
 let render_gameplan_layer ~(project_name : string) (gameplan : Gameplan.t) :
     string =
@@ -219,23 +147,13 @@ let render_gameplan_layer ~(project_name : string) (gameplan : Gameplan.t) :
     List.map gameplan.Gameplan.patches ~f:(fun (p : Patch.t) ->
         Printf.sprintf "- Patch %s: %s"
           (Patch_id.to_string p.Patch.id)
-          p.Patch.title)
+          p.Patch.goal)
     |> String.concat ~sep:"\n"
   in
   let vars =
     [
       ("project_name", project_name);
-      ("problem_statement", gameplan.Gameplan.problem_statement);
-      ("solution_summary", gameplan.Gameplan.solution_summary);
-      ( "final_state_spec_section",
-        optional_section ~header:"Final State Specification (Non-negotiable)"
-          gameplan.Gameplan.final_state_spec );
-      ( "explicit_opinions_section",
-        optional_section ~header:"Explicit Opinions (Non-negotiable)"
-          gameplan.Gameplan.explicit_opinions );
-      ( "current_state_section",
-        optional_section ~header:"Current State Analysis"
-          gameplan.Gameplan.current_state_analysis );
+      ("repository", gameplan.repo_owner ^ "/" ^ gameplan.repo_name);
       ("patches_list", patches_list);
       ("gameplan_reference_section", gameplan_reference_section ~project_name);
     ]
@@ -244,98 +162,13 @@ let render_gameplan_layer ~(project_name : string) (gameplan : Gameplan.t) :
       substitute_variables
         {|# [{{project_name}}]
 
-## Problem Statement
-{{problem_statement}}
+Repository: `{{repository}}`
 
-## Solution Summary
-{{solution_summary}}
-{{final_state_spec_section}}{{explicit_opinions_section}}{{current_state_section}}
-## Patches in Gameplan
+## Patches
 {{patches_list}}
 {{gameplan_reference_section}}
 |}
         vars)
-
-let format_functional_changes_section (fcs : Functional_change.t list) : string
-    =
-  if List.is_empty fcs then ""
-  else
-    let body =
-      List.map fcs ~f:(fun (fc : Functional_change.t) ->
-          Printf.sprintf "- **%s** — %s" fc.id fc.description)
-      |> String.concat ~sep:"\n"
-    in
-    "\n\
-     ## Functional Changes You Own\n\n\
-     These are the user-visible / behavioural changes assigned to this patch. \
-     Each is your responsibility — do not defer them to another patch, and do \
-     not stop until every one is delivered. The gameplan's enumeration is \
-     exhaustive and each change is owned by exactly one patch, so if a change \
-     appears here, no sibling patch will pick it up.\n\n" ^ body ^ "\n"
-
-let format_trace_node (n : Trace_node.t) : string =
-  let sym =
-    match n.Trace_node.symbol with
-    | Some s when not (String.is_empty (String.strip s)) ->
-        Printf.sprintf " `%s`" s
-    | _ -> ""
-  in
-  let status =
-    if String.equal n.Trace_node.status "created" then
-      " *(created by this gameplan)*"
-    else ""
-  in
-  Printf.sprintf "`%s`%s%s" n.Trace_node.file sym status
-
-let format_trace_path (nodes : Trace_node.t list) : string =
-  List.map nodes ~f:format_trace_node |> String.concat ~sep:" → "
-
-let format_reachability_traces_section (traces : Reachability_trace.t list) :
-    string =
-  if List.is_empty traces then ""
-  else
-    let body =
-      List.map traces ~f:(fun (t : Reachability_trace.t) ->
-          List.filter_opt
-            [
-              Some (Printf.sprintf "- **%s**" t.Reachability_trace.observable);
-              Some
-                (Printf.sprintf "  - Live path (entry → leaf): %s"
-                   (format_trace_path t.Reachability_trace.path));
-              (match t.Reachability_trace.test_path with
-              | Some (_ :: _ as ns) ->
-                  Some
-                    (Printf.sprintf "  - Test seam: %s" (format_trace_path ns))
-              | _ -> None);
-              (match t.Reachability_trace.runtime_reachability_note with
-              | Some s when not (String.is_empty (String.strip s)) ->
-                  Some (Printf.sprintf "  - Runtime reachability: %s" s)
-              | _ -> None);
-            ]
-          |> String.concat ~sep:"\n")
-      |> String.concat ~sep:"\n"
-    in
-    "\n\
-     ## Reachability Traces You Must Deliver\n\n\
-     Each observable below is produced by a real call/import/reference path \
-     from its entry point to the leaf. Your edit must land on a node of the \
-     path — do not change a symbol that is not on it, and do not add code in a \
-     surface the path never reaches. Keep the path reachable end to end.\n\n"
-    ^ body ^ "\n"
-
-(* Concise variant for the PR body: shows reviewers which surface the patch
-   targets without the implementing-agent instructions. *)
-let format_reachability_traces_pr (traces : Reachability_trace.t list) : string
-    =
-  if List.is_empty traces then ""
-  else
-    let body =
-      List.map traces ~f:(fun (t : Reachability_trace.t) ->
-          Printf.sprintf "- **%s**\n  - %s" t.Reachability_trace.observable
-            (format_trace_path t.Reachability_trace.path))
-      |> String.concat ~sep:"\n"
-    in
-    "\n## Reachability\n\n" ^ body ^ "\n"
 
 (* The dependency-notes section points the agent at the implementation notes
    each ancestor patch's agent records via its Pr_body session
@@ -354,7 +187,7 @@ let dependency_notes_section ~(project_name : string) (ancestors : Patch.t list)
       List.map ancestors ~f:(fun (p : Patch.t) ->
           Printf.sprintf "- Patch %s: %s — `%s`"
             (Patch_id.to_string p.Patch.id)
-            p.Patch.title
+            p.Patch.goal
             (Project_store.pr_body_artifact_path ~project_name
                ~patch_id:p.Patch.id))
       |> String.concat ~sep:"\n"
@@ -374,9 +207,7 @@ let dependency_notes_section ~(project_name : string) (ancestors : Patch.t list)
       entries
 
 let render_patch_layer ~(project_name : string) (patch : Patch.t) ?pr_number
-    ?(functional_changes = []) ?(context_resources = [])
-    ?(reachability_traces = []) ?(ancestors = []) ~(base_branch : string) () :
-    string =
+    ?(ancestors = []) ~(base_branch : string) () : string =
   let patch_id = Patch_id.to_string patch.Patch.id in
   let deps =
     match patch.Patch.dependencies with
@@ -392,10 +223,6 @@ let render_patch_layer ~(project_name : string) (patch : Patch.t) ?pr_number
     | Some n -> Printf.sprintf "#%d" (Pr_number.to_int n)
     | None -> "Not yet created"
   in
-  let classification_note =
-    if String.is_empty patch.Patch.classification then ""
-    else Printf.sprintf " [%s]" patch.Patch.classification
-  in
   let base_branch_note =
     if String.equal base_branch "main" then ""
     else
@@ -407,26 +234,15 @@ let render_patch_layer ~(project_name : string) (patch : Patch.t) ?pr_number
          dependency's.\n\n"
         base_branch base_branch
   in
-  let pr_instructions =
-    (* Commit subjects are not rewritten or rejected downstream. The rebase
-       subject filter in [Worktree.rebase_onto] treats this prompt convention as
-       a best-effort agent contract: malformed subjects simply will not match
-       [Worktree.is_ancestor_patch_subject], so rebase falls back to the other
-       ancestry / patch-id paths. *)
-    let commit_block =
-      Printf.sprintf
-        {|
-**Commit your work with `git commit` before ending the session.** Every code change you make must land in a commit — uncommitted changes are discarded by the supervisor's push, and no PR can be opened from an empty branch. Multiple commits are fine; commit whenever it makes sense.
-
-**Prefix every commit subject with `[%s] Patch %s: `** (the same project name and patch number used by this branch and its PR title), e.g. `[%s] Patch %s: <short summary>`. This lets the supervisor recognize your commits as belonging to this patch when rebasing onto dependency branches later.
-
-**Do NOT run `git push` or `gh pr create` yourself.** The supervisor pushes your commits and opens/updates the PR.|}
-        project_name patch_id project_name patch_id
+  let controller_instructions =
+    let publication_block =
+      {|
+Do not run `git`, `gh`, or any forge command. Git metadata, credentials, validation, commits, rebases, pushes, and PR mutations belong to the controller. Make only the requested file edits; when you finish, the controller runs every declared check, rejects out-of-scope changes, and records accepted changes in a deterministic patch commit.|}
     in
     match pr_number with
-    | Some _ -> commit_block
+    | Some _ -> publication_block
     | None ->
-        commit_block
+        publication_block
         ^ {|
 
 The supervisor opens the draft PR after your first commit lands on the remote, with a gameplan-derived title and body.|}
@@ -434,8 +250,7 @@ The supervisor opens the draft PR after your first commit lands on the remote, w
   let vars =
     [
       ("project_name", project_name);
-      ("title", patch.Patch.title);
-      ("classification_note", classification_note);
+      ("goal", patch.Patch.goal);
       ("dependencies", deps);
       ("branch", branch);
       ("base_branch", base_branch);
@@ -445,112 +260,44 @@ The supervisor opens the draft PR after your first commit lands on the remote, w
         | Some n -> Int.to_string (Pr_number.to_int n)
         | None -> "" );
       ("pr_str", pr_str);
-      ("description", patch.Patch.description);
-      ("spec", patch.Patch.spec);
-      ("acceptance_criteria", format_list patch.Patch.acceptance_criteria);
       ("files", format_list patch.Patch.files);
-      ( "functional_changes_section",
-        format_functional_changes_section functional_changes );
-      ( "reachability_traces_section",
-        format_reachability_traces_section reachability_traces );
-      ("context_resources_section", format_context_resources context_resources);
+      ("checks", format_checks patch.Patch.checks);
       ( "dependency_notes_section",
         dependency_notes_section ~project_name ancestors );
-      ("changes_section", optional_list_section ~header:"Changes" patch.changes);
-      ( "spec_section",
-        if String.is_empty patch.spec then ""
-        else
-          "\n\
-           ## Specification\n\n\
-           The following Pantagruel specification defines the formal \
-           invariants and post-conditions for this patch. After implementing, \
-           verify your code satisfies every clause. Call out any clause you \
-           cannot map to your implementation.\n\n\
-           ### How to Read This Spec\n\n\
-           | Syntax | Meaning |\n\
-           |--------|----------|\n\
-           | `Domain.` | Entity type declaration |\n\
-           | `rule x: T => R.` | State mapping (function from T to R) |\n\
-           | `~> Action @ params.` | State transition (modifies state, no \
-           return) |\n\
-           | `~> Action @ params, guard.` | Action with precondition |\n\
-           | `rule' x` | Post-state value of rule (after action executes) |\n\
-           | `all x: T \\| P.` | For all x of type T, P must hold (invariant) |\n\
-           | `some x: T \\| P.` | There exists x of type T where P holds |\n\
-           | `p -> q` | Implication: if p then q |\n\
-           | `~p` | Negation |\n\
-           | `x in Domain` | Membership test |\n\
-           | `Context ~> Action` | Action operates within write-permission \
-           boundary |\n\
-           | `{Context} rule` | Rule belongs to context (only modifiable by \
-           that context's actions) |\n\
-           | `initially P.` | Constraint on initial state only |\n\
-           | `---` | Separator between declarations (above) and propositions \
-           (below) |\n\
-           | `where` | Introduces a new chapter (progressive disclosure) |\n\n\
-           **Mapping spec to code:**\n\
-           - **Rules** → fields, columns, computed properties, or lookups\n\
-           - **Primed rules** (`f'`) → what your code must do (post-conditions)\n\
-           - **Guards on actions** → what your code must check (preconditions)\n\
-           - **Invariants** (non-primed propositions) → safety properties that \
-           must hold before and after every operation\n\
-           - **`all`/`some` quantifiers** → iteration or existence checks over \
-           collections\n\n\
-           ### Spec\n\
-           ```\n" ^ patch.spec ^ "\n```\n" );
-      ( "acceptance_criteria_section",
-        optional_list_section ~header:"Acceptance Criteria"
-          patch.acceptance_criteria );
-      ( "files_section",
-        optional_list_section ~header:"Files to Modify" patch.files );
-      ("precedents_section", format_precedents patch.Patch.precedents);
-      ( "test_stubs_introduced_section",
-        optional_list_section ~header:"Test Stubs Introduced"
-          patch.test_stubs_introduced );
-      ( "test_stubs_implemented_section",
-        optional_list_section ~header:"Test Stubs Implemented"
-          patch.test_stubs_implemented );
       ("base_branch_note", base_branch_note);
-      ("pr_instructions", pr_instructions);
+      ("controller_instructions", controller_instructions);
     ]
   in
   render_with_override ~project_name ~name:"patch" ~vars ~default:(fun () ->
       substitute_variables
-        {|## Patch {{patch_id}}{{classification_note}}: {{title}}
+        {|## Patch {{patch_id}}
 
 ## Dependencies
 {{dependencies}}
 {{dependency_notes_section}}
-## Your Task
+## Goal
 
-{{base_branch_note}}{{description}}
-{{functional_changes_section}}{{reachability_traces_section}}{{context_resources_section}}{{changes_section}}{{files_section}}{{precedents_section}}{{test_stubs_introduced_section}}{{test_stubs_implemented_section}}{{spec_section}}{{acceptance_criteria_section}}
-## Git Instructions
+{{base_branch_note}}{{goal}}
+
+## Write Scope
+{{files}}
+
+Do not edit outside this scope. If the goal cannot be completed within it, stop and report the plan defect instead of expanding scope.
+
+## Required Checks
+{{checks}}
+
+The controller runs these commands after your turn. They are evidence gates,
+not worker capabilities.
+
+## Controller Boundary
 - Branch: {{branch}}
 - Base branch: {{base_branch}}
 - PR: {{pr_str}}
-{{pr_instructions}}
+{{controller_instructions}}
 
 |}
         vars)
-
-let owned_functional_changes (gameplan : Gameplan.t) (patch : Patch.t) :
-    Functional_change.t list =
-  List.filter gameplan.Gameplan.functional_changes
-    ~f:(fun (fc : Functional_change.t) ->
-      Patch_id.equal fc.Functional_change.owned_by patch.Patch.id)
-
-let required_context_resources (gameplan : Gameplan.t) (patch : Patch.t) :
-    Context_resource.t list =
-  List.filter gameplan.Gameplan.context_resources
-    ~f:(fun (r : Context_resource.t) ->
-      List.mem patch.Patch.required_context r.id ~equal:String.equal)
-
-let owned_reachability_traces (gameplan : Gameplan.t) (patch : Patch.t) :
-    Reachability_trace.t list =
-  List.filter gameplan.Gameplan.reachability_traces
-    ~f:(fun (t : Reachability_trace.t) ->
-      Patch_id.equal t.Reachability_trace.owned_by patch.Patch.id)
 
 let ancestor_patches (gameplan : Gameplan.t) (patch : Patch.t) : Patch.t list =
   let graph = Graph.of_patches gameplan.Gameplan.patches in
@@ -559,17 +306,12 @@ let ancestor_patches (gameplan : Gameplan.t) (patch : Patch.t) : Patch.t list =
       List.find gameplan.Gameplan.patches ~f:(fun (p : Patch.t) ->
           Patch_id.equal p.Patch.id id))
 
-(* The single source of truth for deriving the patch layer's gameplan-scoped
-   inputs (owned functional changes, required context resources, ancestor
-   notes). Every caller that renders a patch layer for a gameplan patch must
-   go through this — hand-assembling the inputs at a call site is how the
-   long-lived session's cached layer drifts from the composed prompt. *)
+(* The single source of truth for deriving a patch's ancestor notes. Every
+   caller must go through this so the long-lived session's cached layer stays
+   identical to the composed prompt. *)
 let render_patch_layer_of_gameplan ~project_name ?pr_number (patch : Patch.t)
     (gameplan : Gameplan.t) ~base_branch =
   render_patch_layer ~project_name patch ?pr_number
-    ~functional_changes:(owned_functional_changes gameplan patch)
-    ~context_resources:(required_context_resources gameplan patch)
-    ~reachability_traces:(owned_reachability_traces gameplan patch)
     ~ancestors:(ancestor_patches gameplan patch)
     ~base_branch ()
 
@@ -602,188 +344,10 @@ let render_patch_prompt ~(project_name : string) ?agents_md ?pr_number
       ~base_branch
   ^ render_turn_layer_start ~project_name
 
-let render_spec_suffix (patch : Patch.t) (gameplan : Gameplan.t) : string =
-  let gp =
-    let ds = gameplan.Gameplan.final_state_spec in
-    if String.is_empty ds then ""
-    else "\n## Gameplan Specification\n\n```\n" ^ ds ^ "\n```\n"
-  in
-  let ps =
-    if String.is_empty patch.Patch.spec then ""
-    else "\n## Patch Specification\n\n```\n" ^ patch.spec ^ "\n```\n"
-  in
-  gp ^ ps
+let render_check_suffix (patch : Patch.t) : string =
+  "\n## Required Checks\n\n" ^ format_checks patch.checks ^ "\n"
 
-let%test "render_spec_suffix: both empty" =
-  let patch =
-    {
-      Patch.id = Patch_id.of_string "1";
-      title = "";
-      description = "";
-      spec = "";
-      changes = [];
-      acceptance_criteria = [];
-      files = [];
-      dependencies = [];
-      branch = Branch.of_string "b";
-      classification = "";
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
-    }
-  in
-  let gameplan =
-    {
-      Gameplan.project_name = "";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
-      patches = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-    }
-  in
-  String.equal (render_spec_suffix patch gameplan) ""
-
-let%test "render_spec_suffix: gameplan spec only" =
-  let patch =
-    {
-      Patch.id = Patch_id.of_string "1";
-      title = "";
-      description = "";
-      spec = "";
-      changes = [];
-      acceptance_criteria = [];
-      files = [];
-      dependencies = [];
-      branch = Branch.of_string "b";
-      classification = "";
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
-    }
-  in
-  let gameplan =
-    {
-      Gameplan.project_name = "";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "module FOO.\nsome spec";
-      patches = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-    }
-  in
-  let result = render_spec_suffix patch gameplan in
-  String.is_substring result ~substring:"## Gameplan Specification"
-  && String.is_substring result ~substring:"module FOO."
-  && not (String.is_substring result ~substring:"## Patch Specification")
-
-let%test "render_spec_suffix: patch spec only" =
-  let patch =
-    {
-      Patch.id = Patch_id.of_string "1";
-      title = "";
-      description = "";
-      spec = "module BAR.\npatch spec";
-      changes = [];
-      acceptance_criteria = [];
-      files = [];
-      dependencies = [];
-      branch = Branch.of_string "b";
-      classification = "";
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
-    }
-  in
-  let gameplan =
-    {
-      Gameplan.project_name = "";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
-      patches = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-    }
-  in
-  let result = render_spec_suffix patch gameplan in
-  String.is_substring result ~substring:"## Patch Specification"
-  && String.is_substring result ~substring:"module BAR."
-  && not (String.is_substring result ~substring:"## Gameplan Specification")
-
-let%test "render_spec_suffix: both present" =
-  let patch =
-    {
-      Patch.id = Patch_id.of_string "1";
-      title = "";
-      description = "";
-      spec = "module BAR.\npatch spec";
-      changes = [];
-      acceptance_criteria = [];
-      files = [];
-      dependencies = [];
-      branch = Branch.of_string "b";
-      classification = "";
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
-    }
-  in
-  let gameplan =
-    {
-      Gameplan.project_name = "";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "module FOO.\ngameplan spec";
-      patches = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-    }
-  in
-  let result = render_spec_suffix patch gameplan in
-  String.is_substring result ~substring:"## Gameplan Specification"
-  && String.is_substring result ~substring:"## Patch Specification"
-
-let render_pr_description ~(project_name : string) (patch : Patch.t)
-    (gameplan : Gameplan.t) =
+let render_pr_description ~(project_name : string) (patch : Patch.t) =
   let patch_id = Patch_id.to_string patch.Patch.id in
   let deps =
     match patch.Patch.dependencies with
@@ -797,60 +361,58 @@ let render_pr_description ~(project_name : string) (patch : Patch.t)
     [
       ("project_name", project_name);
       ("patch_id", patch_id);
-      ("title", patch.Patch.title);
-      ("description", patch.Patch.description);
-      ("problem_statement", gameplan.Gameplan.problem_statement);
-      ("solution_summary", gameplan.Gameplan.solution_summary);
+      ("goal", patch.Patch.goal);
       ("dependencies", deps);
-      ("changes_section", optional_list_section ~header:"Changes" patch.changes);
-      ("gameplan_spec_section", "");
-      ("patch_spec_section", "");
-      ( "reachability_section",
-        format_reachability_traces_pr (owned_reachability_traces gameplan patch)
-      );
-      ( "acceptance_criteria_section",
-        optional_list_section ~header:"Acceptance Criteria"
-          patch.acceptance_criteria );
-      ( "files_section",
-        optional_list_section ~header:"Files to Modify" patch.files );
-      ("precedents_section", format_precedents patch.Patch.precedents);
+      ("files", format_list patch.files);
+      ("checks", format_checks patch.checks);
     ]
   in
   render_with_override ~project_name ~name:"pr_description" ~vars
     ~default:(fun () ->
       substitute_variables
-        {|## Patch {{patch_id}}: {{title}}
+        {|## Patch {{patch_id}}
 
-{{description}}
-{{changes_section}}{{gameplan_spec_section}}{{patch_spec_section}}{{reachability_section}}{{acceptance_criteria_section}}{{files_section}}{{precedents_section}}|}
+## Goal
+{{goal}}
+
+## Dependencies
+{{dependencies}}
+
+## Write Scope
+{{files}}
+
+## Required Checks
+{{checks}}|}
         vars)
 
 let render_pr_body_prompt ~(project_name : string) ~(pr_number : Pr_number.t)
-    ~(pr_body : string) ~(spec_suffix : string) ~(artifact_path : string) =
+    ~(pr_body : string) ~(check_suffix : string) ~(artifact_path : string) =
   let pr_num_str = Int.to_string (Pr_number.to_int pr_number) in
-  let spec_context =
-    if String.is_empty (String.strip spec_suffix) then ""
-    else "\n\nThe specifications governing this patch:\n" ^ spec_suffix ^ "\n"
+  let check_context =
+    if String.is_empty (String.strip check_suffix) then ""
+    else
+      "\n\nThe executable evidence required for this patch:\n" ^ check_suffix
+      ^ "\n"
   in
   let vars =
     [
       ("pr_number", pr_num_str);
       ("pr_body", pr_body);
-      ("spec_context", spec_context);
+      ("check_context", check_context);
       ("artifact_path", artifact_path);
     ]
   in
   render_with_override ~project_name ~name:"pr_body" ~vars ~default:(fun () ->
       substitute_variables
-        {|You have just finished implementing this patch. PR #{{pr_number}} was opened with a gameplan-derived body and specifications that will be kept as-is.
+        {|You have just finished implementing this patch. PR #{{pr_number}} was opened with a plan-derived goal, scope, and required checks that will be kept as-is.
 
 The current PR body is:
 
 ---
 {{pr_body}}
 ---
-{{spec_context}}
-The supervisor will keep this description and specs on the PR. Your job is to write **additional notes** — anything a reviewer needs beyond the gameplan description. The supervisor will append your notes to the PR body under an `## Implementation Notes` header. Agents implementing patches that depend on this one are also pointed at these notes, so they double as a handoff to the work built on top of your changes.
+{{check_context}}
+The supervisor will keep that plan evidence on the PR. Your job is to write **additional notes** — anything a reviewer needs beyond it. The supervisor will append your notes to the PR body under an `## Implementation Notes` header. Agents implementing patches that depend on this one are also pointed at these notes, so they double as a handoff to the work built on top of your changes.
 
 **Write just the notes content (no header) to `{{artifact_path}}`.** This is an absolute path outside the worktree — write it with the Write tool. Do NOT run `gh`, `git`, or any forge command; the supervisor reads the file and PATCHes the PR.
 
@@ -861,9 +423,9 @@ What to include:
 - Deviations from the original plan (if any).
 - Important details a reviewer should know.
 - Anything an agent building a dependent patch on top of yours should know: renames, new invariants, API changes, gotchas.
-- A short `Spec/Evidence Mapping` when applicable: spec clause or acceptance criterion satisfied, code path implementing it, required context resource consulted, and test/static check proving it if available.
+- A short evidence mapping when useful: observable result, code path implementing it, and command that proves it.
 
-Do not repeat information already in the description or specs above — add only what's new.
+Do not repeat information already in the plan evidence above — add only what's new.
 
 Keep it concise — a few bullet points usually suffices. If you have nothing material to add (the patch is straightforward), write a single line acknowledging that.|}
         vars)
@@ -1016,12 +578,12 @@ let render_turn_layer_review ~(project_name : string) ?pr_number
             \   Use the Write tool with that absolute path — the directory is \
              outside the worktree on purpose; do not commit it.\n\n\
              Write a response file for EVERY comment listed above.%s After \
-             this session the supervisor pushes your commits, then posts each \
-             response as a reply on its comment thread and resolves that \
-             thread. A comment without a response file stays unresolved and \
-             will be re-delivered to you.\n\n\
-             After addressing all comments, commit your changes. The \
-             supervisor will push them for you — do not run `git push`."
+             this session the supervisor validates and records your changes, \
+             then posts each response as a reply on its comment thread and \
+             resolves that thread. A comment without a response file stays \
+             unresolved and will be re-delivered to you.\n\n\
+             After addressing all comments, stop. The controller owns all Git \
+             and publication operations."
             pr_ctx sha_anchor formatted artifact_dir retry_note)
 
 let render_review_prompt ~(project_name : string) ?agents_md ?pr_number
@@ -1109,8 +671,8 @@ let render_turn_layer_findings ~(project_name : string) ?pr_number
          - Use the Write tool with the absolute path (the directory is outside \
          the worktree on purpose — do not commit it). One file per finding, \
          reason text only.\n\n\
-         After addressing the in-scope findings, commit your changes. The \
-         supervisor will push them for you — do not run `git push`."
+         After addressing the in-scope findings, stop. The controller owns all \
+         Git and publication operations."
         pr_num_str sha_anchor formatted artifact_dir)
 
 let render_findings_prompt ~(project_name : string) ?agents_md ?pr_number
@@ -1175,8 +737,8 @@ let render_turn_layer_ci ~(project_name : string) ?pr_number
             "# CI Failures%s\n\n\
              The following CI checks failed:\n\n\
              %s\n\n\
-             After making your changes, commit them. The supervisor will push \
-             them for you — do not run `git push`."
+             After making your changes, stop. The controller validates, \
+             commits, and publishes them."
             pr_ctx formatted)
 
 let ci_detailed_footer =
@@ -1304,8 +866,8 @@ let render_turn_layer_ci_detailed ~(project_name : string) ?pr_number
          The following CI checks failed:\n\n\
          %s\n\n\
          %s\n\n\
-         After making your changes, commit them. The supervisor will push them \
-         for you — do not run `git push`."
+         After making your changes, stop. The controller validates, commits, \
+         and publishes them."
         pr_ctx formatted_checks ci_detailed_footer)
 
 let render_ci_failure_prompt ~(project_name : string) ?agents_md ?pr_number
@@ -1342,9 +904,10 @@ let render_turn_layer_ci_unknown ~(project_name : string) ?pr_number () =
         "# CI Failures%s\n\n\
          One or more CI checks failed. Please investigate the failures and fix \
          them.\n\n\
-         Run the CI checks locally or check the PR status for details.\n\n\
-         After making your changes, commit them. The supervisor will push them \
-         for you — do not run `git push`."
+         Use the supplied diagnostics to identify the failure; the controller \
+         runs the declared checks after your turn.\n\n\
+         After making your changes, stop. The controller validates, commits, \
+         and publishes them."
         pr_ctx)
 
 let render_ci_failure_unknown_prompt ~(project_name : string) ?agents_md
@@ -1354,72 +917,16 @@ let render_ci_failure_unknown_prompt ~(project_name : string) ?agents_md
   ^ render_turn_layer_ci_unknown ~project_name ?pr_number ()
 
 let render_recovery_section (ci : Worktree.conflict_info) =
-  let bullet (c : Worktree.unique_commit) =
-    let short =
-      if String.length c.sha >= 7 then String.sub c.sha ~pos:0 ~len:7 else c.sha
-    in
-    Printf.sprintf "  %s %s" short c.subject
-  in
-  (* unique_commits is git-log order (newest-first); the bullet list reads
-     oldest-first so an agent reapplying with cherry-pick can scan top-to-bottom
-     in commit-order. *)
-  let commits_section =
-    if List.is_empty ci.Worktree.unique_commits then ""
-    else
-      let commits_lines =
-        List.rev ci.Worktree.unique_commits
-        |> List.map ~f:bullet |> String.concat ~sep:"\n"
-      in
-      Printf.sprintf "\n\nCommits unique to this patch (oldest first):\n%s"
-        commits_lines
-  in
-  let orig_head_block =
-    if String.is_empty ci.Worktree.orig_head then ""
-    else
-      Printf.sprintf
-        {|
+  Printf.sprintf
+    {|
 
-If you need to discard your in-progress conflict resolution and start over
-from your pre-rebase state, the supervisor captured your HEAD before the
-rebase began:
+## Controller recovery context
 
-    git reset --hard %s|}
-        ci.Worktree.orig_head
-  in
-  match ci.Worktree.strategy with
-  | Worktree.Onto ->
-      Printf.sprintf
-        {|
-
-## Recovery (if rebase state is lost)
-
-If `git status` no longer shows a rebase in progress (e.g. you ran
-`git rebase --abort` or the worktree was reset), do NOT run
-`git rebase %s` against your local tracking ref — it may be stale
-and would re-pick already-merged dependency commits.
-
-First refresh remote tracking refs, then restart with the same `--onto`
-range the supervisor used:
-
-    git fetch origin
-    git rebase --onto %s %s%s%s|}
-        ci.target ci.target ci.old_base commits_section orig_head_block
-  | Worktree.Plain ->
-      Printf.sprintf
-        {|
-
-## Recovery (if rebase state is lost)
-
-If `git status` no longer shows a rebase in progress, refresh remote
-tracking refs and restart with:
-
-    git fetch origin
-    git rebase %s
-
-(No per-patch commit list could be isolated — the supervisor fell back
-to a plain rebase against `%s` because no unique commits were
-identified.)%s|}
-        ci.target ci.target orig_head_block
+The controller owns this rebase and its recovery state (target `%s`, original
+HEAD `%s`). Do not run Git commands or attempt to restart, abort, stage, or
+continue the rebase. Resolve only the conflict markers in declared patch files
+and end the turn; the controller will stage and continue safely.|}
+    ci.target ci.orig_head
 
 let render_turn_layer_merge_conflict ~(project_name : string) ?pr_number
     ~(base_branch : string) ?(git_status = "") ?(git_diff = "") ?conflict_info
@@ -1486,22 +993,11 @@ let render_turn_layer_merge_conflict ~(project_name : string) ?pr_number
 
 A rebase onto `%s` is already in progress but hit conflicts.
 
-Resolve each conflicted file, then stage and continue:
-
-```
-git add <resolved files>
-git rebase --continue
-```
-
-If the rebase continues and hits further conflicts, repeat the process.
-
-Do NOT run `git rebase origin/%s` — the rebase is already set up with the
-correct --onto range. Starting a new rebase would re-introduce dependency
-commits that have already been stripped.
-
-After resolving all conflicts and completing the rebase, the supervisor will push the rebased commits for you — do not run `git push`.%s%s%s|}
-        pr_ctx base_branch base_branch status_section diff_section
-        recovery_section)
+Resolve every conflict marker in the declared patch files, then end the turn.
+Do not stage files or run any Git command. The controller will validate the
+resolved files, stage only the declared scope, continue the rebase, and either
+publish it or deliver the next conflict in a fresh turn.%s%s%s|}
+        pr_ctx base_branch status_section diff_section recovery_section)
 
 let render_merge_conflict_prompt ~(project_name : string) ?agents_md ?pr_number
     ?patch ?gameplan ~(base_branch : string) ?(git_status = "") ?(git_diff = "")
@@ -1543,25 +1039,17 @@ let render_base_branch_changed ~old_base ~new_base =
      show only your patch's changes relative to `%s`.\n"
     old_base new_base new_base new_base
 
-let%test "patch prompt includes title and deps" =
+let%test "patch prompt includes goal and dependencies" =
   let patch : Patch.t =
     Patch.
       {
         id = Patch_id.of_string "5";
-        title = "Prompt renderer";
-        description = "";
+        goal = "Prompt renderer produces a stable layered prompt";
         branch = Branch.of_string "onton-port/patch-5";
         dependencies = [ Patch_id.of_string "1" ];
-        spec = "";
-        acceptance_criteria = [];
-        files = [];
-        classification = "";
-        changes = [];
-        test_stubs_introduced = [];
-        test_stubs_implemented = [];
-        complexity = None;
-        precedents = [];
-        required_context = [];
+        files = [ "lib/prompt.ml" ];
+        checks =
+          [ { Check.run = "dune runtest"; proves = "prompt tests pass" } ];
       }
   in
   let gameplan : Gameplan.t =
@@ -1570,37 +1058,24 @@ let%test "patch prompt includes title and deps" =
         project_name = "onton-port";
         repo_owner = "flowglad";
         repo_name = "onton";
-        problem_statement = "Port Anton to OCaml.";
-        solution_summary = "Use Eio for concurrency.";
-        final_state_spec = "";
-        current_state_analysis = "";
-        explicit_opinions = "";
-        acceptance_criteria = [];
-        open_questions = [];
         patches =
           [
             {
               Patch.id = Patch_id.of_string "1";
-              title = "Core types";
-              description = "";
+              goal = "Core plan types express executable outcomes";
               branch = Branch.of_string "onton-port/patch-1";
               dependencies = [];
-              spec = "";
-              acceptance_criteria = [];
-              files = [];
-              classification = "";
-              changes = [];
-              test_stubs_introduced = [];
-              test_stubs_implemented = [];
-              complexity = None;
-              precedents = [];
-              required_context = [];
+              files = [ "lib_core/types.ml" ];
+              checks =
+                [
+                  {
+                    Check.run = "dune runtest";
+                    proves = "core type tests pass";
+                  };
+                ];
             };
             patch;
           ];
-        functional_changes = [];
-        context_resources = [];
-        reachability_traces = [];
       }
   in
   let result =
@@ -1609,8 +1084,11 @@ let%test "patch prompt includes title and deps" =
   in
   String.is_substring result ~substring:"# [onton-port]\n"
   && String.is_substring result ~substring:"Patches 1"
-  && String.is_substring result ~substring:"Patch 1: Core types"
-  && String.is_substring result ~substring:"## Patch 5: Prompt renderer"
+  && String.is_substring result
+       ~substring:"Patch 1: Core plan types express executable outcomes"
+  && String.is_substring result ~substring:"## Goal"
+  && String.is_substring result
+       ~substring:"Prompt renderer produces a stable layered prompt"
 
 let prompt_prefix_through_patch_heading prompt =
   let marker = "## Patch " in
@@ -1624,44 +1102,28 @@ let%test "patch prompt static prefix is byte-identical across patches" =
     Patch.
       {
         id = Patch_id.of_string "1";
-        title = "Restructure prompt";
-        description = "Make shared content static.";
+        goal = "Shared prompt content has a stable prefix";
         branch = Branch.of_string "headless-cache-tuning/patch-1";
         dependencies = [];
-        spec = "module P1.";
-        acceptance_criteria = [ "Prefix is stable." ];
         files = [ "lib/prompt.ml" ];
-        classification = "INFRA";
-        changes = [ "Move shared sections above patch heading." ];
-        test_stubs_introduced = [];
-        test_stubs_implemented =
+        checks =
           [
-            "Prompt > static prefix is byte-identical across patches in one \
-             gameplan";
+            {
+              Check.run = "dune runtest";
+              proves = "static prefix is identical across patches";
+            };
           ];
-        complexity = None;
-        precedents = [];
-        required_context = [];
       }
   in
   let patch_2 : Patch.t =
     Patch.
       {
         id = Patch_id.of_string "2";
-        title = "Add Claude flags";
-        description = "Add spawn args.";
+        goal = "Claude receives the required spawn flags";
         branch = Branch.of_string "headless-cache-tuning/patch-2";
         dependencies = [ Patch_id.of_string "1" ];
-        spec = "module P2.";
-        acceptance_criteria = [ "Claude gets the new flag." ];
         files = [ "lib/claude_runner.ml" ];
-        classification = "INFRA";
-        changes = [ "Emit exclude-dynamic-system-prompt-sections." ];
-        test_stubs_introduced = [];
-        test_stubs_implemented = [];
-        complexity = None;
-        precedents = [];
-        required_context = [];
+        checks = [ { Check.run = "dune build"; proves = "runner compiles" } ];
       }
   in
   let gameplan : Gameplan.t =
@@ -1670,18 +1132,7 @@ let%test "patch prompt static prefix is byte-identical across patches" =
         project_name = "onton";
         repo_owner = "flowglad";
         repo_name = "onton";
-        problem_statement = "Prompt cache hit rate is low.\n\n## Patch notes";
-        solution_summary = "Move shared prompt content into a stable prefix.";
-        final_state_spec = "module HEADLESS_CACHE_TUNING.\n\n## Patch state.";
-        current_state_analysis =
-          "Patch-specific text currently appears first.\n\n## Patch drift.";
-        explicit_opinions = "- Use env vars for flags.\n- ## Patch fallback.";
-        acceptance_criteria = [];
-        open_questions = [];
         patches = [ patch_1; patch_2 ];
-        functional_changes = [];
-        context_resources = [];
-        reachability_traces = [];
       }
   in
   let prompt_1 =
@@ -1704,20 +1155,12 @@ let%test "agents_md content appears in static prefix when Some" =
     Patch.
       {
         id = Patch_id.of_string "7";
-        title = "Bare Claude";
-        description = "Inject AGENTS.md into prompt prefix.";
+        goal = "AGENTS.md appears in the prompt prefix";
         branch = Branch.of_string "headless-cache-tuning/patch-7";
         dependencies = [];
-        spec = "";
-        acceptance_criteria = [];
-        files = [];
-        classification = "";
-        changes = [];
-        test_stubs_introduced = [];
-        test_stubs_implemented = [];
-        complexity = None;
-        precedents = [];
-        required_context = [];
+        files = [ "AGENTS.md" ];
+        checks =
+          [ { Check.run = "dune runtest"; proves = "prompt tests pass" } ];
       }
   in
   let gameplan : Gameplan.t =
@@ -1726,17 +1169,7 @@ let%test "agents_md content appears in static prefix when Some" =
         project_name = "onton";
         repo_owner = "flowglad";
         repo_name = "onton";
-        problem_statement = "Prompt cache hit rate is low.";
-        solution_summary = "Keep shared content in a stable prefix.";
-        final_state_spec = "";
-        current_state_analysis = "";
-        explicit_opinions = "";
-        acceptance_criteria = [];
-        open_questions = [];
         patches = [ patch ];
-        functional_changes = [];
-        context_resources = [];
-        reachability_traces = [];
       }
   in
   let prompt =
@@ -1755,20 +1188,12 @@ let%test "agents_md section is omitted when None" =
     Patch.
       {
         id = Patch_id.of_string "7";
-        title = "Bare Claude";
-        description = "Inject AGENTS.md into prompt prefix.";
+        goal = "AGENTS.md is omitted when unavailable";
         branch = Branch.of_string "headless-cache-tuning/patch-7";
         dependencies = [];
-        spec = "";
-        acceptance_criteria = [];
-        files = [];
-        classification = "";
-        changes = [];
-        test_stubs_introduced = [];
-        test_stubs_implemented = [];
-        complexity = None;
-        precedents = [];
-        required_context = [];
+        files = [ "lib/prompt.ml" ];
+        checks =
+          [ { Check.run = "dune runtest"; proves = "prompt tests pass" } ];
       }
   in
   let gameplan : Gameplan.t =
@@ -1777,17 +1202,7 @@ let%test "agents_md section is omitted when None" =
         project_name = "onton";
         repo_owner = "flowglad";
         repo_name = "onton";
-        problem_statement = "Prompt cache hit rate is low.";
-        solution_summary = "Keep shared content in a stable prefix.";
-        final_state_spec = "";
-        current_state_analysis = "";
-        explicit_opinions = "";
-        acceptance_criteria = [];
-        open_questions = [];
         patches = [ patch ];
-        functional_changes = [];
-        context_resources = [];
-        reachability_traces = [];
       }
   in
   let prompt =
@@ -1812,40 +1227,23 @@ let make_layer_test_fixture () =
     Patch.
       {
         id = Patch_id.of_string "1";
-        title = "Add layer helpers";
-        description = "Introduce render_*_layer helpers.";
+        goal = "Prompt rendering has explicit stable layers";
         branch = Branch.of_string "feat/patch-1";
         dependencies = [];
-        spec = "module L1.";
-        acceptance_criteria = [ "Three helpers exist." ];
         files = [ "lib/prompt.ml" ];
-        classification = "INFRA";
-        changes = [ "Add helpers." ];
-        test_stubs_introduced = [];
-        test_stubs_implemented = [];
-        complexity = None;
-        precedents = [];
-        required_context = [];
+        checks =
+          [ { Check.run = "dune runtest"; proves = "prompt tests pass" } ];
       }
   in
   let patch_b : Patch.t =
     Patch.
       {
         id = Patch_id.of_string "2";
-        title = "Wire dispatch";
-        description = "Pass patch + gameplan + base_branch to follow-ups.";
+        goal = "Follow-up prompts preserve the stable layers";
         branch = Branch.of_string "feat/patch-2";
         dependencies = [ Patch_id.of_string "1" ];
-        spec = "module L2.";
-        acceptance_criteria = [ "Follow-ups receive the layer args." ];
         files = [ "bin/main.ml" ];
-        classification = "";
-        changes = [ "Add Base.List.find for patch resolution." ];
-        test_stubs_introduced = [];
-        test_stubs_implemented = [];
-        complexity = None;
-        precedents = [];
-        required_context = [];
+        checks = [ { Check.run = "dune build"; proves = "dispatch compiles" } ];
       }
   in
   let gameplan : Gameplan.t =
@@ -1854,26 +1252,7 @@ let make_layer_test_fixture () =
         project_name = "onton";
         repo_owner = "flowglad";
         repo_name = "onton";
-        problem_statement = "Prompts mix gameplan, patch, and turn content.";
-        solution_summary = "Compose three layers in a fixed order.";
-        final_state_spec = "module THREE_LAYERS.";
-        current_state_analysis = "Today only the Start prompt is layered.";
-        explicit_opinions = "- Caching pays off when prefixes repeat.";
-        acceptance_criteria = [];
-        open_questions = [];
         patches = [ patch_a; patch_b ];
-        functional_changes =
-          [
-            {
-              Functional_change.id = "FC-LAYER-1";
-              description =
-                "Patch A owns a behavior that must stay in the cache-stable \
-                 layer.";
-              owned_by = patch_a.Patch.id;
-            };
-          ];
-        context_resources = [];
-        reachability_traces = [];
       }
   in
   (patch_a, patch_b, gameplan)
@@ -1896,12 +1275,12 @@ let%test "gameplan_layer is the prefix of render_patch_prompt for both patches"
 let%test "gameplan layer points at the published gameplan artifact copy" =
   let _, _, gameplan = make_layer_test_fixture () in
   let g_layer = render_gameplan_layer ~project_name:"onton" gameplan in
-  String.is_substring g_layer ~substring:"## Full Gameplan Reference"
+  String.is_substring g_layer ~substring:"## Full Plan Reference"
   && String.is_substring g_layer
-       ~substring:("`" ^ Project_store.gameplan_artifact_path "onton" ^ "`")
+       ~substring:("`" ^ Project_store.plan_artifact_path "onton" ^ "`")
   (* The pointer is lazy-disclosure only: the layer must keep withholding
-     sibling patch detail itself (titles only, per the patches list). *)
-  && not (String.is_substring g_layer ~substring:"Pass patch + gameplan")
+     sibling patch detail itself (goals only, per the patches list). *)
+  && not (String.is_substring g_layer ~substring:"bin/main.ml")
 
 let%test "patch layer lists ancestor implementation notes for dependents" =
   let patch_a, patch_b, gameplan = make_layer_test_fixture () in
@@ -1914,7 +1293,8 @@ let%test "patch layer lists ancestor implementation notes for dependents" =
       ~base_branch:"feat/patch-1"
   in
   let expected_entry =
-    Printf.sprintf "- Patch 1: Add layer helpers — `%s`"
+    Printf.sprintf
+      "- Patch 1: Prompt rendering has explicit stable layers — `%s`"
       (Project_store.pr_body_artifact_path ~project_name:"onton"
          ~patch_id:patch_a.Patch.id)
   in
@@ -1931,7 +1311,7 @@ let%test "dependency notes cover transitive ancestors, not just direct deps" =
     {
       patch_b with
       Patch.id = Patch_id.of_string "3";
-      title = "Stack further";
+      goal = "A third patch can consume both ancestor outcomes";
       branch = Branch.of_string "feat/patch-3";
       dependencies = [ Patch_id.of_string "2" ];
     }
@@ -1954,45 +1334,10 @@ let%test "dependency notes cover transitive ancestors, not just direct deps" =
   && String.is_substring prompt_c ~substring:(path_of patch_a)
   && String.is_substring prompt_c ~substring:(path_of patch_b)
 
-let%test "gameplan-derived patch layer carries required context resources" =
-  let patch_a, patch_b, gameplan = make_layer_test_fixture () in
-  let resource =
-    Context_resource.
-      {
-        id = "CR-1";
-        kind = "doc";
-        paths = [ "docs/layers.md" ];
-        why = "Defines the layer contract.";
-        consumed_by = [];
-      }
-  in
-  let patch_b = { patch_b with Patch.required_context = [ "CR-1" ] } in
-  let gameplan =
-    {
-      gameplan with
-      Gameplan.patches = [ patch_a; patch_b ];
-      context_resources = [ resource ];
-    }
-  in
-  let layer =
-    render_patch_layer_of_gameplan ~project_name:"onton" patch_b gameplan
-      ~base_branch:"feat/patch-1"
-  in
-  let prompt =
-    render_patch_prompt ~project_name:"onton" patch_b gameplan
-      ~base_branch:"feat/patch-1"
-  in
-  (* The layer is byte-identically embedded in the composed prompt... *)
-  String.is_substring prompt ~substring:layer
-  (* ...and carries the gameplan-derived context resources — the input the
-     runner's hand-assembled call sites used to drop. *)
-  && String.is_substring layer ~substring:"## Required Context Before Editing"
-  && String.is_substring layer ~substring:"CR-1"
-
 let%test "pr body prompt tells the author about dependent patch readers" =
   let rendered =
     render_pr_body_prompt ~project_name:"onton" ~pr_number:(Pr_number.of_int 7)
-      ~pr_body:"body" ~spec_suffix:"" ~artifact_path:"/tmp/pr-body.md"
+      ~pr_body:"body" ~check_suffix:"" ~artifact_path:"/tmp/pr-body.md"
   in
   String.is_substring rendered ~substring:"patches that depend on this one"
 
@@ -2059,191 +1404,6 @@ let%test
   && String.is_prefix ci_unknown_prompt ~prefix
   && String.is_prefix review_prompt ~prefix
   && String.is_prefix conflict_prompt ~prefix
-
-let%test
-    "render_patch_layer surfaces precedents to the implementer when present" =
-  let patch, _, _ = make_layer_test_fixture () in
-  let patch_with_precedents : Patch.t =
-    {
-      patch with
-      precedents =
-        [
-          {
-            Precedent.kind = "library";
-            name = "Bindlib";
-            url = Some "https://github.com/rlepigre/ocaml-bindlib";
-            why_applicable =
-              "Use bind_mvar / unmbind so substitution composes via msubst.";
-          };
-          {
-            Precedent.kind = "algorithm";
-            name = "Tarjan 1972 strongly connected components";
-            url = None;
-            why_applicable = "Detect cycles in the dependency graph in O(V+E).";
-          };
-        ];
-    }
-  in
-  let rendered =
-    render_patch_layer ~project_name:"onton" patch_with_precedents
-      ~base_branch:"main" ()
-  in
-  String.is_substring rendered ~substring:"## Established Precedents"
-  && String.is_substring rendered
-       ~substring:"Treat reviewing them as required research"
-  && String.is_substring rendered
-       ~substring:"Retrieve and read every listed reference"
-  && String.is_substring rendered
-       ~substring:"use web search or the available research tools"
-  && String.is_substring rendered
-       ~substring:"Only begin implementation after completing this review"
-  && String.is_substring rendered ~substring:"**[library] Bindlib**"
-  && String.is_substring rendered
-       ~substring:"https://github.com/rlepigre/ocaml-bindlib"
-  && String.is_substring rendered
-       ~substring:"**[algorithm] Tarjan 1972 strongly connected components**"
-  && String.is_substring rendered
-       ~substring:"Detect cycles in the dependency graph"
-
-let%test
-    "render_patch_layer omits the Established Precedents section when empty" =
-  let patch, _, _ = make_layer_test_fixture () in
-  let rendered =
-    render_patch_layer ~project_name:"onton" patch ~base_branch:"main" ()
-  in
-  not (String.is_substring rendered ~substring:"Established Precedents")
-
-let%test
-    "render_patch_prompt surfaces ONLY the owned functional changes for a patch"
-    =
-  let patch_a, patch_b, gameplan = make_layer_test_fixture () in
-  let gameplan : Gameplan.t =
-    {
-      gameplan with
-      functional_changes =
-        [
-          {
-            Functional_change.id = "FC-1";
-            description = "Behavior owned by patch A only";
-            owned_by = patch_a.Patch.id;
-          };
-          {
-            Functional_change.id = "FC-2";
-            description = "Behavior owned by patch B only";
-            owned_by = patch_b.Patch.id;
-          };
-        ];
-    }
-  in
-  let prompt_a =
-    render_patch_prompt ~project_name:"onton" patch_a gameplan
-      ~base_branch:"main"
-  in
-  let prompt_b =
-    render_patch_prompt ~project_name:"onton" patch_b gameplan
-      ~base_branch:"feat/patch-1"
-  in
-  String.is_substring prompt_a ~substring:"## Functional Changes You Own"
-  && String.is_substring prompt_a ~substring:"**FC-1**"
-  && String.is_substring prompt_a ~substring:"Behavior owned by patch A only"
-  && (not (String.is_substring prompt_a ~substring:"**FC-2**"))
-  && String.is_substring prompt_b ~substring:"**FC-2**"
-  && String.is_substring prompt_b ~substring:"Behavior owned by patch B only"
-  && not (String.is_substring prompt_b ~substring:"**FC-1**")
-
-let%test
-    "render_patch_layer omits Functional Changes section when patch owns none" =
-  let _, patch, gameplan = make_layer_test_fixture () in
-  let functional_changes = owned_functional_changes gameplan patch in
-  let rendered =
-    render_patch_layer ~project_name:"onton" patch ~functional_changes
-      ~base_branch:"main" ()
-  in
-  not (String.is_substring rendered ~substring:"Functional Changes You Own")
-
-let%test
-    "render_patch_prompt surfaces only required context resources for patch" =
-  let patch_a, patch_b, gameplan = make_layer_test_fixture () in
-  let patch_a = { patch_a with required_context = [ "ctx-a" ] } in
-  let patch_b = { patch_b with required_context = [ "ctx-b" ] } in
-  let gameplan : Gameplan.t =
-    {
-      gameplan with
-      patches = [ patch_a; patch_b ];
-      context_resources =
-        [
-          {
-            Context_resource.id = "ctx-a";
-            kind = "existing-implementation";
-            paths = [ "lib/current.ml"; "test/test_current.ml" ];
-            why = "This is the behavior Patch A must preserve.";
-            consumed_by = [ patch_a.Patch.id ];
-          };
-          {
-            Context_resource.id = "ctx-b";
-            kind = "reference-doc";
-            paths = [ "docs/reference.md" ];
-            why = "This belongs only to Patch B.";
-            consumed_by = [ patch_b.Patch.id ];
-          };
-        ];
-    }
-  in
-  let prompt_a =
-    render_patch_prompt ~project_name:"onton" patch_a gameplan
-      ~base_branch:"main"
-  in
-  String.is_substring prompt_a ~substring:"## Required Context Before Editing"
-  && String.is_substring prompt_a ~substring:"**ctx-a**"
-  && String.is_substring prompt_a ~substring:"lib/current.ml"
-  && String.is_substring prompt_a
-       ~substring:"This is the behavior Patch A must preserve."
-  && String.is_substring prompt_a
-       ~substring:
-         "Read these authoritative resources before making code changes"
-  && String.is_substring prompt_a
-       ~substring:"Trust this named context over stale or ambiguous patch prose"
-  && String.is_substring prompt_a
-       ~substring:"avoid starting a parallel implementation"
-  && not (String.is_substring prompt_a ~substring:"**ctx-b**")
-
-let%test
-    "render_patch_layer omits Required Context section when no resources apply"
-    =
-  let patch, _, _ = make_layer_test_fixture () in
-  let rendered =
-    render_patch_layer ~project_name:"onton" patch ~base_branch:"main" ()
-  in
-  not
-    (String.is_substring rendered ~substring:"Required Context Before Editing")
-
-let%test "render_pr_description surfaces precedents when present" =
-  let patch, _, gameplan = make_layer_test_fixture () in
-  let patch_with_precedents : Patch.t =
-    {
-      patch with
-      precedents =
-        [
-          {
-            Precedent.kind = "library";
-            name = "Bindlib";
-            url = Some "https://github.com/rlepigre/ocaml-bindlib";
-            why_applicable = "Use bind_mvar / unmbind for binders.";
-          };
-        ];
-    }
-  in
-  let body =
-    render_pr_description ~project_name:"onton" patch_with_precedents gameplan
-  in
-  String.is_substring body ~substring:"## Established Precedents"
-  && String.is_substring body ~substring:"**[library] Bindlib**"
-  && String.is_substring body ~substring:"Use bind_mvar / unmbind for binders."
-
-let%test "render_pr_description omits Established Precedents when empty" =
-  let patch, _, gameplan = make_layer_test_fixture () in
-  let body = render_pr_description ~project_name:"onton" patch gameplan in
-  not (String.is_substring body ~substring:"Established Precedents")
 
 let%test "follow-up prompts without patch+gameplan emit only the turn layer" =
   let _, _, _gameplan = make_layer_test_fixture () in
@@ -2392,7 +1552,7 @@ let%test "human and pr_body prompts do not include the gameplan layer" =
   in
   let pr_body_prompt =
     render_pr_body_prompt ~project_name:"onton" ~pr_number:(Pr_number.of_int 42)
-      ~pr_body:"## Patch 1: Foo\nBody." ~spec_suffix:""
+      ~pr_body:"## Patch 1: Foo\nBody." ~check_suffix:""
       ~artifact_path:"/tmp/notes.md"
   in
   (* Neither contains the gameplan project heading marker — these
@@ -2472,10 +1632,8 @@ let%test "review prompt formats comments" =
   && String.is_substring result ~substring:"General feedback."
   && String.is_substring result
        ~substring:"/data/artifacts/p1/comment_responses/<comment_id>.md"
-  (* The response procedure must not point the agent at the forge CLI —
-     reply/resolve is supervisor-owned, keyed off the response files. (The
-     agent remains free to use gh for its own investigation; the prompt just
-     never asks it to reply or resolve.) *)
+  (* The response procedure must not point the worker at the forge CLI —
+     reply/resolve is controller-owned, keyed off the response files. *)
   && (not (String.is_substring result ~substring:"resolveReviewThread"))
   && (not (String.is_substring result ~substring:"gh api"))
   (* Back-compat: no SHAs → no preamble, no [at=…], no [outdated]. *)
@@ -2526,9 +1684,9 @@ let%expect_test "review prompt includes SHA preamble and per-bullet anchor" =
     2. Write your response to `/data/artifacts/p1/comment_responses/<comment_id>.md` (the [comment_id=...] shown above), containing just the response text.
        Use the Write tool with that absolute path — the directory is outside the worktree on purpose; do not commit it.
 
-    Write a response file for EVERY comment listed above. After this session the supervisor pushes your commits, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
+    Write a response file for EVERY comment listed above. After this session the supervisor validates and records your changes, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
 
-    After addressing all comments, commit your changes. The supervisor will push them for you — do not run `git push`.
+    After addressing all comments, stop. The controller owns all Git and publication operations.
     |}]
 
 let%expect_test "review prompt marks outdated comments" =
@@ -2573,9 +1731,9 @@ let%expect_test "review prompt marks outdated comments" =
     2. Write your response to `/data/artifacts/p1/comment_responses/<comment_id>.md` (the [comment_id=...] shown above), containing just the response text.
        Use the Write tool with that absolute path — the directory is outside the worktree on purpose; do not commit it.
 
-    Write a response file for EVERY comment listed above. After this session the supervisor pushes your commits, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
+    Write a response file for EVERY comment listed above. After this session the supervisor validates and records your changes, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
 
-    After addressing all comments, commit your changes. The supervisor will push them for you — do not run `git push`.
+    After addressing all comments, stop. The controller owns all Git and publication operations.
     |}]
 
 let%expect_test
@@ -2623,9 +1781,9 @@ let%expect_test
     2. Write your response to `/data/artifacts/p1/comment_responses/<comment_id>.md` (the [comment_id=...] shown above), containing just the response text.
        Use the Write tool with that absolute path — the directory is outside the worktree on purpose; do not commit it.
 
-    Write a response file for EVERY comment listed above. After this session the supervisor pushes your commits, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
+    Write a response file for EVERY comment listed above. After this session the supervisor validates and records your changes, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
 
-    After addressing all comments, commit your changes. The supervisor will push them for you — do not run `git push`.
+    After addressing all comments, stop. The controller owns all Git and publication operations.
     |}]
 
 let%test "review prompt marks resolve-retry comments only with viewer known" =

@@ -42,19 +42,11 @@ let ansi_re =
 
 let strip_ansi s = Re.replace_string ansi_re ~by:"" s
 
-let auto_model ~complexity =
-  match complexity with
-  | Some 1 -> Some "haiku"
-  | Some 2 -> Some "sonnet"
-  | Some 3 -> Some "opus"
-  | Some _ | None -> Some "opus"
-
 let model_args = function
   | Some m when not (String.is_empty m) -> [ "--model"; m ]
   | _ -> []
 
-let max_turns_for ~complexity =
-  match complexity with Some 1 -> 50 | Some 2 -> 100 | _ -> 200
+let max_turns = 200
 
 let budget_cap_args ~getenv_opt ~warn () =
   match
@@ -93,7 +85,7 @@ let bare_args ~getenv_opt =
   | Some k when not (String.is_empty (String.strip k)) -> [ "--bare" ]
   | _ -> []
 
-let build_args ~getenv_opt ~warn ~model ~complexity ~prompt ~resume_session =
+let build_args ~getenv_opt ~warn ~model ~prompt ~resume_session =
   let base = [ "claude" ] in
   let prompt_args = [ "-p"; prompt; "--output-format"; "text" ] in
   let session_args =
@@ -103,7 +95,7 @@ let build_args ~getenv_opt ~warn ~model ~complexity ~prompt ~resume_session =
     [
       "--dangerously-skip-permissions";
       "--max-turns";
-      Int.to_string (max_turns_for ~complexity);
+      Int.to_string max_turns;
       "--exclude-dynamic-system-prompt-sections";
     ]
     @ budget_cap_args ~getenv_opt ~warn ()
@@ -111,8 +103,8 @@ let build_args ~getenv_opt ~warn ~model ~complexity ~prompt ~resume_session =
   in
   base @ model_args model @ prompt_args @ session_args @ flags
 
-let build_stream_args ~getenv_opt ~warn ~model ~complexity ~prompt
-    ~minted_session_id ~resume_session =
+let build_stream_args ~getenv_opt ~warn ~model ~prompt ~minted_session_id
+    ~resume_session =
   (match (minted_session_id, resume_session) with
   | Some _, Some _ ->
       invalid_arg
@@ -135,7 +127,7 @@ let build_stream_args ~getenv_opt ~warn ~model ~complexity ~prompt
     [
       "--dangerously-skip-permissions";
       "--max-turns";
-      Int.to_string (max_turns_for ~complexity);
+      Int.to_string max_turns;
       "--exclude-dynamic-system-prompt-sections";
     ]
     @ budget_cap_args ~getenv_opt ~warn ()
@@ -307,37 +299,10 @@ let with_api_key = function
   | "ANTHROPIC_API_KEY" -> Some "sk-ant-api03-test"
   | _ -> None
 
-let%test "auto_model: complexity 1 -> haiku" =
-  Option.equal String.equal (auto_model ~complexity:(Some 1)) (Some "haiku")
-
-let%test "auto_model: complexity 2 -> sonnet" =
-  Option.equal String.equal (auto_model ~complexity:(Some 2)) (Some "sonnet")
-
-let%test "auto_model: complexity 3 -> opus" =
-  Option.equal String.equal (auto_model ~complexity:(Some 3)) (Some "opus")
-
-let%test "auto_model: None -> opus (conservative)" =
-  Option.equal String.equal (auto_model ~complexity:None) (Some "opus")
-
-let%test "auto_model: out-of-range -> opus (conservative)" =
-  Option.equal String.equal (auto_model ~complexity:(Some 7)) (Some "opus")
-
-let%test "max_turns_for: complexity 1 -> 50" =
-  Int.equal (max_turns_for ~complexity:(Some 1)) 50
-
-let%test "max_turns_for: complexity 2 -> 100" =
-  Int.equal (max_turns_for ~complexity:(Some 2)) 100
-
-let%test "max_turns_for: complexity 3 -> 200" =
-  Int.equal (max_turns_for ~complexity:(Some 3)) 200
-
-let%test "max_turns_for: None -> 200" =
-  Int.equal (max_turns_for ~complexity:None) 200
-
 let%test "build_args fresh (no resume, with model)" =
   let args =
     build_args ~getenv_opt:with_api_key ~warn:ignore_warn ~model:(Some "sonnet")
-      ~complexity:(Some 2) ~prompt:"do stuff" ~resume_session:None
+      ~prompt:"do stuff" ~resume_session:None
   in
   List.equal String.equal args
     [
@@ -350,7 +315,7 @@ let%test "build_args fresh (no resume, with model)" =
       "text";
       "--dangerously-skip-permissions";
       "--max-turns";
-      "100";
+      "200";
       "--exclude-dynamic-system-prompt-sections";
       "--bare";
     ]
@@ -358,7 +323,7 @@ let%test "build_args fresh (no resume, with model)" =
 let%test "build_args fresh (no resume, no model)" =
   let args =
     build_args ~getenv_opt:with_api_key ~warn:ignore_warn ~model:None
-      ~complexity:(Some 1) ~prompt:"do stuff" ~resume_session:None
+      ~prompt:"do stuff" ~resume_session:None
   in
   List.equal String.equal args
     [
@@ -369,7 +334,7 @@ let%test "build_args fresh (no resume, no model)" =
       "text";
       "--dangerously-skip-permissions";
       "--max-turns";
-      "50";
+      "200";
       "--exclude-dynamic-system-prompt-sections";
       "--bare";
     ]
@@ -377,7 +342,7 @@ let%test "build_args fresh (no resume, no model)" =
 let%test "build_args with resume session" =
   let args =
     build_args ~getenv_opt:with_api_key ~warn:ignore_warn ~model:(Some "opus")
-      ~complexity:(Some 3) ~prompt:"do stuff" ~resume_session:(Some "abc-123")
+      ~prompt:"do stuff" ~resume_session:(Some "abc-123")
   in
   List.equal String.equal args
     [
@@ -399,7 +364,7 @@ let%test "build_args with resume session" =
 
 let%test "build_args includes --exclude-dynamic-system-prompt-sections" =
   let args =
-    build_args ~getenv_opt:no_env ~warn:ignore_warn ~model:None ~complexity:None
+    build_args ~getenv_opt:no_env ~warn:ignore_warn ~model:None
       ~prompt:"do stuff" ~resume_session:None
   in
   List.mem args "--exclude-dynamic-system-prompt-sections" ~equal:String.equal
@@ -407,29 +372,29 @@ let%test "build_args includes --exclude-dynamic-system-prompt-sections" =
 let%test "build_args includes --bare when ANTHROPIC_API_KEY is set" =
   List.mem
     (build_args ~getenv_opt:with_api_key ~warn:ignore_warn ~model:None
-       ~complexity:None ~prompt:"do stuff" ~resume_session:None)
+       ~prompt:"do stuff" ~resume_session:None)
     "--bare" ~equal:String.equal
 
 let%test "build_args omits --bare without ANTHROPIC_API_KEY (OAuth path)" =
   not
     (List.mem
        (build_args ~getenv_opt:no_env ~warn:ignore_warn ~model:None
-          ~complexity:None ~prompt:"do stuff" ~resume_session:None)
+          ~prompt:"do stuff" ~resume_session:None)
        "--bare" ~equal:String.equal)
 
 let%test "build_args omits --bare when ANTHROPIC_API_KEY is empty/whitespace" =
   let getenv_opt = function "ANTHROPIC_API_KEY" -> Some "   " | _ -> None in
   not
     (List.mem
-       (build_args ~getenv_opt ~warn:ignore_warn ~model:None ~complexity:None
-          ~prompt:"do stuff" ~resume_session:None)
+       (build_args ~getenv_opt ~warn:ignore_warn ~model:None ~prompt:"do stuff"
+          ~resume_session:None)
        "--bare" ~equal:String.equal)
 
 let%test "build_stream_args fresh (no resume, with model)" =
   let args =
     build_stream_args ~getenv_opt:with_api_key ~warn:ignore_warn
-      ~model:(Some "sonnet") ~complexity:(Some 2) ~prompt:"do stuff"
-      ~minted_session_id:None ~resume_session:None
+      ~model:(Some "sonnet") ~prompt:"do stuff" ~minted_session_id:None
+      ~resume_session:None
   in
   List.equal String.equal args
     [
@@ -443,7 +408,7 @@ let%test "build_stream_args fresh (no resume, with model)" =
       "--verbose";
       "--dangerously-skip-permissions";
       "--max-turns";
-      "100";
+      "200";
       "--exclude-dynamic-system-prompt-sections";
       "--bare";
     ]
@@ -451,8 +416,7 @@ let%test "build_stream_args fresh (no resume, with model)" =
 let%test "build_stream_args fresh (no resume, no model)" =
   let args =
     build_stream_args ~getenv_opt:with_api_key ~warn:ignore_warn ~model:None
-      ~complexity:None ~prompt:"do stuff" ~minted_session_id:None
-      ~resume_session:None
+      ~prompt:"do stuff" ~minted_session_id:None ~resume_session:None
   in
   List.equal String.equal args
     [
@@ -472,8 +436,8 @@ let%test "build_stream_args fresh (no resume, no model)" =
 let%test "build_stream_args with resume session" =
   let args =
     build_stream_args ~getenv_opt:with_api_key ~warn:ignore_warn
-      ~model:(Some "opus") ~complexity:(Some 1) ~prompt:"do stuff"
-      ~minted_session_id:None ~resume_session:(Some "abc-123")
+      ~model:(Some "opus") ~prompt:"do stuff" ~minted_session_id:None
+      ~resume_session:(Some "abc-123")
   in
   List.equal String.equal args
     [
@@ -489,7 +453,7 @@ let%test "build_stream_args with resume session" =
       "abc-123";
       "--dangerously-skip-permissions";
       "--max-turns";
-      "50";
+      "200";
       "--exclude-dynamic-system-prompt-sections";
       "--bare";
     ]
@@ -497,15 +461,14 @@ let%test "build_stream_args with resume session" =
 let%test "build_stream_args includes --exclude-dynamic-system-prompt-sections" =
   let args =
     build_stream_args ~getenv_opt:no_env ~warn:ignore_warn ~model:None
-      ~complexity:None ~prompt:"do stuff" ~minted_session_id:None
-      ~resume_session:None
+      ~prompt:"do stuff" ~minted_session_id:None ~resume_session:None
   in
   List.mem args "--exclude-dynamic-system-prompt-sections" ~equal:String.equal
 
 let%test "build_stream_args emits --session-id when minted_session_id is Some" =
   let args =
     build_stream_args ~getenv_opt:with_api_key ~warn:ignore_warn
-      ~model:(Some "sonnet") ~complexity:None ~prompt:"do stuff"
+      ~model:(Some "sonnet") ~prompt:"do stuff"
       ~minted_session_id:(Some "123e4567-e89b-42d3-a456-426614174000")
       ~resume_session:None
   in
@@ -531,7 +494,7 @@ let%test "build_stream_args emits --session-id when minted_session_id is Some" =
 let%test "build_stream_args rejects session-id plus resume together" =
   match
     build_stream_args ~getenv_opt:no_env ~warn:ignore_warn ~model:None
-      ~complexity:None ~prompt:"do stuff" ~minted_session_id:(Some "minted")
+      ~prompt:"do stuff" ~minted_session_id:(Some "minted")
       ~resume_session:(Some "resume")
   with
   | _ -> false
@@ -540,8 +503,7 @@ let%test "build_stream_args rejects session-id plus resume together" =
 let%test "build_stream_args includes --bare when ANTHROPIC_API_KEY is set" =
   List.mem
     (build_stream_args ~getenv_opt:with_api_key ~warn:ignore_warn ~model:None
-       ~complexity:None ~prompt:"do stuff" ~minted_session_id:None
-       ~resume_session:None)
+       ~prompt:"do stuff" ~minted_session_id:None ~resume_session:None)
     "--bare" ~equal:String.equal
 
 let%test "build_stream_args omits --bare without ANTHROPIC_API_KEY (OAuth path)"
@@ -549,8 +511,7 @@ let%test "build_stream_args omits --bare without ANTHROPIC_API_KEY (OAuth path)"
   not
     (List.mem
        (build_stream_args ~getenv_opt:no_env ~warn:ignore_warn ~model:None
-          ~complexity:None ~prompt:"do stuff" ~minted_session_id:None
-          ~resume_session:None)
+          ~prompt:"do stuff" ~minted_session_id:None ~resume_session:None)
        "--bare" ~equal:String.equal)
 
 let%test
@@ -562,8 +523,7 @@ let%test
   in
   let args =
     build_stream_args ~getenv_opt ~warn:ignore_warn ~model:(Some "sonnet")
-      ~complexity:None ~prompt:"do stuff" ~minted_session_id:None
-      ~resume_session:None
+      ~prompt:"do stuff" ~minted_session_id:None ~resume_session:None
   in
   List.equal String.equal args
     [
