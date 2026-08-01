@@ -75,28 +75,11 @@ let gen_comment =
 let gen_patch =
   QCheck2.Gen.(
     let gen_deps = list_small gen_patch_id in
-    let gen_title = string_size ~gen:printable (int_range 5 50) in
+    let gen_goal = string_size ~gen:printable (int_range 5 50) in
     map4
-      (fun id title branch dependencies ->
-        Patch.
-          {
-            id;
-            title;
-            description = "";
-            branch;
-            dependencies;
-            spec = "";
-            acceptance_criteria = [];
-            files = [];
-            classification = "";
-            changes = [];
-            test_stubs_introduced = [];
-            test_stubs_implemented = [];
-            complexity = None;
-            precedents = [];
-            required_context = [];
-          })
-      gen_patch_id gen_title gen_branch gen_deps)
+      (fun id goal branch dependencies ->
+        Patch.{ id; goal; branch; dependencies; files = []; checks = [] })
+      gen_patch_id gen_goal gen_branch gen_deps)
 
 let gen_ci_check =
   QCheck2.Gen.(
@@ -155,20 +138,11 @@ let gen_patch_list_linear =
             Patch.
               {
                 id;
-                title = Printf.sprintf "Patch %d" i;
-                description = "";
+                goal = Printf.sprintf "Patch %d completes" i;
                 branch;
                 dependencies;
-                spec = "";
-                acceptance_criteria = [];
                 files = [];
-                classification = "";
-                changes = [];
-                test_stubs_introduced = [];
-                test_stubs_implemented = [];
-                complexity = None;
-                precedents = [];
-                required_context = [];
+                checks = [];
               }))
       (int_range 1 8))
 
@@ -205,20 +179,11 @@ let gen_patch_dag =
           Patch.
             {
               id = Patch_id.of_string (Printf.sprintf "patch-%d" i);
-              title = Printf.sprintf "Patch %d" i;
-              description = "";
+              goal = Printf.sprintf "Patch %d completes" i;
               branch = Branch.of_string (Printf.sprintf "branch-%d" i);
               dependencies = deps;
-              spec = "";
-              acceptance_criteria = [];
               files = [];
-              classification = "";
-              changes = [];
-              test_stubs_introduced = [];
-              test_stubs_implemented = [];
-              complexity = None;
-              precedents = [];
-              required_context = [];
+              checks = [];
             }
         in
         gen_patches (i + 1) (patch :: acc)
@@ -227,20 +192,11 @@ let gen_patch_dag =
       Patch.
         {
           id = Patch_id.of_string "patch-0";
-          title = "Patch 0";
-          description = "";
+          goal = "Patch 0 completes";
           branch = Branch.of_string "branch-0";
           dependencies = [];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         }
     in
     gen_patches 1 [ root ])
@@ -258,17 +214,7 @@ let gen_gameplan =
             project_name = "test-project";
             repo_owner = "";
             repo_name = "";
-            problem_statement = "test problem";
-            solution_summary = "test solution";
-            final_state_spec = "";
             patches;
-            current_state_analysis = "";
-            explicit_opinions = "";
-            acceptance_criteria = [];
-            open_questions = [];
-            functional_changes = [];
-            context_resources = [];
-            reachability_traces = [];
           })
       gen_patch_list_unique)
 
@@ -730,40 +676,16 @@ let mk_linear_patches n =
       Patch.
         {
           id;
-          title = Printf.sprintf "Patch %d" i;
-          description = "";
+          goal = Printf.sprintf "Patch %d completes" i;
           branch;
           dependencies;
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         })
 
 let make_test_gameplan patches =
   Gameplan.
-    {
-      project_name = "test-project";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
-      patches;
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-    }
+    { project_name = "test-project"; repo_owner = ""; repo_name = ""; patches }
 
 let pid_of_idx patches i =
   let (p : Patch.t) = List.nth_exn patches i in
@@ -778,7 +700,7 @@ let apply_reconcile_actions orch ~main ~branch_of =
             id = a.Onton_core.Patch_agent.patch_id;
             has_pr = Onton_core.Patch_agent.has_pr a;
             merged = a.Onton_core.Patch_agent.merged;
-            busy = a.Onton_core.Patch_agent.busy;
+            busy = Onton_core.Patch_agent.is_busy a;
             needs_intervention = Onton_core.Patch_agent.needs_intervention a;
             branch_blocked = a.Onton_core.Patch_agent.branch_blocked;
             in_merge_queue = Onton_core.Patch_agent.in_merge_queue a;

@@ -3,19 +3,6 @@
 
 open Types
 
-type github_effect =
-  | Set_pr_draft of {
-      patch_id : Patch_id.t;
-      pr_number : Pr_number.t;
-      draft : bool;
-    }
-  | Set_pr_base of {
-      patch_id : Patch_id.t;
-      pr_number : Pr_number.t;
-      base : Branch.t;
-    }
-[@@deriving show, eq, sexp_of]
-
 type poll_log_entry = { message : string; patch_id : Patch_id.t }
 [@@deriving show, eq]
 
@@ -36,9 +23,9 @@ val reconcile_patch :
   project_name:string ->
   gameplan:Gameplan.t ->
   patch:Patch.t ->
-  Orchestrator.t * github_effect list
+  Orchestrator.t
 (** Reconcile durable per-patch lifecycle facts into queue updates and GitHub
-    effects. The same snapshot always produces the same result. *)
+    outbox commands. The same snapshot always produces the same result. *)
 
 val apply_poll_result :
   ?merge_queue_ejection_confirmed:bool ->
@@ -68,18 +55,9 @@ val apply_replacement_pr :
     PR for the same patch. *)
 
 val reconcile_all :
-  Orchestrator.t ->
-  project_name:string ->
-  gameplan:Gameplan.t ->
-  Orchestrator.t * github_effect list
-(** Reconcile all gameplan patches, then every ad-hoc (non-gameplan) agent.
-    Ad-hoc agents receive only the PR base retarget ([Set_pr_base]) — never the
-    draft→ready flip or a Pr_body demand: onton owns the draft lifecycle only
-    for PRs it opened itself, and the PR body contract is a gameplan artifact.
-    The base retarget must cover ad-hoc agents: without it, an ad-hoc PR whose
-    base branch merges is never retargeted on GitHub, GitHub keeps diffing the
-    PR against the frozen pre-merge base (phantom conflicts no rebase can
-    clear), and the poller/rebase pair loops until intervention. *)
+  Orchestrator.t -> project_name:string -> gameplan:Gameplan.t -> Orchestrator.t
+(** Reconcile PR base, draft state, and PR-body delivery for every plan patch.
+*)
 
 val plan_actions :
   Orchestrator.t -> patches:Patch.t list -> Orchestrator.action list
@@ -98,30 +76,26 @@ val plan_tick_messages :
   Orchestrator.t ->
   project_name:string ->
   gameplan:Gameplan.t ->
-  Orchestrator.t * github_effect list * Orchestrator.patch_agent_message list
-(** Reconcile durable state, emit missing GitHub effects, and compute durable
-    runnable patch-agent messages for the same snapshot. *)
+  Orchestrator.t * Orchestrator.patch_agent_message list
+(** Reconcile durable state, enqueue missing GitHub commands, and compute
+    durable runnable patch-agent messages for the same snapshot. *)
 
 val plan_tick :
   Orchestrator.t ->
   project_name:string ->
   gameplan:Gameplan.t ->
-  Orchestrator.t * github_effect list * Orchestrator.action list
-(** Reconcile durable state, emit missing GitHub effects, and compute runnable
-    actions for the same snapshot. *)
+  Orchestrator.t * Orchestrator.action list
+(** Reconcile durable state, enqueue missing GitHub commands, and compute
+    runnable actions for the same snapshot. *)
 
 val tick :
   Orchestrator.t ->
   project_name:string ->
   gameplan:Gameplan.t ->
-  Orchestrator.t * github_effect list * Orchestrator.action list
-(** Reconcile durable state, emit missing GitHub effects, and fire the planned
-    actions into the orchestrator state. The returned action list is the set of
-    actions that were fired. *)
-
-val apply_github_effect_success :
-  Orchestrator.t -> github_effect -> Orchestrator.t
-(** Apply the durable state changes that follow a successful GitHub effect. *)
+  Orchestrator.t * Orchestrator.action list
+(** Reconcile durable state, enqueue missing GitHub commands, and fire the
+    planned actions into the orchestrator state. The returned action list is the
+    set of actions that were fired. *)
 
 val automerge_idle_timeout : float
 (** Seconds of idle time after approval before automerge fires. *)
@@ -136,35 +110,12 @@ val automerge_max_failures : int
 type merge_action = Direct_merge | Enqueue | Dequeue of string
 [@@deriving show, eq, sexp_of]
 
-type automerge_decision = {
-  merge_patch_id : Patch_id.t;
-  merge_pr_number : Pr_number.t;
-  action : merge_action;
-}
-[@@deriving show, eq, sexp_of]
-
-type review_request_decision = {
-  review_patch_id : Patch_id.t;
-  review_pr_number : Pr_number.t;
-}
-[@@deriving show, eq, sexp_of]
-
-val is_automerge_candidate :
-  ?ignore_inflight:bool -> Patch_agent.t -> main_branch:Branch.t -> bool
-(** A patch is a candidate to START a new automerge call when it is not already
-    merged, no merge is currently in flight, automerge is enabled, the PR is
-    approved, CI is passing, the queue is empty, and the consecutive failure
-    count is under [automerge_max_failures]. Any queued feedback
-    (Review_comments, Human, Ci, Merge_conflict, Pr_body) resets the deadline.
-
-    [?ignore_inflight] defaults to [false]; the default answers the
-    concurrency-safe question ("is this patch eligible to start a new merge
-    call?"). The only legitimate use of [~ignore_inflight:true] is the executor
-    re-check in [reconcile_and_execute_automerge], which runs while holding
-    [automerge_inflight = true] and needs the predicate to return [true] so long
-    as the underlying candidacy still holds. Do not pass [~ignore_inflight:true]
-    from any other caller — doing so opens the door to overlapping merge calls.
-*)
+val is_automerge_candidate : Patch_agent.t -> main_branch:Branch.t -> bool
+(** A patch is a candidate for a new automerge command when it is not already
+    merged, automerge is enabled, the PR is approved, CI is passing, the queue
+    is empty, and the consecutive failure count is under
+    [automerge_max_failures]. Any queued feedback (Review_comments, Human, Ci,
+    Merge_conflict, Pr_body) resets the deadline. *)
 
 val automerge_transient_hold : Patch_agent.t -> main_branch:Branch.t -> bool
 (** [true] when a direct-merge patch has lost [merge_ready] *only* because
@@ -180,47 +131,47 @@ val automerge_transient_hold : Patch_agent.t -> main_branch:Branch.t -> bool
     checks, queued feedback, or a hit failure cap all fall through to the normal
     clear. *)
 
+val set_automerge_enabled :
+  Orchestrator.t -> Patch_id.t -> bool -> Orchestrator.t
+(** Change automerge policy and discard obsolete pending, retrying, or failed
+    automerge commands. A running adapter call cannot be canceled; its durable
+    outcome still wins. Calling with the current value is a no-op. *)
+
 val should_dequeue_merge_queue :
   Patch_agent.t -> main_branch:Branch.t -> entry_id:string -> bool
 (** [true] when an already-enqueued PR should be removed from GitHub's merge
     queue. This includes explicit queue alarms ([UNMERGEABLE] entries, conflict
-    state, or visible failing checks) and lost approval. The runner uses the
-    same predicate as [reconcile_automerge] for its pre-flight recheck. *)
+    state, or visible failing checks) and lost approval. *)
 
 val reconcile_automerge :
-  Orchestrator.t -> now:float -> Orchestrator.t * automerge_decision list
-(** Reconcile the automerge deadline for every agent and return decisions to
-    merge. For each agent:
-    - merged → clear any stale deadline/inflight flag (no decision).
-    - [automerge_inflight] → no-op; the executor owns the deadline and inflight
-      transitions via [apply_automerge_success] / [apply_automerge_failure].
+  Orchestrator.t -> now:float -> Orchestrator.t * Github_effect.t list
+(** Reconcile the automerge deadline for every agent and enqueue durable
+    commands. For each agent:
+    - merged → clear any stale deadline and automerge commands.
+    - existing automerge command → no-op; the outbox is the sole claim.
+      Pending/retrying commands whose policy preconditions no longer hold are
+      removed first; running and terminally failed commands are retained.
     - candidate + no deadline → set deadline at [now +. automerge_idle_timeout].
     - not candidate + deadline, but [automerge_transient_hold] → preserve the
       deadline unchanged and emit no decision (GitHub is recomputing
       mergeability after the base advanced; the idle window keeps counting).
     - not candidate + deadline (and not a transient hold) → clear deadline
       (feedback arrived, CI flipped, automerge disabled, or failure cap hit).
-    - candidate + deadline elapsed → atomically mark the agent
-      [automerge_inflight = true] and include in decisions list. The caller MUST
-      clear the inflight flag on every exit path, and call either
-      [apply_automerge_success] (success) or [apply_automerge_failure]
-      (failure). A persistent-failure PR retries once per idle window until the
-      failure counter reaches [automerge_max_failures], after which
-      reconciliation stops issuing merge calls until the user disables and
-      re-enables automerge. *)
+    - candidate + deadline elapsed → enqueue exactly one deterministic command.
+      A persistent-failure PR retries once per idle window until the failure
+      counter reaches [automerge_max_failures]. *)
 
 val reconcile_review_requests :
-  Orchestrator.t -> Orchestrator.t * review_request_decision list
-(** Claim every patch that currently needs a human review request. For each
-    claimed patch, sets [review_request_inflight = true] and returns the PR
-    number to request review for. The caller MUST clear the inflight flag on
-    every exit path, and records [review_requested_for_oid] only once the Forge
-    request is known to have succeeded or has failed permanently for that head.
-*)
+  Orchestrator.t -> team_slug:string -> Orchestrator.t * Github_effect.t list
+(** Enqueue a deterministic durable review request for each eligible patch. The
+    GitHub adapter receives its exact PR, team, and head inputs from the
+    command; no transient claim is stored on the patch agent. Pending or
+    retrying requests are discarded when eligibility, team, or head changes;
+    running and terminally failed commands are retained. *)
 
 val apply_automerge_success : Orchestrator.t -> Patch_id.t -> Orchestrator.t
-(** Mark the patch as merged, clear the automerge deadline, clear the inflight
-    flag, and reset the failure counter. *)
+(** Mark the patch as merged, clear the automerge deadline, and reset the
+    failure counter. *)
 
 val apply_merge_queue_entered :
   Orchestrator.t -> Patch_id.t -> Pr_state.merge_queue_entry -> Orchestrator.t
@@ -239,11 +190,40 @@ val apply_merge_queue_dequeued :
 
 val apply_automerge_failure :
   Orchestrator.t -> now:float -> Patch_id.t -> Orchestrator.t
-(** Record a failed merge call: clear the inflight flag and increment the
-    consecutive failure counter. Push the deadline out to
-    [now +. automerge_idle_timeout] so the retry is at least one idle window
-    away (without this bound, a persistent GitHub failure could burst many merge
-    calls per poll cycle since the runner re-reconciles every tick). The
-    deadline is NOT re-armed when either (a) the failure cap has now been
-    reached (reconciliation will no longer issue merge calls for this patch), or
-    (b) the user disabled automerge while the call was in flight. *)
+(** Record a failed merge call by incrementing the consecutive failure counter.
+    Push the deadline out to [now +. automerge_idle_timeout] so the retry is at
+    least one idle window away (without this bound, a persistent GitHub failure
+    could burst many merge calls per poll cycle since the runner re-reconciles
+    every tick). The deadline is NOT re-armed when either (a) the failure cap
+    has now been reached (reconciliation will no longer issue merge calls for
+    this patch), or (b) the user disabled automerge while the command was
+    outstanding. *)
+
+val github_retry_delay : float
+val github_max_attempts : int
+
+type github_success =
+  | Mutation_applied
+  | Merge_succeeded
+  | Merge_pending
+  | Queue_entered of Pr_state.merge_queue_entry
+[@@deriving show, eq, sexp_of]
+
+val finish_github_success :
+  Orchestrator.t ->
+  now:float ->
+  Github_effect.t ->
+  github_success ->
+  Orchestrator.t
+
+val finish_github_failure :
+  Orchestrator.t ->
+  now:float ->
+  Github_effect.t ->
+  permanent:bool ->
+  error:string ->
+  Orchestrator.t
+(** Resolve a durable GitHub command. Success applies the corresponding domain
+    transition and removes the command in one state change. Failure either
+    schedules a bounded retry or records a terminal failed command; review
+    failures also enter the agent's fail-closed review state. *)

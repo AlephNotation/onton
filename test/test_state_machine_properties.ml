@@ -60,7 +60,7 @@ let apply_command orch patches cmd =
   try
     match cmd with
     | Tick ->
-        let orch, _effects, _actions =
+        let orch, _actions =
           Patch_controller.tick orch ~project_name:"test-project"
             ~gameplan:(make_gameplan patches)
         in
@@ -85,7 +85,7 @@ let apply_command orch patches cmd =
     corresponding agent-level check here. *)
 let check_agent_invariants (a : Patch_agent.t) =
   (* Mirrors Invariants.check_busy_implies_has_session *)
-  if a.busy && not a.has_session then
+  if Patch_agent.is_busy a && not (Patch_agent.has_session a) then
     failwith
       (Printf.sprintf "busy_implies_has_session violated for %s"
          (Patch_id.to_string a.patch_id));
@@ -97,7 +97,7 @@ let check_agent_invariants (a : Patch_agent.t) =
   (* notified_base_branch coherence: after session starts, if base_branch is
      Some then notified_base_branch must also be Some. Before any session,
      notified_base_branch must be None. *)
-  if a.has_session then (
+  if Patch_agent.has_session a then (
     if Option.is_some a.base_branch && Option.is_none a.notified_base_branch
     then
       failwith
@@ -158,14 +158,14 @@ let () =
             let rec stabilize o n =
               if n = 0 then o
               else
-                let o, _effects, _actions =
+                let o, _actions =
                   Patch_controller.tick o ~project_name:"test-project"
                     ~gameplan:(make_gameplan patches)
                 in
                 stabilize o (n - 1)
             in
             let stable = stabilize orch (List.length patches + 2) in
-            let _, _effects, actions1 =
+            let _, actions1 =
               Patch_controller.tick stable ~project_name:"test-project"
                 ~gameplan:(make_gameplan patches)
             in
@@ -199,7 +199,7 @@ let () =
                 let rec tick_all o n =
                   if n = 0 then o
                   else
-                    let o, _effects, _actions =
+                    let o, _actions =
                       Patch_controller.tick o ~project_name:"test-project"
                         ~gameplan:(make_gameplan patches)
                     in
@@ -216,7 +216,7 @@ let () =
                 let orch = Orchestrator.set_pr_body_delivered orch pid true in
                 let orch = Orchestrator.complete orch pid in
                 let orch = Orchestrator.enqueue orch pid kind in
-                let _, _effects, actions =
+                let _, actions =
                   Patch_controller.tick orch ~project_name:"test-project"
                     ~gameplan:(make_gameplan patches)
                 in
@@ -247,7 +247,7 @@ let () =
             | first :: _ ->
                 let pid = first.Patch.id in
                 let orch = Orchestrator.create ~patches ~main_branch:main in
-                let orch, _effects, _actions =
+                let orch, _actions =
                   Patch_controller.tick orch ~project_name:"test-project"
                     ~gameplan:(make_gameplan patches)
                 in
@@ -260,7 +260,7 @@ let () =
                   List.fold ops ~init:orch ~f:(fun o k ->
                       Orchestrator.enqueue o pid k)
                 in
-                let _, _effects, actions =
+                let _, actions =
                   Patch_controller.tick orch ~project_name:"test-project"
                     ~gameplan:(make_gameplan patches)
                 in
@@ -288,7 +288,7 @@ let () =
             | first :: _ ->
                 let pid = first.Patch.id in
                 let orch = Orchestrator.create ~patches ~main_branch:main in
-                let orch, _effects, _actions =
+                let orch, _actions =
                   Patch_controller.tick orch ~project_name:"test-project"
                     ~gameplan:(make_gameplan patches)
                 in
@@ -302,7 +302,7 @@ let () =
                 if not (Patch_agent.needs_intervention agent) then false
                 else
                   let orch = Orchestrator.enqueue orch pid Operation_kind.Ci in
-                  let _, _effects, actions =
+                  let _, actions =
                     Patch_controller.tick orch ~project_name:"test-project"
                       ~gameplan:(make_gameplan patches)
                   in
@@ -313,7 +313,7 @@ let () =
                         | Orchestrator.Start _ | Orchestrator.Rebase _ -> false))
                   in
                   let orch = Orchestrator.reset_intervention_state orch pid in
-                  let _, _effects, actions2 =
+                  let _, actions2 =
                     Patch_controller.tick orch ~project_name:"test-project"
                       ~gameplan:(make_gameplan patches)
                   in
@@ -342,7 +342,7 @@ let () =
             | first :: _ ->
                 let pid = first.Patch.id in
                 let orch = Orchestrator.create ~patches ~main_branch:main in
-                let orch, _effects, _actions =
+                let orch, _actions =
                   Patch_controller.tick orch ~project_name:"test-project"
                     ~gameplan:(make_gameplan patches)
                 in
@@ -376,7 +376,7 @@ let () =
             | first :: _ -> (
                 let pid = first.Patch.id in
                 let orch = Orchestrator.create ~patches ~main_branch:main in
-                let orch, _effects, _actions =
+                let orch, _actions =
                   Patch_controller.tick orch ~project_name:"test-project"
                     ~gameplan:(make_gameplan patches)
                 in
@@ -390,7 +390,7 @@ let () =
                 in
                 let agent = Orchestrator.agent orch pid in
                 let expected_hp = Patch_agent.highest_priority agent in
-                let _, _effects, actions =
+                let _, actions =
                   Patch_controller.tick orch ~project_name:"test-project"
                     ~gameplan:(make_gameplan patches)
                 in
@@ -425,7 +425,7 @@ let () =
                 let rec tick_all o n =
                   if n = 0 then o
                   else
-                    let o, _effects, _actions =
+                    let o, _actions =
                       Patch_controller.tick o ~project_name:"test-project"
                         ~gameplan:(make_gameplan patches)
                     in
@@ -439,7 +439,7 @@ let () =
                 let orch =
                   Orchestrator.enqueue orch pid Operation_kind.Rebase
                 in
-                let _, _effects, actions =
+                let _, actions =
                   Patch_controller.tick orch ~project_name:"test-project"
                     ~gameplan:(make_gameplan patches)
                 in
@@ -561,9 +561,9 @@ let () =
             | Some (orch, pid) ->
                 let orch' = Orchestrator.apply_force_complete orch pid reason in
                 let after = Orchestrator.agent orch' pid in
-                (not after.busy)
-                && Option.is_none after.current_op
-                && Option.is_none after.current_message_id
+                (not (Patch_agent.is_busy after))
+                && Option.is_none (Patch_agent.current_op after)
+                && Option.is_none (Patch_agent.current_message_id after)
                 && List.is_empty after.inflight_human_messages))
   in
   QCheck2.Test.check_exn prop;
@@ -630,15 +630,17 @@ let () =
                 let after = Orchestrator.agent orch' pid in
                 match reason with
                 | Orchestrator.Cancelled ->
-                    Patch_agent.equal_session_fallback before.session_fallback
-                      after.session_fallback
+                    Patch_agent.equal_session_fallback
+                      (Patch_agent.session_fallback before)
+                      (Patch_agent.session_fallback after)
                 | Orchestrator.Unexpected_exception ->
                     let expected =
                       Patch_agent.set_tried_fresh
                         (Patch_agent.set_session_failed before)
                     in
-                    Patch_agent.equal_session_fallback expected.session_fallback
-                      after.session_fallback)))
+                    Patch_agent.equal_session_fallback
+                      (Patch_agent.session_fallback expected)
+                      (Patch_agent.session_fallback after))))
   in
   QCheck2.Test.check_exn prop;
   Stdlib.print_endline "P12 passed"
@@ -665,7 +667,7 @@ let () =
             | Some (orch, pid) ->
                 let orch1 = Orchestrator.apply_force_complete orch pid reason in
                 let after1 = Orchestrator.agent orch1 pid in
-                if after1.busy then false
+                if Patch_agent.is_busy after1 then false
                 else
                   let orch2 =
                     Orchestrator.apply_force_complete orch1 pid reason

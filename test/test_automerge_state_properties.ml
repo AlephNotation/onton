@@ -26,7 +26,6 @@ let gen_merge_queue_entry =
 type op =
   | Enable of bool
   | Arm of float
-  | Set_inflight of bool
   | Entered of Pr_state.merge_queue_entry
   | Observe_none of bool
   | Observe_some of Pr_state.merge_queue_entry
@@ -40,7 +39,6 @@ let gen_op =
     [
       map (fun v -> Enable v) bool;
       map (fun n -> Arm (Float.of_int n)) (int_range 0 10_000);
-      map (fun v -> Set_inflight v) bool;
       map (fun entry -> Entered entry) gen_merge_queue_entry;
       map (fun required -> Observe_none required) bool;
       map (fun entry -> Observe_some entry) gen_merge_queue_entry;
@@ -52,7 +50,6 @@ let gen_op =
 let apply_op agent = function
   | Enable v -> Patch_agent.set_automerge_enabled agent v
   | Arm deadline -> Automerge_state.arm_deadline agent deadline
-  | Set_inflight v -> Patch_agent.set_automerge_inflight agent v
   | Entered entry -> Automerge_state.entered_merge_queue agent entry
   | Observe_none required ->
       Automerge_state.observe_merge_queue agent ~required ~entry:None
@@ -70,9 +67,7 @@ let base_agent () =
 
 let prop_entered_merge_queue_shape =
   QCheck2.Test.make
-    ~name:
-      "automerge_state MQ-IN: entering merge queue clears \
-       timer/inflight/failures"
+    ~name:"automerge_state MQ-IN: entering merge queue clears timer/failures"
     ~count:1000
     QCheck2.Gen.(pair (list_size (int_range 0 30) gen_op) gen_merge_queue_entry)
     (fun (ops, entry) ->
@@ -81,9 +76,8 @@ let prop_entered_merge_queue_shape =
       agent.Patch_agent.merge_queue_required
       && Option.equal Pr_state.equal_merge_queue_entry agent.merge_queue_entry
            (Some entry)
-      && Option.is_none agent.automerge_deadline
-      && (not agent.automerge_inflight)
-      && agent.automerge_failure_count = 0
+      && Option.is_none (Patch_agent.automerge_deadline agent)
+      && Patch_agent.automerge_failure_count agent = 0
       && Automerge_state.merge_queue_timer_invariant agent)
 
 let prop_observe_entry_is_entered_merge_queue =
@@ -119,7 +113,7 @@ let prop_observe_none_ejection_clears_stale_deadline =
       in
       Bool.equal agent.Patch_agent.merge_queue_required required
       && Option.is_none agent.Patch_agent.merge_queue_entry
-      && Option.is_none agent.Patch_agent.automerge_deadline
+      && Option.is_none (Patch_agent.automerge_deadline agent)
       && Automerge_state.merge_queue_timer_invariant agent)
 
 let prop_failure_does_not_rearm_when_already_enqueued =
@@ -131,11 +125,10 @@ let prop_failure_does_not_rearm_when_already_enqueued =
       let agent = List.fold ops ~init:(base_agent ()) ~f:apply_op in
       let agent =
         Automerge_state.entered_merge_queue agent entry |> fun agent ->
-        Patch_agent.set_automerge_inflight agent true |> fun agent ->
         Automerge_state.arm_deadline agent 1.0 |> fun agent ->
         Automerge_state.merge_call_failed agent ~retry_deadline ~max_failures
       in
-      Option.is_none agent.Patch_agent.automerge_deadline
+      Option.is_none (Patch_agent.automerge_deadline agent)
       && Automerge_state.merge_queue_timer_invariant agent)
 
 let prop_interleavings_preserve_invariant =

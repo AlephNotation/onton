@@ -24,7 +24,6 @@ val run :
   patch_id:Types.Patch_id.t ->
   prompt:string ->
   resume_session:string option ->
-  complexity:int option ->
   Llm_backend.result
 (** Spawn a Claude CLI process for [patch_id] in directory [cwd].
 
@@ -39,12 +38,6 @@ val run :
     inside a switch they will release on a timer). The streaming counterpart
     {!run_streaming} carries [~clock] and [~timeout] for this purpose. *)
 
-val auto_model : complexity:int option -> string option
-(** Map a 1/2/3 complexity to a Claude model alias. [None] complexity (and any
-    out-of-range value) is treated as the strongest tier — be conservative.
-    Returns [Some "haiku"] / [Some "sonnet"] / [Some "opus"] — Claude Code's
-    stable aliases. *)
-
 val run_streaming :
   model:string option ->
   process_mgr:_ Eio.Process.mgr ->
@@ -57,7 +50,6 @@ val run_streaming :
   prompt:string ->
   resume_session:string option ->
   session_uuid:string ->
-  complexity:int option ->
   on_event:(Types.Stream_event.t -> unit) ->
   Llm_backend.result
 (** Like {!run} but uses [--output-format stream-json]. Each NDJSON line is
@@ -80,7 +72,6 @@ val strip_ansi : string -> string
 val build_args :
   getenv_opt:(string -> string option) ->
   model:string option ->
-  complexity:int option ->
   prompt:string ->
   resume_session:string option ->
   string list
@@ -89,7 +80,6 @@ val build_args :
 val build_stream_args :
   getenv_opt:(string -> string option) ->
   model:string option ->
-  complexity:int option ->
   prompt:string ->
   minted_session_id:string option ->
   resume_session:string option ->

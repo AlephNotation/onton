@@ -11,7 +11,7 @@ val entered_merge_queue :
 (** Apply the semantic fact that this PR is now in GitHub's merge queue,
     regardless of how that happened: automerge enqueue response, manual enqueue,
     or a later poll observation. Records the entry, clears the automerge
-    deadline and inflight flag, and resets the consecutive failure count. *)
+    deadline and resets the consecutive failure count. *)
 
 val observe_merge_queue :
   Patch_agent.t ->
@@ -28,8 +28,7 @@ val arm_deadline : Patch_agent.t -> float -> Patch_agent.t
 
 val merge_call_failed :
   Patch_agent.t -> retry_deadline:float -> max_failures:int -> Patch_agent.t
-(** Apply a failed merge or enqueue call. Clears inflight, increments the
-    failure counter, and arms [retry_deadline] only if automerge remains
-    enabled, the failure cap has not been reached, and the PR is not already
-    known to be in the merge queue. Dequeue failures are handled separately by
-    the runner and do not increment the automerge failure count. *)
+(** Apply a failed merge or enqueue call. Increments the failure counter and
+    arms [retry_deadline] only if automerge remains enabled, the failure cap has
+    not been reached, and the PR is not already known to be in the merge queue.
+    The durable outbox owns execution and retry claims. *)

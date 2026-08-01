@@ -95,7 +95,7 @@ type patch_view = {
   status : display_status;
   queue_len : int;
   current_op : Operation_kind.t option;
-  current_op_state : Patch_agent.op_state;
+  current_op_state : Patch_agent.op_state option;
   ci_failures : int;
   ci_failure_cap : int;
   dep_ids : (Patch_id.t * display_status) list;
@@ -107,26 +107,17 @@ type patch_view = {
   recent_stream : activity_entry list;
   pr_number : Pr_number.t option;
   merge_queue_entry : Pr_state.merge_queue_entry option;
-  pr_missing : bool;
-      (** [true] when [pr_number] is set but the remote no longer has the PR
-          ([pr_status = Missing _]). Distinguishes "we lost it" from "we have
-          it" so the TUI can flag the row distinctively. *)
   base_branch : Branch.t option;
   worktree_path : string option;
   intervention_reason : string option;
   automerge_enabled : bool;
   automerge_deadline : float option;
   automerge_failure_count : int;
-  complexity : int option;
-      (** Gameplan-author's complexity tier for this patch (1/2/3), or [None]
-          when the gameplan didn't specify. *)
   backend : string;
-      (** Backend name (e.g. ["claude"], ["codex"]) routed to for this patch
-          given its complexity, the CLI flags, and the repo config. *)
+      (** Backend name (e.g. ["claude"], ["codex"]) selected for this run. *)
   model : string option;
-      (** Concrete model name the patch will run under (auto sentinel already
-          resolved), or [None] when no [--model] flag was supplied and the
-          backend uses its built-in default. *)
+      (** Concrete model name, or [None] when the backend chooses its default.
+      *)
 }
 
 (** {2 Frame rendering} *)
@@ -171,7 +162,7 @@ val views_of_orchestrator :
   orchestrator:Orchestrator.t ->
   gameplan:Gameplan.t ->
   activity:activity_entry list ->
-  resolve_routing:(complexity:int option -> Backend_routing.decision) ->
+  backend_decision:Backend_routing.decision ->
   ?intervention_reasons:(Patch_id.t, string) Map.Poly.t ->
   unit ->
   patch_view list
@@ -215,7 +206,6 @@ val render_frame :
   ?transcript:string ->
   ?status_msg:status_msg ->
   ?prompt_line:prompt_info ->
-  ?dep_select:int * Set.M(Patch_id).t ->
   patch_view list ->
   frame
 

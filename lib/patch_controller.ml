@@ -37,19 +37,6 @@ let message_of_action (patch_agent : Patch_agent.t) action =
       status = Pending;
     }
 
-type github_effect =
-  | Set_pr_draft of {
-      patch_id : Patch_id.t;
-      pr_number : Pr_number.t;
-      draft : bool;
-    }
-  | Set_pr_base of {
-      patch_id : Patch_id.t;
-      pr_number : Pr_number.t;
-      base : Branch.t;
-    }
-[@@deriving show, eq, sexp_of]
-
 type poll_log_entry = { message : string; patch_id : Patch_id.t }
 [@@deriving show, eq]
 
@@ -64,7 +51,7 @@ let discovery_intents orch =
   Orchestrator.all_agents orch
   |> List.filter_map ~f:(fun (agent : Patch_agent.t) ->
       if
-        agent.has_session
+        Patch_agent.has_session agent
         && (not (Patch_agent.has_pr agent))
         && not agent.merged
       then Some (agent.patch_id, agent.branch)
@@ -83,7 +70,8 @@ let enqueue_pr_body_if_needed t patch_id (agent : Patch_agent.t) =
   else
     let already_queued =
       List.mem agent.queue Operation_kind.Pr_body ~equal:Operation_kind.equal
-      || Option.equal Operation_kind.equal agent.current_op
+      || Option.equal Operation_kind.equal
+           (Patch_agent.current_op agent)
            (Some Operation_kind.Pr_body)
     in
     if already_queued then t
@@ -103,23 +91,6 @@ let apply_poll_result ?(merge_queue_ejection_confirmed = false) t patch_id
     if application.merge_queue_ejected then
       log "Merge queue removed PR after checks failed — treating as CI failure";
     (application.poll_result, application.merge_queue_ejected)
-  in
-  (* If the agent was [Missing] and we have a successful poll observation,
-     lift it back to [Present] before applying any world-state updates. The
-     pure classifier is total; the effectful dispatch is a flat match.
-     [set_pr_number]'s [Set_present_recover_same] arm preserves all state
-     that was held across the [Missing] phase. *)
-  let t =
-    let agent = Orchestrator.agent t patch_id in
-    match
-      Patch_pr_status.classify_recovery_on_observe agent.Patch_agent.pr_status
-    with
-    | Patch_pr_status.Lift_to_present pr ->
-        log
-          (Printf.sprintf "PR #%d re-appeared on remote — restoring to Present"
-             (Pr_number.to_int pr));
-        Orchestrator.set_pr_number t patch_id pr
-    | Patch_pr_status.No_recovery_needed -> t
   in
   let t =
     if poll_result.merged then (
@@ -166,7 +137,8 @@ let apply_poll_result ?(merge_queue_ejection_confirmed = false) t patch_id
           (not already_queued)
           && not
                (Option.equal Operation_kind.equal
-                  agent_before.Patch_agent.current_op (Some kind))
+                  (Patch_agent.current_op agent_before)
+                  (Some kind))
         in
         match kind with
         | Operation_kind.Ci -> (
@@ -346,25 +318,21 @@ let open_dep_review_ready t pid =
   && (not a.Patch_agent.has_conflict)
   && a.Patch_agent.checks_passing
 
-(* PR base / draft reconciliation shared by gameplan and ad-hoc agents.
-   [allow_draft_flip] scopes the mark-for-review ratchet to gameplan patches:
-   onton opened those PRs as drafts and owns the draft→ready transition,
-   whereas an ad-hoc PR's draft bit belongs to whoever created the PR. The
-   base retarget applies to every managed agent — a PR left targeting a merged
+(* Reconcile the PR settings owned by the plan executor. A PR left targeting a merged
    dependency's branch diffs against frozen pre-merge history, so GitHub
    reports conflicts that no rebase onto main can clear (the local rebase
    noops, the poller re-reads the stale base, and the two spin forever). *)
-let reconcile_pr_settings t patch_id ~allow_draft_flip =
+let reconcile_pr_settings t patch_id =
   let agent = Orchestrator.agent t patch_id in
   if agent.Patch_agent.merged then []
   else begin
-    let effects = ref [] in
+    let commands = ref [] in
     (* Gate on [is_pr_present]: emitting Set_pr_draft / Set_pr_base against a
        [Missing] PR would 404 against GitHub. A gameplan patch can in
        principle reach Missing if the poller ever wires that for gameplan
        patches in the future; defensively skip it here either way. *)
     (match Patch_agent.pr_number agent with
-    | Some pr_number when Patch_agent.is_pr_present agent -> (
+    | Some pr_number when Patch_agent.has_pr agent -> (
         match agent.base_branch with
         | Some actual_base ->
             let has_merged pid =
@@ -387,58 +355,35 @@ let reconcile_pr_settings t patch_id ~allow_draft_flip =
                  reviewers, so the controller defers the transition until the
                  patch reaches the [ready_for_review] fixpoint and then never
                  flips back. *)
-              if
-                allow_draft_flip && agent.is_draft
-                && ready_for_review t patch_id
-              then
-                effects :=
-                  Set_pr_draft { patch_id; pr_number; draft = false }
-                  :: !effects;
+              if agent.is_draft && ready_for_review t patch_id then
+                commands :=
+                  Github_effect.create ~patch_id
+                    (Github_effect.Set_pr_draft { pr_number; draft = false })
+                  :: !commands;
               if not (Branch.equal actual_base expected_base) then
-                effects :=
-                  Set_pr_base { patch_id; pr_number; base = expected_base }
-                  :: !effects
+                commands :=
+                  Github_effect.create ~patch_id
+                    (Github_effect.Set_pr_base
+                       { pr_number; base = expected_base })
+                  :: !commands
             end
         | None -> ())
     | Some _ | None -> ());
-    List.rev !effects
+    List.rev !commands
   end
 
 let reconcile_patch t ~project_name:_ ~gameplan:_ ~(patch : Patch.t) =
   let patch_id = patch.id in
   let agent = Orchestrator.agent t patch_id in
-  if agent.Patch_agent.merged then (t, [])
+  if agent.Patch_agent.merged then t
   else
     let t = enqueue_pr_body_if_needed t patch_id agent in
-    (t, reconcile_pr_settings t patch_id ~allow_draft_flip:true)
+    let commands = reconcile_pr_settings t patch_id in
+    List.fold commands ~init:t ~f:Orchestrator.enqueue_github_effect
 
 let reconcile_all t ~project_name ~gameplan =
-  let t, gameplan_effects =
-    List.fold gameplan.Gameplan.patches ~init:(t, [])
-      ~f:(fun (orch, acc) patch ->
-        let orch, effects =
-          reconcile_patch orch ~project_name ~gameplan ~patch
-        in
-        (orch, acc @ effects))
-  in
-  (* Ad-hoc agents (tracked but not in the gameplan) get the same base
-     retarget; they never get the draft flip, and no Pr_body demand — the PR
-     body contract is a gameplan artifact. Without this pass an ad-hoc PR
-     whose base branch merged is never retargeted on GitHub, and the
-     stale-base rebase loop above re-fires on every poll. *)
-  let gameplan_pids =
-    Set.of_list
-      (module Patch_id)
-      (List.map gameplan.Gameplan.patches ~f:(fun p -> p.Patch.id))
-  in
-  let adhoc_effects =
-    Orchestrator.all_agents t
-    |> List.filter ~f:(fun (a : Patch_agent.t) ->
-        not (Set.mem gameplan_pids a.Patch_agent.patch_id))
-    |> List.concat_map ~f:(fun (a : Patch_agent.t) ->
-        reconcile_pr_settings t a.Patch_agent.patch_id ~allow_draft_flip:false)
-  in
-  (t, gameplan_effects @ adhoc_effects)
+  List.fold gameplan.Gameplan.patches ~init:t ~f:(fun orch patch ->
+      reconcile_patch orch ~project_name ~gameplan ~patch)
 
 let branch_map_of_patches patches =
   List.fold patches
@@ -459,11 +404,11 @@ let plan_action_for_patch t ~branch_map patch_id =
     (* Dependency satisfaction: a child cannot rebase onto a [Missing] parent
        — the parent's branch may not exist on the remote. Gate on
        is_pr_present rather than has_pr (which is true for [Missing] too). *)
-    Patch_agent.is_pr_present (Orchestrator.agent t pid)
+    Patch_agent.has_pr (Orchestrator.agent t pid)
   in
   if
     (not (Patch_agent.has_pr agent))
-    && (not agent.Patch_agent.busy)
+    && (not (Patch_agent.is_busy agent))
     && (not agent.Patch_agent.merged)
     && (not (Patch_agent.needs_intervention agent))
     && Graph.deps_satisfied (Orchestrator.graph t) patch_id ~has_merged ~has_pr
@@ -501,9 +446,9 @@ let plan_action_for_patch t ~branch_map patch_id =
        patch blocked until an LLM session can run. Gate on [is_pr_present]
        (not [has_pr]) so a [Missing] PR is excluded — rebase pushes against
        a vanished PR would 404. *)
-    Patch_agent.is_pr_present agent
+    Patch_agent.has_pr agent
     && (not agent.Patch_agent.merged)
-    && (not agent.Patch_agent.busy)
+    && (not (Patch_agent.is_busy agent))
     && (not agent.Patch_agent.branch_blocked)
     && List.mem agent.Patch_agent.queue Operation_kind.Rebase
          ~equal:Operation_kind.equal
@@ -526,9 +471,9 @@ let plan_action_for_patch t ~branch_map patch_id =
         Some (Orchestrator.Rebase (patch_id, new_base))
     | _ -> None
   else if
-    Patch_agent.is_pr_present agent
+    Patch_agent.has_pr agent
     && (not agent.Patch_agent.merged)
-    && (not agent.Patch_agent.busy)
+    && (not (Patch_agent.is_busy agent))
     && (not (Patch_agent.needs_intervention agent))
     && not agent.Patch_agent.branch_blocked
   then
@@ -555,26 +500,6 @@ let reconcile_action_message t action =
 
 let reconcile_messages t ~patches =
   let branch_map = branch_map_of_patches patches in
-  (* Invariant: every graph patch_id is either in the gameplan (branch_map) or
-     has a PR identity ([has_pr] is true for both Present and Missing). A
-     violation indicates an ad-hoc agent was [clear_pr]-ed instead of
-     [mark_pr_missing]-ed, leaving an orphan in the graph. See
-     [poller_fiber.ml]'s [Rediscover_pr] arm and [Patch_pr_status]. *)
-  let missing =
-    Graph.all_patch_ids (Orchestrator.graph t)
-    |> List.filter ~f:(fun pid ->
-        (not (Map.mem branch_map pid))
-        && not (Patch_agent.has_pr (Orchestrator.agent t pid)))
-  in
-  if not (List.is_empty missing) then
-    invalid_arg
-      (Printf.sprintf
-         "Patch_controller.reconcile_messages: orchestrator invariant violated \
-          — %d ad-hoc patch(es) have no PR and are not in the gameplan (likely \
-          a [clear_pr] on an ad-hoc agent; should have been \
-          [mark_pr_missing]). patch_ids: %s"
-         (List.length missing)
-         (String.concat ~sep:", " (List.map missing ~f:Patch_id.to_string)));
   let patch_ids = Graph.all_patch_ids (Orchestrator.graph t) in
   let t =
     List.fold patch_ids ~init:t ~f:(fun acc patch_id ->
@@ -619,82 +544,58 @@ let plan_actions t ~patches =
   |> List.map ~f:(fun (msg : Orchestrator.patch_agent_message) -> msg.action)
 
 let plan_tick_messages t ~project_name ~gameplan =
-  let t, effects = reconcile_all t ~project_name ~gameplan in
+  let t = reconcile_all t ~project_name ~gameplan in
   let t, messages = reconcile_messages t ~patches:gameplan.Gameplan.patches in
-  (t, effects, messages)
+  (t, messages)
 
 let plan_tick t ~project_name ~gameplan =
-  let t, effects, messages = plan_tick_messages t ~project_name ~gameplan in
+  let t, messages = plan_tick_messages t ~project_name ~gameplan in
   let actions =
     List.map messages ~f:(fun (msg : Orchestrator.patch_agent_message) ->
         msg.action)
   in
-  (t, effects, actions)
+  (t, actions)
 
 let tick t ~project_name ~gameplan =
-  let t, effects, actions = plan_tick t ~project_name ~gameplan in
+  let t, actions = plan_tick t ~project_name ~gameplan in
   let t =
     List.fold actions ~init:t ~f:(fun acc action ->
         Orchestrator.fire acc action)
   in
-  (t, effects, actions)
-
-let apply_github_effect_success t = function
-  | Set_pr_draft { patch_id; draft; _ } ->
-      Orchestrator.set_is_draft t patch_id draft
-  | Set_pr_base { patch_id; base; _ } ->
-      Orchestrator.set_base_branch t patch_id base
+  (t, actions)
 
 let automerge_idle_timeout = 300.0
 let automerge_max_failures = 3
 
-(** Pure predicate: a patch is a candidate to START a new automerge call when it
-    is not already merged, no merge is currently in flight, automerge is
-    enabled, the PR is approved, CI is passing, the queue is empty, and the
-    consecutive failure count is under [automerge_max_failures]. New feedback
-    (Review_comments, Human, Ci, Merge_conflict, Pr_body) enqueues an operation,
-    which fails this check and so resets the deadline. [merge_ready] is now
-    component-derived ([Pr_state.merge_ready_of]: mergeable + CI passing +
-    non-blocking review), not GitHub's stale [mergeStateStatus]; the merge
-    *attempt* is the final authority, so a PR deemed ready that GitHub still
-    blocks is rejected by the merge call and backs off via the failure counter.
-    [checks_passing] is retained as a belt-and-suspenders guard alongside the
-    [merge_ready] CI term.
+(** Pure predicate: a patch is a candidate to start a new automerge command when
+    it is not already merged, automerge is enabled, the PR is approved, CI is
+    passing, the queue is empty, and the consecutive failure count is under
+    [automerge_max_failures]. New feedback (Review_comments, Human, Ci,
+    Merge_conflict, Pr_body) enqueues an operation, which fails this check and
+    so resets the deadline. [merge_ready] is now component-derived
+    ([Pr_state.merge_ready_of]: mergeable + CI passing + non-blocking review),
+    not GitHub's stale [mergeStateStatus]; the merge *attempt* is the final
+    authority, so a PR deemed ready that GitHub still blocks is rejected by the
+    merge call and backs off via the failure counter. [checks_passing] is
+    retained as a guard alongside the [merge_ready] CI term.
 
     The [not merged] guard is included here because a merged PR can retain a
     stale [merge_ready = true] in the orchestrator snapshot (e.g. the poller
     hasn't yet observed the merge or the PR was merged out-of-band); without
-    this guard such a PR would re-qualify as a candidate.
-
-    [?ignore_inflight] defaults to [false]: the safe default answers "is this
-    patch eligible to start a new merge call?". The only legitimate caller that
-    passes [~ignore_inflight:true] is the executor re-check in
-    [reconcile_and_execute_automerge], which runs while holding
-    [automerge_inflight = true] and needs the predicate to return [true] so long
-    as the underlying candidacy still holds (otherwise every merge call would be
-    short-circuited by its own inflight flag). Making the safe option the
-    default prevents a future caller from forgetting the inflight guard. *)
-let is_automerge_candidate ?(ignore_inflight = false) (agent : Patch_agent.t)
-    ~main_branch =
+    this guard such a PR would re-qualify as a candidate. The outbox command,
+    checked separately by [reconcile_automerge], is the sole execution claim. *)
+let is_automerge_candidate (agent : Patch_agent.t) ~main_branch =
   let enqueued_and_still_approved =
     Option.is_some agent.Patch_agent.merge_queue_entry
     && Patch_agent.is_approved agent ~main_branch
   in
-  (ignore_inflight || not agent.Patch_agent.automerge_inflight)
-  (* [not merged] looks redundant with [reconcile_automerge]'s early-return
-     on [agent.merged], but it is specifically load-bearing for the executor
-     re-check in [reconcile_and_execute_automerge], which uses
-     [~ignore_inflight:true] and runs on a later snapshot — a concurrent
-     poller can mark the agent merged between reconcile and execute. Do not
-     remove this guard; [reconcile_automerge]'s early-return is not
-     sufficient on its own. *)
-  && (not agent.Patch_agent.merged)
-  && agent.Patch_agent.automerge_enabled
+  (not agent.Patch_agent.merged)
+  && Patch_agent.automerge_enabled agent
   && Patch_agent.is_approved agent ~main_branch
   && (not enqueued_and_still_approved)
   && agent.Patch_agent.checks_passing
   && List.is_empty agent.Patch_agent.queue
-  && agent.Patch_agent.automerge_failure_count < automerge_max_failures
+  && Patch_agent.automerge_failure_count agent < automerge_max_failures
 
 (** [true] when a patch has momentarily lost [merge_ready] *only* because GitHub
     is recomputing mergeability ([mergeability_unknown], i.e.
@@ -721,30 +622,43 @@ let is_automerge_candidate ?(ignore_inflight = false) (agent : Patch_agent.t)
     still resets the timer. *)
 let automerge_transient_hold (agent : Patch_agent.t) ~main_branch =
   agent.Patch_agent.mergeability_unknown
-  && (not agent.Patch_agent.automerge_inflight)
   && (not agent.Patch_agent.merged)
-  && agent.Patch_agent.automerge_enabled
+  && Patch_agent.automerge_enabled agent
   && Patch_agent.is_approved_modulo_merge_ready agent ~main_branch
   && agent.Patch_agent.checks_passing
   && List.is_empty agent.Patch_agent.queue
-  && agent.Patch_agent.automerge_failure_count < automerge_max_failures
+  && Patch_agent.automerge_failure_count agent < automerge_max_failures
   && Option.is_none agent.Patch_agent.merge_queue_entry
 
 type merge_action = Direct_merge | Enqueue | Dequeue of string
 [@@deriving show, eq, sexp_of]
 
-type automerge_decision = {
-  merge_patch_id : Patch_id.t;
-  merge_pr_number : Pr_number.t;
-  action : merge_action;
-}
-[@@deriving show, eq, sexp_of]
+let is_automerge_github_action = function
+  | Github_effect.Direct_merge _ | Github_effect.Enqueue _
+  | Github_effect.Dequeue _ ->
+      true
+  | Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _
+  | Github_effect.Request_review _ ->
+      false
 
-type review_request_decision = {
-  review_patch_id : Patch_id.t;
-  review_pr_number : Pr_number.t;
-}
-[@@deriving show, eq, sexp_of]
+let has_automerge_command t patch_id =
+  Orchestrator.github_effects_for_patch t patch_id
+  |> List.exists ~f:(fun command ->
+      is_automerge_github_action command.Github_effect.action)
+
+let set_automerge_enabled t patch_id enabled =
+  let agent = Orchestrator.agent t patch_id in
+  if Bool.equal (Patch_agent.automerge_enabled agent) enabled then t
+  else
+    let t = Orchestrator.set_automerge_enabled t patch_id enabled in
+    Orchestrator.remove_github_effects_for_patch t patch_id ~f:(fun command ->
+        is_automerge_github_action command.Github_effect.action
+        &&
+        match command.Github_effect.status with
+        | Github_effect.Pending | Github_effect.Retry_at _
+        | Github_effect.Failed ->
+            true
+        | Github_effect.Running -> false)
 
 let merge_queue_entry_unmergeable (entry : Pr_state.merge_queue_entry) =
   Pr_state.equal_merge_queue_entry_state entry.state Pr_state.Mq_unmergeable
@@ -769,6 +683,23 @@ let should_dequeue_merge_queue agent ~main_branch ~entry_id =
          && not (merge_queue_transient_unknown_hold agent ~main_branch)
   | Some _ | None -> false
 
+let automerge_command_still_desired agent ~main_branch = function
+  | Github_effect.Direct_merge _ ->
+      is_automerge_candidate agent ~main_branch
+      && (not agent.Patch_agent.merge_queue_required)
+      && Option.is_none agent.Patch_agent.merge_queue_entry
+  | Github_effect.Enqueue _ ->
+      is_automerge_candidate agent ~main_branch
+      && agent.Patch_agent.merge_queue_required
+      && Option.is_none agent.Patch_agent.merge_queue_entry
+  | Github_effect.Dequeue { entry_id; _ } ->
+      Patch_agent.automerge_enabled agent
+      && Patch_agent.automerge_failure_count agent < automerge_max_failures
+      && should_dequeue_merge_queue agent ~main_branch ~entry_id
+  | Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _
+  | Github_effect.Request_review _ ->
+      false
+
 let automerge_action (agent : Patch_agent.t) ~main_branch =
   let approved = Patch_agent.is_approved agent ~main_branch in
   match (agent.Patch_agent.merge_queue_required, agent.merge_queue_entry) with
@@ -789,16 +720,15 @@ let apply_automerge_failure_state t ~now patch_id =
     ~retry_deadline:(now +. automerge_idle_timeout)
     ~max_failures:automerge_max_failures
 
-(** Reconcile the automerge deadline for every agent. Returns the updated
-    orchestrator and the list of patches whose deadline has now elapsed (the
-    caller is responsible for invoking the GitHub merge API for each).
+(** Reconcile the automerge deadline for every agent and durably stage commands
+    whose deadline has elapsed.
 
     For each agent:
-    - If the patch is [merged], clear any stale deadline/inflight flag — PRs
-      merged outside [apply_automerge_success] (manual merge, replacement PR,
-      etc.) must not keep a leftover timer in persisted state or the UI.
-    - If [automerge_inflight = true], no-op. The executor owns the deadline and
-      inflight transitions while a merge call is in progress.
+    - If the patch is [merged], clear any stale deadline and automerge command —
+      PRs merged outside [apply_automerge_success] (manual merge, replacement
+      PR, etc.) must not keep a leftover timer in persisted state or the UI.
+    - If an automerge command already exists, no-op. Its outbox status is the
+      sole claim across pending, running, retrying, and terminal states.
     - If [automerge_enabled = false], [is_automerge_candidate] returns false,
       which funnels into the non-candidate branches below (clearing any stale
       deadline). No separate early-return is needed.
@@ -807,133 +737,166 @@ let apply_automerge_failure_state t ~now patch_id =
     - If the patch is not a candidate and has a deadline, clear it — any
       feedback resets the timer, so enabling again must wait out a fresh
       5-minute window.
-    - If the patch is a candidate and the deadline has elapsed, mark the agent
-      [automerge_inflight = true] atomically and include it in the returned
-      decision list. The deadline is left in place; clearing it, clearing the
-      inflight flag, and advancing the failure counter are the caller's
-      responsibility via [apply_automerge_success]/[apply_automerge_failure]. *)
+    - If the patch is a candidate and the deadline has elapsed, enqueue one
+      deterministic outbox command. The deadline is left in place; success or
+      failure owns clearing/rearming it and advancing the failure counter. *)
 let reconcile_automerge t ~now =
   let agents = Orchestrator.all_agents t in
   let main_branch = Orchestrator.main_branch t in
-  List.fold agents ~init:(t, []) ~f:(fun (t, decisions) agent ->
+  List.fold agents ~init:(t, []) ~f:(fun (t, commands) agent ->
       let patch_id = agent.Patch_agent.patch_id in
       if agent.Patch_agent.merged then
         let t =
-          if Option.is_some agent.Patch_agent.automerge_deadline then
+          if Option.is_some (Patch_agent.automerge_deadline agent) then
             Orchestrator.clear_automerge_deadline t patch_id
           else t
         in
         let t =
-          if agent.Patch_agent.automerge_inflight then
-            Orchestrator.set_automerge_inflight t patch_id false
-          else t
+          Orchestrator.remove_github_effects_for_patch t patch_id
+            ~f:(fun command ->
+              is_automerge_github_action command.Github_effect.action
+              &&
+              match command.Github_effect.status with
+              | Github_effect.Pending | Github_effect.Retry_at _ -> true
+              | Github_effect.Running | Github_effect.Failed -> false)
         in
-        (t, decisions)
-      else if agent.Patch_agent.automerge_inflight then
-        (* A merge is already in flight for this patch. Don't touch the
-           deadline or issue a second decision — the caller clears the
-           inflight flag and advances state via apply_automerge_success /
-           apply_automerge_failure on resolution.
-
-           Belt-and-suspenders: [is_automerge_candidate] with its default
-           [~ignore_inflight:false] also rejects inflight agents below. This
-           explicit short-circuit is load-bearing for deadline preservation
-           (the [(false, Some _)] branch would otherwise clear the deadline),
-           so both guards must stay in sync. *)
-        (t, decisions)
+        (t, commands)
       else
-        let dequeue_action =
-          Option.bind agent.Patch_agent.merge_queue_entry ~f:(fun entry ->
-              if
-                should_dequeue_merge_queue agent ~main_branch
-                  ~entry_id:entry.Pr_state.id
-              then Some (Dequeue entry.id)
-              else None)
+        let t =
+          Orchestrator.remove_github_effects_for_patch t patch_id
+            ~f:(fun command ->
+              is_automerge_github_action command.Github_effect.action
+              &&
+              match command.Github_effect.status with
+              | Github_effect.Pending | Github_effect.Retry_at _ ->
+                  not
+                    (automerge_command_still_desired agent ~main_branch
+                       command.action)
+              | Github_effect.Running | Github_effect.Failed -> false)
         in
-        let emit_automerge_decision t action =
-          match Patch_agent.pr_number agent with
-          | Some pr_number when Patch_agent.is_pr_present agent ->
-              let t = Orchestrator.set_automerge_inflight t patch_id true in
-              ( t,
-                {
-                  merge_patch_id = patch_id;
-                  merge_pr_number = pr_number;
-                  action;
-                }
-                :: decisions )
-          | Some _ | None ->
-              (* Defensive clear so a future predicate change can't leave a
+        if has_automerge_command t patch_id then
+          (* The outbox command is the sole claim. Pending, running, retrying,
+           and terminally failed commands all suppress duplicate mutations. *)
+          (t, commands)
+        else
+          let dequeue_action =
+            Option.bind agent.Patch_agent.merge_queue_entry ~f:(fun entry ->
+                if
+                  should_dequeue_merge_queue agent ~main_branch
+                    ~entry_id:entry.Pr_state.id
+                then Some (Dequeue entry.id)
+                else None)
+          in
+          let emit_automerge_command t action =
+            match Patch_agent.pr_number agent with
+            | Some pr_number when Patch_agent.has_pr agent ->
+                let github_action =
+                  match action with
+                  | Direct_merge -> Github_effect.Direct_merge { pr_number }
+                  | Enqueue -> Github_effect.Enqueue { pr_number }
+                  | Dequeue entry_id ->
+                      Github_effect.Dequeue { pr_number; entry_id }
+                in
+                let command = Github_effect.create ~patch_id github_action in
+                ( Orchestrator.enqueue_github_effect t command,
+                  command :: commands )
+            | Some _ | None ->
+                (* Defensive clear so a future predicate change can't leave a
                  patch with a permanently-elapsed deadline that fires every
                  tick. *)
-              (Orchestrator.clear_automerge_deadline t patch_id, decisions)
-        in
-        match dequeue_action with
-        | Some action
-          when agent.Patch_agent.automerge_enabled
-               && agent.Patch_agent.automerge_failure_count
-                  < automerge_max_failures -> (
-            (* Dequeue queue-alarmed PRs immediately on first observation. If a
+                (Orchestrator.clear_automerge_deadline t patch_id, commands)
+          in
+          match dequeue_action with
+          | Some action
+            when Patch_agent.automerge_enabled agent
+                 && Patch_agent.automerge_failure_count agent
+                    < automerge_max_failures -> (
+              (* Dequeue queue-alarmed PRs immediately on first observation. If a
                previous dequeue call failed, [runner_fiber_impl] increments the
                automerge failure count; honor the same cap used for merge and
                enqueue failures. *)
-            match agent.Patch_agent.automerge_deadline with
-            | Some deadline when Float.(now < deadline) -> (t, decisions)
-            | None | Some _ -> emit_automerge_decision t action)
-        | Some _ | None -> (
-            let candidate = is_automerge_candidate agent ~main_branch in
-            match (candidate, agent.Patch_agent.automerge_deadline) with
-            | false, Some _ when automerge_transient_hold agent ~main_branch ->
-                (* merge_ready dropped only because GitHub is recomputing
+              match Patch_agent.automerge_deadline agent with
+              | Some deadline when Float.(now < deadline) -> (t, commands)
+              | None | Some _ -> emit_automerge_command t action)
+          | Some _ | None -> (
+              let candidate = is_automerge_candidate agent ~main_branch in
+              match (candidate, Patch_agent.automerge_deadline agent) with
+              | false, Some _ when automerge_transient_hold agent ~main_branch
+                ->
+                  (* merge_ready dropped only because GitHub is recomputing
                mergeability (mergeStateStatus = UNKNOWN) after the base
                advanced — typically a sibling patch merging. Hold the existing
                deadline so the idle window keeps counting real elapsed time
                instead of restarting on every sibling merge. We do not fire
                here (firing requires merge_ready / CLEAN); the next CLEAN poll
                re-qualifies the candidate and the preserved deadline elapses. *)
-                (t, decisions)
-            | false, Some _ ->
-                (* Feedback arrived, lost approval, CI flipped, or failure cap
+                  (t, commands)
+              | false, Some _ ->
+                  (* Feedback arrived, lost approval, CI flipped, or failure cap
                hit: drop the deadline so the next reconcile re-arms a fresh
                idle window once the patch becomes a candidate again. *)
-                (Orchestrator.clear_automerge_deadline t patch_id, decisions)
-            | false, None -> (t, decisions)
-            | true, None ->
-                let deadline = now +. automerge_idle_timeout in
-                ( Orchestrator.set_automerge_deadline t patch_id deadline,
-                  decisions )
-            | true, Some deadline ->
-                if Float.( >= ) now deadline then
-                  match automerge_action agent ~main_branch with
-                  | None ->
-                      ( Orchestrator.clear_automerge_deadline t patch_id,
-                        decisions )
-                  | Some action -> emit_automerge_decision t action
-                else (t, decisions)))
-  |> fun (t, decisions) -> (t, List.rev decisions)
+                  (Orchestrator.clear_automerge_deadline t patch_id, commands)
+              | false, None -> (t, commands)
+              | true, None ->
+                  let deadline = now +. automerge_idle_timeout in
+                  ( Orchestrator.set_automerge_deadline t patch_id deadline,
+                    commands )
+              | true, Some deadline ->
+                  if Float.( >= ) now deadline then
+                    match automerge_action agent ~main_branch with
+                    | None ->
+                        ( Orchestrator.clear_automerge_deadline t patch_id,
+                          commands )
+                    | Some action -> emit_automerge_command t action
+                  else (t, commands)))
+  |> fun (t, commands) -> (t, List.rev commands)
 
-let reconcile_review_requests t =
+let reconcile_review_requests t ~team_slug =
   let agents = Orchestrator.all_agents t in
   let main_branch = Orchestrator.main_branch t in
-  List.fold agents ~init:(t, []) ~f:(fun (t, decisions) agent ->
+  List.fold agents ~init:(t, []) ~f:(fun (t, commands) agent ->
       let patch_id = agent.Patch_agent.patch_id in
-      if Patch_agent.should_request_review agent ~main_branch then
-        match Patch_agent.pr_number agent with
-        | Some pr_number when Patch_agent.is_pr_present agent ->
-            let t = Orchestrator.set_review_request_inflight t patch_id true in
-            ( t,
-              { review_patch_id = patch_id; review_pr_number = pr_number }
-              :: decisions )
-        | Some _ | None ->
+      let review_is_desired =
+        Patch_agent.should_request_review agent ~main_branch
+      in
+      let t =
+        Orchestrator.remove_github_effects_for_patch t patch_id
+          ~f:(fun command ->
+            match (command.Github_effect.action, command.status) with
+            | ( Github_effect.Request_review
+                  { team_slug = command_team; head_oid; _ },
+                (Github_effect.Pending | Github_effect.Retry_at _) ) ->
+                (not review_is_desired)
+                || (not (String.equal command_team team_slug))
+                || not
+                     (Option.equal String.equal agent.head_oid (Some head_oid))
+            | ( Github_effect.Request_review _,
+                (Github_effect.Running | Github_effect.Failed) )
+            | ( ( Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _
+                | Github_effect.Direct_merge _ | Github_effect.Enqueue _
+                | Github_effect.Dequeue _ ),
+                _ ) ->
+                false)
+      in
+      if review_is_desired then
+        match (Patch_agent.pr_number agent, agent.Patch_agent.head_oid) with
+        | Some pr_number, Some head_oid when Patch_agent.has_pr agent ->
+            let command =
+              Github_effect.create ~patch_id
+                (Github_effect.Request_review { pr_number; team_slug; head_oid })
+            in
+            (Orchestrator.enqueue_github_effect t command, command :: commands)
+        | _ ->
             (* Defensive: [should_request_review] currently requires [has_pr],
-               but a Missing PR must not produce a GitHub mutation. *)
-            (t, decisions)
-      else (t, decisions))
-  |> fun (t, decisions) -> (t, List.rev decisions)
+               and [head_oid], but a Missing PR or absent head must not produce
+               a GitHub mutation. *)
+            (t, commands)
+      else (t, commands))
+  |> fun (t, commands) -> (t, List.rev commands)
 
 let apply_automerge_success t patch_id =
   let t = Orchestrator.mark_merged t patch_id in
   let t = Orchestrator.clear_automerge_deadline t patch_id in
-  let t = Orchestrator.set_automerge_inflight t patch_id false in
   Orchestrator.reset_automerge_failure_count t patch_id
 
 let apply_merge_queue_entered t patch_id entry =
@@ -941,16 +904,13 @@ let apply_merge_queue_entered t patch_id entry =
 
 let apply_merge_queue_dequeued t ~now patch_id =
   let t = Orchestrator.set_merge_queue_entry t patch_id None in
-  let t = Orchestrator.set_automerge_inflight t patch_id false in
   let t = Orchestrator.reset_automerge_failure_count t patch_id in
   Orchestrator.set_automerge_deadline t patch_id (now +. automerge_idle_timeout)
 
-(** Apply the durable state change that follows a failed merge call. Clears the
-    inflight flag and increments the failure counter. Pushes the deadline out by
-    [automerge_idle_timeout] so the retry is at least one idle window away — the
-    runner may call [reconcile_and_execute_automerge] every tick (~1s), and
-    without an explicit push-out a persistent GitHub failure could produce a
-    burst of calls within a single poll cycle.
+(** Apply the policy state that follows a failed automerge command. Increments
+    the failure counter and pushes the deadline out by [automerge_idle_timeout].
+    The durable outbox command remains the execution claim; this deadline is
+    only the user-visible policy/backoff state.
 
     Skip the deadline re-arm in two terminal cases:
     - The failure cap has now been reached: reconciliation will no longer issue
@@ -962,24 +922,100 @@ let apply_merge_queue_dequeued t ~now patch_id =
 let apply_automerge_failure t ~now patch_id =
   apply_automerge_failure_state t ~now patch_id
 
+type github_success =
+  | Mutation_applied
+  | Merge_succeeded
+  | Merge_pending
+  | Queue_entered of Pr_state.merge_queue_entry
+[@@deriving show, eq, sexp_of]
+
+let github_retry_delay = 60.0
+let github_max_attempts = 5
+
+let finish_github_success t ~now (command : Github_effect.t) success =
+  let patch_id = command.patch_id in
+  let applied =
+    match (command.action, success) with
+    | Github_effect.Set_pr_draft { draft; _ }, Mutation_applied ->
+        Some (Orchestrator.set_is_draft t patch_id draft)
+    | Github_effect.Set_pr_base { base; _ }, Mutation_applied ->
+        Some (Orchestrator.set_base_branch t patch_id base)
+    | Github_effect.Request_review { head_oid; _ }, Mutation_applied ->
+        Some (Orchestrator.mark_review_requested t patch_id head_oid)
+    | Github_effect.Dequeue _, Mutation_applied ->
+        Some (apply_merge_queue_dequeued t ~now patch_id)
+    | Github_effect.Direct_merge _, Merge_succeeded ->
+        Some (apply_automerge_success t patch_id)
+    | Github_effect.Direct_merge _, Merge_pending ->
+        Some
+          (Orchestrator.set_automerge_deadline t patch_id
+             (now +. automerge_idle_timeout))
+    | Github_effect.Enqueue _, Queue_entered entry ->
+        Some (apply_merge_queue_entered t patch_id entry)
+    | ( Github_effect.Set_pr_draft _,
+        (Merge_succeeded | Merge_pending | Queue_entered _) )
+    | ( Github_effect.Set_pr_base _,
+        (Merge_succeeded | Merge_pending | Queue_entered _) )
+    | ( Github_effect.Request_review _,
+        (Merge_succeeded | Merge_pending | Queue_entered _) )
+    | Github_effect.Direct_merge _, (Mutation_applied | Queue_entered _)
+    | ( Github_effect.Enqueue _,
+        (Mutation_applied | Merge_succeeded | Merge_pending) )
+    | ( Github_effect.Dequeue _,
+        (Merge_succeeded | Merge_pending | Queue_entered _) ) ->
+        None
+  in
+  match applied with
+  | Some t -> Orchestrator.remove_github_effect t command.id
+  | None ->
+      let failed =
+        Github_effect.fail ~error:"adapter returned an invalid result" command
+      in
+      Orchestrator.update_github_effect t failed
+
+let finish_github_failure t ~now (command : Github_effect.t) ~permanent ~error =
+  match command.action with
+  | Github_effect.Direct_merge _ | Github_effect.Enqueue _
+  | Github_effect.Dequeue _ ->
+      let t = apply_automerge_failure t ~now command.patch_id in
+      let agent = Orchestrator.agent t command.patch_id in
+      let terminal =
+        permanent
+        || command.attempts + 1 >= github_max_attempts
+        || Patch_agent.automerge_failure_count agent >= automerge_max_failures
+      in
+      if terminal then
+        Orchestrator.update_github_effect t (Github_effect.fail ~error command)
+      else
+        Orchestrator.update_github_effect t
+          (Github_effect.retry ~now ~delay:automerge_idle_timeout ~error command)
+  | Github_effect.Request_review { head_oid; _ } ->
+      let terminal = permanent || command.attempts + 1 >= github_max_attempts in
+      if terminal then
+        let t =
+          Orchestrator.mark_review_failed t command.patch_id ~head_oid ~error
+        in
+        Orchestrator.update_github_effect t (Github_effect.fail ~error command)
+      else
+        Orchestrator.update_github_effect t
+          (Github_effect.retry ~now ~delay:github_retry_delay ~error command)
+  | Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _ ->
+      let terminal = permanent || command.attempts + 1 >= github_max_attempts in
+      let command =
+        if terminal then Github_effect.fail ~error command
+        else Github_effect.retry ~now ~delay:github_retry_delay ~error command
+      in
+      Orchestrator.update_github_effect t command
+
 let make_orchestrator ~patch_id ~main_branch =
   let patch =
     {
       Patch.id = patch_id;
-      title = "test";
-      description = "test";
+      goal = "test";
       branch = Branch.of_string "test-branch";
       dependencies = [];
-      spec = "";
-      acceptance_criteria = [];
-      changes = [];
       files = [];
-      classification = "";
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
+      checks = [];
     }
   in
   (patch, Orchestrator.create ~patches:[ patch ] ~main_branch)
@@ -987,32 +1023,17 @@ let make_orchestrator ~patch_id ~main_branch =
 let pid = Patch_id.of_string "p1"
 let main = Branch.of_string "main"
 
+let test_gameplan patches =
+  Gameplan.{ project_name = "proj"; repo_owner = ""; repo_name = ""; patches }
+
 let%test "reconcile_patch escalates repeated start discovery failures" =
   let patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
   let t =
     let t = Orchestrator.increment_start_attempts_without_pr t pid in
     Orchestrator.increment_start_attempts_without_pr t pid
   in
-  let t, _ =
-    reconcile_patch t ~project_name:"proj"
-      ~gameplan:
-        Gameplan.
-          {
-            project_name = "proj";
-            repo_owner = "";
-            repo_name = "";
-            problem_statement = "";
-            solution_summary = "";
-            final_state_spec = "";
-            patches = [ patch ];
-            current_state_analysis = "";
-            explicit_opinions = "";
-            acceptance_criteria = [];
-            open_questions = [];
-            functional_changes = [];
-            context_resources = [];
-            reachability_traces = [];
-          }
+  let t =
+    reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
       ~patch
   in
   Patch_agent.needs_intervention (Orchestrator.agent t pid)
@@ -1022,26 +1043,8 @@ let%test "reconcile_patch enqueues pr_body after PR creation" =
   let t = Orchestrator.fire t (Orchestrator.Start (pid, main)) in
   let t = Orchestrator.set_pr_number t pid (Pr_number.of_int 42) in
   let t = Orchestrator.complete t pid in
-  let gp =
-    Gameplan.
-      {
-        project_name = "proj";
-        repo_owner = "";
-        repo_name = "";
-        problem_statement = "";
-        solution_summary = "";
-        final_state_spec = "";
-        patches = [ patch ];
-        current_state_analysis = "";
-        explicit_opinions = "";
-        acceptance_criteria = [];
-        open_questions = [];
-        functional_changes = [];
-        context_resources = [];
-        reachability_traces = [];
-      }
-  in
-  let t, _ = reconcile_patch t ~project_name:"proj" ~gameplan:gp ~patch in
+  let gp = test_gameplan [ patch ] in
+  let t = reconcile_patch t ~project_name:"proj" ~gameplan:gp ~patch in
   let queue = (Orchestrator.agent t pid).Patch_agent.queue in
   List.mem queue Operation_kind.Pr_body ~equal:Operation_kind.equal
 
@@ -1052,31 +1055,20 @@ let%test "reconcile_patch requests ready-for-review after pr_body on main" =
   let t = Orchestrator.set_pr_body_delivered t pid true in
   let t = Orchestrator.set_checks_passing t pid true in
   let t = Orchestrator.complete t pid in
-  let _, effects =
-    reconcile_patch t ~project_name:"proj"
-      ~gameplan:
-        Gameplan.
-          {
-            project_name = "proj";
-            repo_owner = "";
-            repo_name = "";
-            problem_statement = "";
-            solution_summary = "";
-            final_state_spec = "";
-            patches = [ patch ];
-            current_state_analysis = "";
-            explicit_opinions = "";
-            acceptance_criteria = [];
-            open_questions = [];
-            functional_changes = [];
-            context_resources = [];
-            reachability_traces = [];
-          }
+  let t =
+    reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
       ~patch
   in
-  List.exists effects ~f:(function
-    | Set_pr_draft { patch_id; draft = false; _ } -> Patch_id.equal patch_id pid
-    | Set_pr_draft _ | Set_pr_base _ -> false)
+  let effects = Orchestrator.all_github_effects t in
+  List.exists effects ~f:(fun command ->
+      Patch_id.equal command.Github_effect.patch_id pid
+      &&
+      match command.action with
+      | Github_effect.Set_pr_draft { draft = false; _ } -> true
+      | Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _
+      | Github_effect.Request_review _ | Github_effect.Direct_merge _
+      | Github_effect.Enqueue _ | Github_effect.Dequeue _ ->
+          false)
 
 let%test "reconcile_patch keeps PR draft while CI is not green" =
   let patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
@@ -1085,28 +1077,11 @@ let%test "reconcile_patch keeps PR draft while CI is not green" =
   let t = Orchestrator.set_pr_body_delivered t pid true in
   let t = Orchestrator.complete t pid in
   (* checks_passing left at its default [false] — CI hasn't reported green. *)
-  let _, effects =
-    reconcile_patch t ~project_name:"proj"
-      ~gameplan:
-        Gameplan.
-          {
-            project_name = "proj";
-            repo_owner = "";
-            repo_name = "";
-            problem_statement = "";
-            solution_summary = "";
-            final_state_spec = "";
-            patches = [ patch ];
-            current_state_analysis = "";
-            explicit_opinions = "";
-            acceptance_criteria = [];
-            open_questions = [];
-            functional_changes = [];
-            context_resources = [];
-            reachability_traces = [];
-          }
+  let t =
+    reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
       ~patch
   in
+  let effects = Orchestrator.all_github_effects t in
   List.is_empty effects
 
 let%test "reconcile_patch never re-drafts a PR once it is ready for review" =
@@ -1120,32 +1095,19 @@ let%test "reconcile_patch never re-drafts a PR once it is ready for review" =
   (* Now CI flaps red and a fresh conflict arrives. *)
   let t = Orchestrator.set_checks_passing t pid false in
   let t = Orchestrator.set_has_conflict t pid in
-  let _, effects =
-    reconcile_patch t ~project_name:"proj"
-      ~gameplan:
-        Gameplan.
-          {
-            project_name = "proj";
-            repo_owner = "";
-            repo_name = "";
-            problem_statement = "";
-            solution_summary = "";
-            final_state_spec = "";
-            patches = [ patch ];
-            current_state_analysis = "";
-            explicit_opinions = "";
-            acceptance_criteria = [];
-            open_questions = [];
-            functional_changes = [];
-            context_resources = [];
-            reachability_traces = [];
-          }
+  let t =
+    reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
       ~patch
   in
+  let effects = Orchestrator.all_github_effects t in
   not
-    (List.exists effects ~f:(function
-      | Set_pr_draft _ -> true
-      | Set_pr_base _ -> false))
+    (List.exists effects ~f:(fun command ->
+         match command.Github_effect.action with
+         | Github_effect.Set_pr_draft _ -> true
+         | Github_effect.Set_pr_base _ | Github_effect.Request_review _
+         | Github_effect.Direct_merge _ | Github_effect.Enqueue _
+         | Github_effect.Dequeue _ ->
+             false))
 
 let%test "reconcile_patch keeps PR draft while merge conflict is active" =
   let patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
@@ -1155,32 +1117,19 @@ let%test "reconcile_patch keeps PR draft while merge conflict is active" =
   let t = Orchestrator.set_checks_passing t pid true in
   let t = Orchestrator.complete t pid in
   let t = Orchestrator.set_has_conflict t pid in
-  let _, effects =
-    reconcile_patch t ~project_name:"proj"
-      ~gameplan:
-        Gameplan.
-          {
-            project_name = "proj";
-            repo_owner = "";
-            repo_name = "";
-            problem_statement = "";
-            solution_summary = "";
-            final_state_spec = "";
-            patches = [ patch ];
-            current_state_analysis = "";
-            explicit_opinions = "";
-            acceptance_criteria = [];
-            open_questions = [];
-            functional_changes = [];
-            context_resources = [];
-            reachability_traces = [];
-          }
+  let t =
+    reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
       ~patch
   in
+  let effects = Orchestrator.all_github_effects t in
   not
-    (List.exists effects ~f:(function
-      | Set_pr_draft { draft = false; _ } -> true
-      | Set_pr_draft _ | Set_pr_base _ -> false))
+    (List.exists effects ~f:(fun command ->
+         match command.Github_effect.action with
+         | Github_effect.Set_pr_draft { draft = false; _ } -> true
+         | Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _
+         | Github_effect.Request_review _ | Github_effect.Direct_merge _
+         | Github_effect.Enqueue _ | Github_effect.Dequeue _ ->
+             false))
 
 let%test
     "reconcile_patch keeps child PR draft until rebased onto main after parent \
@@ -1192,20 +1141,11 @@ let%test
   let mk_patch id branch deps =
     {
       Patch.id;
-      title = "test";
-      description = "test";
+      goal = "test";
       branch;
       dependencies = deps;
-      spec = "";
-      acceptance_criteria = [];
-      changes = [];
       files = [];
-      classification = "";
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
+      checks = [];
     }
   in
   let parent_patch = mk_patch parent_id parent_branch [] in
@@ -1225,33 +1165,21 @@ let%test
   let t = Orchestrator.set_pr_body_delivered t child_id true in
   let t = Orchestrator.set_checks_passing t child_id true in
   let t = Orchestrator.complete t child_id in
-  let gp =
-    Gameplan.
-      {
-        project_name = "proj";
-        repo_owner = "";
-        repo_name = "";
-        problem_statement = "";
-        solution_summary = "";
-        final_state_spec = "";
-        patches = [ parent_patch; child_patch ];
-        current_state_analysis = "";
-        explicit_opinions = "";
-        acceptance_criteria = [];
-        open_questions = [];
-        functional_changes = [];
-        context_resources = [];
-        reachability_traces = [];
-      }
-  in
-  let _, effects =
+  let gp = test_gameplan [ parent_patch; child_patch ] in
+  let t =
     reconcile_patch t ~project_name:"proj" ~gameplan:gp ~patch:child_patch
   in
+  let effects = Orchestrator.all_github_effects t in
   not
-    (List.exists effects ~f:(function
-      | Set_pr_draft { patch_id; draft = false; _ } ->
-          Patch_id.equal patch_id child_id
-      | Set_pr_draft _ | Set_pr_base _ -> false))
+    (List.exists effects ~f:(fun command ->
+         Patch_id.equal command.Github_effect.patch_id child_id
+         &&
+         match command.action with
+         | Github_effect.Set_pr_draft { draft = false; _ } -> true
+         | Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _
+         | Github_effect.Request_review _ | Github_effect.Direct_merge _
+         | Github_effect.Enqueue _ | Github_effect.Dequeue _ ->
+             false))
 
 (* Shared fixture for the deps-notes-ready Start gate tests: a parent with an
    open PR and a child depending on it. *)
@@ -1261,20 +1189,11 @@ let make_notes_gate_fixture () =
   let mk_patch id branch deps =
     {
       Patch.id;
-      title = "test";
-      description = "test";
+      goal = "test";
       branch;
       dependencies = deps;
-      spec = "";
-      acceptance_criteria = [];
-      changes = [];
       files = [];
-      classification = "";
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
+      checks = [];
     }
   in
   let parent_patch = mk_patch parent_id (Branch.of_string "parent-branch") [] in
@@ -1320,131 +1239,17 @@ let%test "plan_actions does not gate child Start on a merged dep" =
   let t = Orchestrator.mark_merged t parent_id in
   plans_child_start ~child_id ~patches t
 
-let%test "reconcile_patch emits no effects for merged agent" =
+let%test "reconcile_patch enqueues no commands for merged agent" =
   let patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
   let t = Orchestrator.fire t (Orchestrator.Start (pid, main)) in
   let t = Orchestrator.set_pr_number t pid (Pr_number.of_int 42) in
   let t = Orchestrator.complete t pid in
   let t = Orchestrator.mark_merged t pid in
-  let _, effects =
-    reconcile_patch t ~project_name:"proj"
-      ~gameplan:
-        Gameplan.
-          {
-            project_name = "proj";
-            repo_owner = "";
-            repo_name = "";
-            problem_statement = "";
-            solution_summary = "";
-            final_state_spec = "";
-            patches = [ patch ];
-            current_state_analysis = "";
-            explicit_opinions = "";
-            acceptance_criteria = [];
-            open_questions = [];
-            functional_changes = [];
-            context_resources = [];
-            reachability_traces = [];
-          }
+  let t =
+    reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
       ~patch
   in
-  List.is_empty effects
-
-(* -- Ad-hoc PR base reconciliation (regression: PR #4347 stale-base loop) -- *)
-
-let empty_gameplan =
-  Gameplan.
-    {
-      project_name = "proj";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
-      patches = [];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-    }
-
-let make_adhoc_orchestrator ~base_branch =
-  let t = Orchestrator.create ~patches:[] ~main_branch:main in
-  let t =
-    Orchestrator.add_agent t ~patch_id:pid
-      ~branch:(Branch.of_string "adhoc-branch")
-      ~base_branch ~pr_number:(Pr_number.of_int 47)
-  in
-  (* [add_agent] deliberately does not seed [agent.base_branch]; the poller
-     owns it. Simulate the poll having observed the PR's base on GitHub. *)
-  Orchestrator.set_base_branch t pid base_branch
-
-let%test "reconcile_all retargets a stale ad-hoc PR base and converges" =
-  (* The PR #4347 shape: an ad-hoc PR left targeting a dependency branch that
-     has since merged and is no longer tracked. The structural base is main,
-     so reconcile must emit exactly one Set_pr_base — and once GitHub
-     acknowledges it, the next reconcile must be a fixpoint (no re-emit, no
-     poller/rebase loop). *)
-  let stale = Branch.of_string "merged-dep-branch" in
-  let t = make_adhoc_orchestrator ~base_branch:stale in
-  let t, effects =
-    reconcile_all t ~project_name:"proj" ~gameplan:empty_gameplan
-  in
-  let retarget =
-    Set_pr_base { patch_id = pid; pr_number = Pr_number.of_int 47; base = main }
-  in
-  List.equal equal_github_effect effects [ retarget ]
-  &&
-  let t = apply_github_effect_success t retarget in
-  let _, effects' =
-    reconcile_all t ~project_name:"proj" ~gameplan:empty_gameplan
-  in
-  List.is_empty effects'
-
-let%test "reconcile_all leaves an ad-hoc PR stacked on an open branch alone" =
-  let parent_pid = Patch_id.of_string "p-parent" in
-  let parent_branch = Branch.of_string "parent-branch" in
-  let t = Orchestrator.create ~patches:[] ~main_branch:main in
-  let t =
-    Orchestrator.add_agent t ~patch_id:parent_pid ~branch:parent_branch
-      ~base_branch:main ~pr_number:(Pr_number.of_int 46)
-  in
-  let t = Orchestrator.set_base_branch t parent_pid main in
-  let t =
-    Orchestrator.add_agent t ~patch_id:pid
-      ~branch:(Branch.of_string "adhoc-branch")
-      ~base_branch:parent_branch ~pr_number:(Pr_number.of_int 47)
-  in
-  let t = Orchestrator.set_base_branch t pid parent_branch in
-  let _, effects =
-    reconcile_all t ~project_name:"proj" ~gameplan:empty_gameplan
-  in
-  List.is_empty effects
-
-let%test "reconcile_all never flips an ad-hoc PR's draft bit" =
-  let t = make_adhoc_orchestrator ~base_branch:main in
-  (* Reach the exact fixpoint where a gameplan patch would be marked ready:
-     based on main, rebased onto main, body delivered (ad-hoc default), no
-     conflict, CI green — and currently draft. *)
-  let t = Orchestrator.set_is_draft t pid true in
-  let t = Orchestrator.set_checks_passing t pid true in
-  let t, _ = Orchestrator.apply_rebase_result t pid Worktree.Noop main in
-  let _, effects =
-    reconcile_all t ~project_name:"proj" ~gameplan:empty_gameplan
-  in
-  List.is_empty effects
-  (* Counterfactual: the same state under the gameplan ratchet does flip the
-     draft bit — proving the ad-hoc pass is what suppresses it, not some other
-     unmet precondition. *)
-  && List.equal equal_github_effect
-       (reconcile_pr_settings t pid ~allow_draft_flip:true)
-       [
-         Set_pr_draft
-           { patch_id = pid; pr_number = Pr_number.of_int 47; draft = false };
-       ]
+  List.is_empty (Orchestrator.all_github_effects t)
 
 let%test "no merge-conflict re-enqueue after noop" =
   let _patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
@@ -1495,7 +1300,7 @@ let%test "no merge-conflict re-enqueue after noop" =
   (* Noop -> Conflict_resolved, agent completed (not busy) *)
   Orchestrator.equal_conflict_rebase_decision decision
     Orchestrator.Conflict_resolved
-  && not (Orchestrator.agent t pid).Patch_agent.busy
+  && not (Patch_agent.is_busy (Orchestrator.agent t pid))
 
 (* -- Automerge reconciliation tests -- *)
 
@@ -1549,8 +1354,8 @@ let%test "apply_poll_result turns merge queue ejection into CI feedback" =
   let agent = Orchestrator.agent t pid in
   List.mem agent.queue Operation_kind.Ci ~equal:Operation_kind.equal
   && (not agent.checks_passing) && (not agent.merge_ready)
-  && agent.automerge_failure_count = 0
-  && Option.is_none agent.automerge_deadline
+  && Patch_agent.automerge_failure_count agent = 0
+  && Option.is_none (Patch_agent.automerge_deadline agent)
   && List.exists agent.ci_checks ~f:Ci_check.is_merge_queue_failure
   && List.exists logs ~f:(fun { message; _ } ->
       String.is_substring message ~substring:"Merge queue removed PR")
@@ -1596,7 +1401,7 @@ let%test "apply_poll_result leaves an unmergeable in-queue entry untouched" =
   let agent = Orchestrator.agent t pid in
   (not (List.mem agent.queue Operation_kind.Ci ~equal:Operation_kind.equal))
   && agent.checks_passing && agent.merge_ready
-  && agent.automerge_failure_count = 0
+  && Patch_agent.automerge_failure_count agent = 0
   && not (List.exists agent.ci_checks ~f:Ci_check.is_merge_queue_failure)
 
 (* The user-facing regression: a PR ejected from the queue while still green and
@@ -1642,7 +1447,7 @@ let%test "apply_poll_result leaves an unconfirmed (conflict) ejection alone" =
   let agent = Orchestrator.agent t pid in
   (not (List.mem agent.queue Operation_kind.Ci ~equal:Operation_kind.equal))
   && agent.checks_passing && agent.merge_ready
-  && agent.automerge_failure_count = 0
+  && Patch_agent.automerge_failure_count agent = 0
   && not (List.exists agent.ci_checks ~f:Ci_check.is_merge_queue_failure)
 
 let%test "reconcile_automerge clears deadline on merged agent" =
@@ -1652,16 +1457,20 @@ let%test "reconcile_automerge clears deadline on merged agent" =
   let t = Orchestrator.mark_merged t pid in
   let t, decisions = reconcile_automerge t ~now:100.0 in
   List.is_empty decisions
-  && Option.is_none (Orchestrator.agent t pid).Patch_agent.automerge_deadline
+  && Option.is_none (Patch_agent.automerge_deadline (Orchestrator.agent t pid))
 
-let%test "reconcile_automerge clears inflight on merged agent" =
+let%test "reconcile_automerge removes stale command on merged agent" =
   let _patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
   let t = make_approved_agent t in
-  let t = Orchestrator.set_automerge_inflight t pid true in
+  let command =
+    Github_effect.create ~patch_id:pid
+      (Github_effect.Direct_merge { pr_number = Pr_number.of_int 17 })
+  in
+  let t = Orchestrator.enqueue_github_effect t command in
   let t = Orchestrator.mark_merged t pid in
   let t, decisions = reconcile_automerge t ~now:100.0 in
   List.is_empty decisions
-  && not (Orchestrator.agent t pid).Patch_agent.automerge_inflight
+  && Option.is_none (Orchestrator.find_github_effect t command.id)
 
 let%test "reconcile_automerge (false, None) is a stable no-op" =
   (* Complement to the (false, Some _) clearing test below: when the patch is
@@ -1687,28 +1496,28 @@ let%test "reconcile_automerge clears deadline when checks_passing flips false" =
   let t = Orchestrator.set_checks_passing t pid false in
   let t, decisions = reconcile_automerge t ~now:1000.0 in
   List.is_empty decisions
-  && Option.is_none (Orchestrator.agent t pid).Patch_agent.automerge_deadline
+  && Option.is_none (Patch_agent.automerge_deadline (Orchestrator.agent t pid))
 
-let%test "reconcile_automerge marks inflight when firing a decision" =
+let%test "reconcile_automerge persists the command it emits" =
   let _patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
   let t = make_approved_agent t in
   let t = Orchestrator.set_automerge_deadline t pid 1.0 in
   let t, decisions = reconcile_automerge t ~now:100.0 in
-  List.length decisions = 1
-  && (Orchestrator.agent t pid).Patch_agent.automerge_inflight
+  match decisions with
+  | [ command ] -> Option.is_some (Orchestrator.find_github_effect t command.id)
+  | _ -> false
 
-let%test "reconcile_automerge skips when inflight is true" =
+let%test "reconcile_automerge skips when an outbox command exists" =
   let _patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
   let t = make_approved_agent t in
   let t = Orchestrator.set_automerge_deadline t pid 1.0 in
-  let t = Orchestrator.set_automerge_inflight t pid true in
+  let t, first = reconcile_automerge t ~now:100.0 in
   let t, decisions = reconcile_automerge t ~now:100.0 in
   let a = Orchestrator.agent t pid in
-  (* No new decision while a merge is in flight, and reconcile leaves the
-     inflight flag and deadline alone — the caller owns both via
-     apply_automerge_success / apply_automerge_failure. *)
-  List.is_empty decisions && a.Patch_agent.automerge_inflight
-  && Option.is_some a.Patch_agent.automerge_deadline
+  List.length first = 1
+  && List.is_empty decisions
+  && List.length (Orchestrator.github_effects_for_patch t pid) = 1
+  && Option.is_some (Patch_agent.automerge_deadline a)
 
 let%test "reconcile_automerge skips when failure cap is hit" =
   let _patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
@@ -1724,34 +1533,28 @@ let%test "reconcile_automerge skips when failure cap is hit" =
   in
   let t, decisions = reconcile_automerge t ~now:1000.0 in
   let a = Orchestrator.agent t pid in
-  List.is_empty decisions
-  && Option.is_none a.Patch_agent.automerge_deadline
-  && not a.Patch_agent.automerge_inflight
+  List.is_empty decisions && Option.is_none (Patch_agent.automerge_deadline a)
 
-let%test "apply_automerge_success clears inflight and resets failures" =
+let%test "apply_automerge_success resets failures" =
   let _patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
   let t = make_approved_agent t in
-  let t = Orchestrator.set_automerge_inflight t pid true in
   let t = Orchestrator.increment_automerge_failure_count t pid in
   let t = apply_automerge_success t pid in
   let a = Orchestrator.agent t pid in
   a.Patch_agent.merged
-  && (not a.Patch_agent.automerge_inflight)
-  && a.Patch_agent.automerge_failure_count = 0
-  && Option.is_none a.Patch_agent.automerge_deadline
+  && Patch_agent.automerge_failure_count a = 0
+  && Option.is_none (Patch_agent.automerge_deadline a)
 
 let%test "apply_automerge_failure bumps deadline one idle window out" =
   let _patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
   let t = make_approved_agent t in
   let t = Orchestrator.set_automerge_deadline t pid 1.0 in
-  let t = Orchestrator.set_automerge_inflight t pid true in
   let now = 1000.0 in
   let t = apply_automerge_failure t ~now pid in
   let a = Orchestrator.agent t pid in
-  a.Patch_agent.automerge_failure_count = 1
-  && (not a.Patch_agent.automerge_inflight)
+  Patch_agent.automerge_failure_count a = 1
   &&
-  match a.Patch_agent.automerge_deadline with
+  match Patch_agent.automerge_deadline a with
   | Some d -> Float.( = ) d (now +. automerge_idle_timeout)
   | None -> false
 
@@ -1768,20 +1571,16 @@ let%test "apply_automerge_failure clears deadline once cap is reached" =
   (* Pre-arm a deadline so we can verify it's actively cleared, not just
      skipped. *)
   let t = Orchestrator.set_automerge_deadline t pid 1.0 in
-  let t = Orchestrator.set_automerge_inflight t pid true in
   let t = apply_automerge_failure t ~now:1000.0 pid in
   let a = Orchestrator.agent t pid in
-  a.Patch_agent.automerge_failure_count = automerge_max_failures
-  && (not a.Patch_agent.automerge_inflight)
-  && Option.is_none a.Patch_agent.automerge_deadline
+  Patch_agent.automerge_failure_count a = automerge_max_failures
+  && Option.is_none (Patch_agent.automerge_deadline a)
 
 let%test "apply_automerge_failure does not re-arm when automerge is disabled" =
   let _patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
   let t = make_approved_agent t in
   let t = Orchestrator.set_automerge_deadline t pid 1.0 in
-  let t = Orchestrator.set_automerge_inflight t pid true in
-  (* User disables automerge while the merge call is in flight. Toggling
-     clears the deadline and inflight flag; the late failure then resolves. *)
+  (* User disables automerge while the command is outstanding. *)
   let t = Orchestrator.set_automerge_enabled t pid false in
   let t = apply_automerge_failure t ~now:1000.0 pid in
   let a = Orchestrator.agent t pid in
@@ -1791,21 +1590,17 @@ let%test "apply_automerge_failure does not re-arm when automerge is disabled" =
      [set_automerge_enabled true] on a later re-enable resets the counter,
      so this increment is invisible across a disable/enable cycle. The key
      invariant the test guards is that no deadline is re-armed. *)
-  (not a.Patch_agent.automerge_enabled)
-  && (not a.Patch_agent.automerge_inflight)
-  && Option.is_none a.Patch_agent.automerge_deadline
-  && a.Patch_agent.automerge_failure_count = 1
+  (not (Patch_agent.automerge_enabled a))
+  && Option.is_none (Patch_agent.automerge_deadline a)
+  && Patch_agent.automerge_failure_count a = 0
 
-let%test "toggling automerge resets failure count and inflight" =
+let%test "toggling automerge resets failure count" =
   let _patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
   let t = make_approved_agent t in
   let t = Orchestrator.increment_automerge_failure_count t pid in
   let t = Orchestrator.increment_automerge_failure_count t pid in
-  let t = Orchestrator.set_automerge_inflight t pid true in
   (* Disable → enable *)
   let t = Orchestrator.set_automerge_enabled t pid false in
   let t = Orchestrator.set_automerge_enabled t pid true in
   let a = Orchestrator.agent t pid in
-  a.Patch_agent.automerge_enabled
-  && a.Patch_agent.automerge_failure_count = 0
-  && not a.Patch_agent.automerge_inflight
+  Patch_agent.automerge_enabled a && Patch_agent.automerge_failure_count a = 0

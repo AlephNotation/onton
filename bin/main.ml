@@ -137,13 +137,10 @@ module type FIBER_ENV = sig
   val transcripts : (Patch_id.t, string) Stdlib.Hashtbl.t
   val event_log : Event_log.t
   val branch_of : Patch_id.t -> Branch.t
-  val resolve_routing : complexity:int option -> Backend_routing.decision
+  val backend_decision : Backend_routing.decision
   val backend_name : string
   val version : string
-
-  val pick_backend :
-    complexity:int option -> Backend_registry.kind * Backend_routing.decision
-
+  val backend : Backend_registry.kind
   val find_pr_number : patch_id:Patch_id.t -> Pr_number.t option
   val register_pr_number : patch_id:Patch_id.t -> pr_number:Pr_number.t -> unit
   val unregister_pr_number : patch_id:Patch_id.t -> unit
@@ -180,7 +177,9 @@ struct
         let review_clients = Env.review_clients
         let transcripts = Env.transcripts
         let event_log = Env.event_log
-        let pick_backend = Env.pick_backend
+        let process_mgr = Env.process_mgr
+        let backend = Env.backend
+        let backend_decision = Env.backend_decision
         let register_pr = Env.register_pr_number
       end)
 
@@ -229,10 +228,8 @@ struct
         let tui_state = Env.tui_state
         let backend_name = Env.backend_name
         let version = Env.version
-        let resolve_routing = Env.resolve_routing
+        let backend_decision = Env.backend_decision
         let find_pr_number = Env.find_pr_number
-        let register_pr_number = Env.register_pr_number
-        let unregister_pr_number = Env.unregister_pr_number
       end)
 
   module Headless =
@@ -326,7 +323,7 @@ let finalize_run ~project_name ~repo_coords ~run_knobs ~backend_inputs
   (* Refresh the agent-readable gameplan copy under artifacts/ so patch
      agents can consult the full gameplan on demand (the gameplan layer of
      every patch prompt points at this path). *)
-  Project_store.publish_gameplan_artifact ~project_name;
+  Project_store.publish_plan_artifact ~project_name;
   let config =
     {
       Resolved_config.project = Some project_name;
@@ -350,8 +347,8 @@ let finalize_run ~project_name ~repo_coords ~run_knobs ~backend_inputs
   with_snapshot_load ~project_name config gameplan
 
 (** Resolve CLI args into a config ready to run.
-    - [--gameplan] provided: parse it, persist config + gameplan source, derive
-      project name.
+    - [--plan] provided: parse it, persist config + plan source, derive project
+      name.
     - [PROJECT] only: load stored config + gameplan. CLI flags override stored
       values. *)
 let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
@@ -401,9 +398,6 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
   let cli_backend_inputs ?(stored_backend = "") ?(stored_model = "") () =
     { cli_backend = backend; cli_model = model; stored_backend; stored_model }
   in
-  let repo_root_for_fresh =
-    Repo_root.normalize (Base.Option.value repo_root ~default:".")
-  in
   let resolve_branch ~repo_root mb_opt =
     match mb_opt with
     | Some b -> b
@@ -412,48 +406,10 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
         Repo.infer_default_branch ()
   in
   match (project, gameplan_path) with
-  | None, None ->
-      let repo_root = repo_root_for_fresh in
-      let token, owner, repo =
-        resolve_github_credentials ~github_token ~repo_root
-      in
-      let project_name =
-        if Base.String.is_empty owner || Base.String.is_empty repo then "adhoc"
-        else Printf.sprintf "%s-%s" owner repo
-      in
-      let gameplan : Gameplan.t =
-        {
-          project_name;
-          repo_owner = owner;
-          repo_name = repo;
-          problem_statement = "";
-          solution_summary = "";
-          final_state_spec = "";
-          patches = [];
-          current_state_analysis = "";
-          explicit_opinions = "";
-          acceptance_criteria = [];
-          open_questions = [];
-          functional_changes = [];
-          context_resources = [];
-          reachability_traces = [];
-        }
-      in
-      let main_branch = resolve_branch ~repo_root main_branch in
-      let repo_coords =
-        {
-          github_token = token;
-          github_owner = owner;
-          github_repo = repo;
-          repo_root;
-          url_scheme = None;
-        }
-      in
-      finalize_run ~project_name ~repo_coords ~run_knobs
-        ~backend_inputs:(cli_backend_inputs ()) ~main_branch ~gameplan
+  | None, None -> Error [ "Provide --plan PLAN to start or PROJECT to resume." ]
   | _, Some gp_path -> (
       match Gameplan_parser.parse_file gp_path with
-      | Error msg -> Error [ Printf.sprintf "Error parsing gameplan: %s" msg ]
+      | Error msg -> Error [ Printf.sprintf "Error parsing plan: %s" msg ]
       | Ok parsed -> (
           let gameplan = parsed.Gameplan_parser.gameplan in
           let project_name =
@@ -467,10 +423,8 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
             if Base.String.is_empty owner || Base.String.is_empty repo then
               Some
                 (Printf.sprintf
-                   "Gameplan %s is missing required top-level `owner` and/or \
-                    `repo`. Every gameplan must declare exactly one repository \
-                    — see skills/write-gameplan/SKILL.md §\"One Repo Per \
-                    Gameplan\"."
+                   "Plan %s is missing its required `repository` target. Every \
+                    plan must declare exactly one repository as `owner/repo`."
                    gp_path)
             else
               match Github_target.validate_target ~owner ~repo with
@@ -478,19 +432,19 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
               | Error msg ->
                   Some
                     (Printf.sprintf
-                       "Gameplan %s declares an invalid GitHub target: %s"
-                       gp_path msg)
+                       "Plan %s declares an invalid GitHub target: %s" gp_path
+                       msg)
           in
           match target_error with
           | Some msg -> Error [ msg ]
           | None -> (
-              (* [--repo] is ignored when [--gameplan] is passed: the gameplan
-               itself is the source of truth for which repo to operate on, and
+              (* [--repo] is ignored when [--plan] is passed: the plan itself
+               is the source of truth for which repo to operate on, and
                onton manages its own checkout under the project data dir. *)
               (match repo_root with
               | Some user_repo when not (Base.String.is_empty user_repo) ->
                   Printf.eprintf
-                    "onton: --repo %s ignored when --gameplan is set; using \
+                    "onton: --repo %s ignored when --plan is set; using \
                      onton-managed checkout for %s/%s\n\
                      %!"
                     user_repo owner repo
@@ -515,7 +469,7 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
                     ]
               | Ok (repo_root, scheme) ->
                   let main_branch = resolve_branch ~repo_root main_branch in
-                  Project_store.save_gameplan_source ~project_name
+                  Project_store.save_plan_source ~project_name
                     ~source_path:gp_path;
                   let repo_coords =
                     {
@@ -534,18 +488,16 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
         Error
           [
             Printf.sprintf
-              "No stored project %S. Use --gameplan to start a new project."
-              proj;
+              "No stored project %S. Use --plan to start a new project." proj;
           ]
       else
-        let stored_gp_path = Project_store.stored_gameplan_path proj in
+        let stored_gp_path = Project_store.plan_path proj in
         if not (Stdlib.Sys.file_exists stored_gp_path) then
-          Error
-            [ Printf.sprintf "Stored gameplan not found for project %S." proj ]
+          Error [ Printf.sprintf "Stored plan not found for project %S." proj ]
         else
           match Gameplan_parser.parse_file stored_gp_path with
           | Error msg ->
-              Error [ Printf.sprintf "Error parsing stored gameplan: %s" msg ]
+              Error [ Printf.sprintf "Error parsing stored plan: %s" msg ]
           | Ok parsed -> (
               let gameplan = parsed.Gameplan_parser.gameplan in
               match Project_store.load_config ~project_name:proj with
@@ -701,9 +653,8 @@ type constructed_capabilities = {
   worktree_client : (module Worktree.S);
   startup_reconciler : (module STARTUP_RECONCILER);
   branch_of : Patch_id.t -> Branch.t;
-  pick_backend :
-    complexity:int option -> Backend_registry.kind * Backend_routing.decision;
-  resolve_routing : complexity:int option -> Backend_routing.decision;
+  backend : Backend_registry.kind;
+  backend_decision : Backend_routing.decision;
   backend_name : string;
   find_pr_number : patch_id:Patch_id.t -> Pr_number.t option;
   register_pr_number : patch_id:Patch_id.t -> pr_number:Pr_number.t -> unit;
@@ -740,14 +691,18 @@ let setup_runtime env ~config ~gameplan ~existing_snapshot ~auto_merge =
            Printf.eprintf "\nInterrupted.\n%!";
            (try Unix.kill 0 Sys.sigterm with Unix.Unix_error _ -> ());
            Stdlib.exit 130));
+  let durable_store =
+    Persistence.save ~path:(Project_store.snapshot_path project_name)
+  in
   let runtime =
     match existing_snapshot with
     | Some snap ->
         Printf.eprintf "Resuming project %S from saved state.\n%!" project_name;
-        Runtime.create ~gameplan ~main_branch ~max_ci_failures ~snapshot:snap ()
+        Runtime.create ~gameplan ~main_branch ~max_ci_failures ~snapshot:snap
+          ~durable_store ()
     | None ->
         Printf.eprintf "Starting new project %S.\n%!" project_name;
-        Runtime.create ~gameplan ~main_branch ~max_ci_failures ()
+        Runtime.create ~gameplan ~main_branch ~max_ci_failures ~durable_store ()
   in
   (* [--auto-merge] only seeds the initial state of a fresh project. On resume,
      each patch's persisted [automerge_enabled] wins so per-patch user toggles
@@ -833,40 +788,23 @@ let construct_capabilities ~net (setup : runtime_setup) =
     if Base.String.is_empty model then None else Some model
   in
   let repo_config = config.Resolved_config.repo_config in
-  (match
-     Backend_preflight.validate ~default_backend:backend
-       ~effective_model:effective_model_opt ~repo_config ()
-   with
+  (match Backend_preflight.validate ~backend () with
   | Ok () -> ()
-  | Error errs ->
-      Base.List.iter errs ~f:(fun e -> Printf.eprintf "Error: %s\n" e);
+  | Error error ->
+      Printf.eprintf "Error: %s\n" error;
       Stdlib.exit 1);
   let registry =
     Backend_registry.create ~process_mgr:setup.process_mgr ~clock:setup.clock
       ~timeout:session_timeout ~setsid_exec
   in
-  let pick_backend ~complexity =
-    let ({ Backend_routing.backend; model } as decision) =
-      Backend_routing.decide ~repo_config ~default_backend:backend
-        ~effective_model:effective_model_opt ~complexity
-    in
-    (Backend_registry.get registry ~backend ~model, decision)
+  let model =
+    Backend_registry.resolve_model ~backend ~model:effective_model_opt
   in
+  let backend_decision = Backend_routing.decide ~backend ~model in
+  let selected_backend = Backend_registry.get registry ~backend ~model in
   let backend_name = function
     | Backend_registry.Ephemeral backend -> backend.Llm_backend.name
     | Backend_registry.Long_lived (Llm_backend_long_lived.T { name; _ }) -> name
-  in
-  let resolve_routing ~complexity : Backend_routing.decision =
-    let dec : Backend_routing.decision =
-      Backend_routing.decide ~repo_config ~default_backend:backend
-        ~effective_model:effective_model_opt ~complexity
-    in
-    {
-      dec with
-      model =
-        Backend_registry.resolve_model ~backend:dec.Backend_routing.backend
-          ~model:dec.Backend_routing.model ~complexity;
-    }
   in
   let pre_agents =
     Runtime.read setup.runtime (fun snap ->
@@ -900,37 +838,18 @@ let construct_capabilities ~net (setup : runtime_setup) =
         Runtime.update_orchestrator setup.runtime (fun orch ->
             match Orchestrator.find_agent orch pid with
             | None -> orch
-            | Some agent -> (
-                (* Dispatch on the pure recovery classifier. Three cases:
-                   - agent was [Missing]: lift to [Present] via set_pr_number
-                     (Recover_same arm preserves world-state when [pr]
-                     matches the recorded number; Adopt_new arm resets if
-                     the remote disagrees).
-                   - agent was [Present _]: nothing to recover; register
-                     the externally-known number and pick up merged.
-                   - agent was [Absent]: bootstrap path — fire Start, set
-                     pr_number, complete. *)
-                match
-                  Patch_pr_status.classify_recovery_on_observe
-                    agent.Patch_agent.pr_status
-                with
-                | Patch_pr_status.Lift_to_present _ ->
-                    Pr_registry.register pr_registry ~patch_id:pid ~pr_number:pr;
-                    let orch = Orchestrator.set_pr_number orch pid pr in
-                    if merged then Orchestrator.mark_merged orch pid else orch
-                | Patch_pr_status.No_recovery_needed
-                  when Patch_agent.is_pr_present agent ->
-                    Pr_registry.register pr_registry ~patch_id:pid ~pr_number:pr;
-                    let orch = Orchestrator.set_pr_number orch pid pr in
-                    if merged then Orchestrator.mark_merged orch pid else orch
-                | Patch_pr_status.No_recovery_needed ->
-                    Pr_registry.register pr_registry ~patch_id:pid ~pr_number:pr;
-                    let orch =
-                      Orchestrator.fire orch (Orchestrator.Start (pid, base))
-                    in
-                    let orch = Orchestrator.set_pr_number orch pid pr in
-                    let orch = Orchestrator.complete orch pid in
-                    if merged then Orchestrator.mark_merged orch pid else orch)));
+            | Some agent ->
+                Pr_registry.register pr_registry ~patch_id:pid ~pr_number:pr;
+                let orch =
+                  if Patch_agent.has_pr agent then orch
+                  else Orchestrator.fire orch (Orchestrator.Start (pid, base))
+                in
+                let orch = Orchestrator.set_pr_number orch pid pr in
+                let orch =
+                  if Patch_agent.has_pr agent then orch
+                  else Orchestrator.complete orch pid
+                in
+                if merged then Orchestrator.mark_merged orch pid else orch));
     Base.List.iter startup.reset_pending ~f:(fun patch_id ->
         log_event setup.runtime ~patch_id
           "Reset stale busy agent from crashed session";
@@ -964,15 +883,14 @@ let construct_capabilities ~net (setup : runtime_setup) =
     Base.List.map repo_config.Repo_config.review_backends ~f:(fun backend ->
         Review_service_client.make ~net ~clock:setup.clock ~backend)
   in
-  let default_backend_pair = pick_backend ~complexity:None in
   {
     forge;
     worktree_client;
     startup_reconciler = (module Reconciler : STARTUP_RECONCILER);
     branch_of;
-    pick_backend;
-    resolve_routing;
-    backend_name = backend_name (fst default_backend_pair);
+    backend = selected_backend;
+    backend_decision;
+    backend_name = backend_name selected_backend;
     find_pr_number = Pr_registry.find pr_registry;
     register_pr_number = Pr_registry.register pr_registry;
     unregister_pr_number = Pr_registry.unregister pr_registry;
@@ -1001,10 +919,10 @@ let build_fiber_env (setup : runtime_setup) (cap : constructed_capabilities)
     let transcripts = cap.transcripts
     let event_log = cap.event_log
     let branch_of = cap.branch_of
-    let resolve_routing = cap.resolve_routing
+    let backend_decision = cap.backend_decision
     let backend_name = cap.backend_name
     let version = Version.s
-    let pick_backend = cap.pick_backend
+    let backend = cap.backend
     let find_pr_number = cap.find_pr_number
     let register_pr_number = cap.register_pr_number
     let unregister_pr_number = cap.unregister_pr_number
@@ -1079,103 +997,7 @@ let run_main_loop (setup : runtime_setup) (cap : constructed_capabilities)
          runtime snapshot. *)
       Stdlib.exit 1
 
-(** Trailing-positional PR operations parsed from the command line. *)
-type pr_op = Add_pr of Pr_number.t | Remove_pr of Pr_number.t
-
-let report setup ~patch_id msg =
-  Printf.eprintf "onton: %s\n%!" msg;
-  log_event setup.runtime ~patch_id msg
-
-(** Add a single GitHub PR as an ad-hoc patch. Mirrors [Tui_input.Prompt_pr] in
-    [tui_fiber.ml]: fetch PR state, skip forks/missing head branches, no-op when
-    already registered. *)
-let apply_add_pr ~(setup : runtime_setup) ~(cap : constructed_capabilities)
-    pr_number =
-  let module Forge = (val cap.forge) in
-  let n = Pr_number.to_int pr_number in
-  let patch_id = Patch_id.of_string (string_of_int n) in
-  let already_exists =
-    Runtime.read setup.runtime (fun snap ->
-        Base.Option.is_some
-          (Orchestrator.find_agent snap.Runtime.orchestrator patch_id))
-  in
-  if already_exists then
-    report setup ~patch_id (Printf.sprintf "Ad-hoc PR #%d already registered" n)
-  else
-    match Forge.pr_state pr_number with
-    | Error err ->
-        report setup ~patch_id
-          (Printf.sprintf "Cannot add ad-hoc PR #%d — %s" n
-             (Forge.show_error err))
-    | Ok pr_state when Pr_state.is_fork pr_state ->
-        report setup ~patch_id
-          (Printf.sprintf "Cannot add ad-hoc PR #%d — fork PRs not supported" n)
-    | Ok pr_state -> (
-        match pr_state.Pr_state.head_branch with
-        | None ->
-            report setup ~patch_id
-              (Printf.sprintf "Cannot add ad-hoc PR #%d — no head branch" n)
-        | Some branch ->
-            cap.register_pr_number ~patch_id ~pr_number;
-            Runtime.update_orchestrator setup.runtime (fun orch ->
-                let base_branch =
-                  Base.Option.value pr_state.Pr_state.base_branch
-                    ~default:(Orchestrator.main_branch orch)
-                in
-                Orchestrator.add_agent orch ~patch_id ~branch ~base_branch
-                  ~pr_number);
-            report setup ~patch_id
-              (Printf.sprintf "Ad-hoc PR #%d added (%s)" n
-                 (Branch.to_string branch)))
-
-(** Remove a single ad-hoc PR. Mirrors [Tui_input.Remove_patch] in
-    [tui_fiber.ml]: refuses to touch gameplan patches, warns on busy ones. *)
-let apply_remove_pr ~(setup : runtime_setup) ~(cap : constructed_capabilities)
-    pr_number =
-  let n = Pr_number.to_int pr_number in
-  let patch_id = Patch_id.of_string (string_of_int n) in
-  let agent_opt, in_gameplan =
-    Runtime.read setup.runtime (fun snap ->
-        let agent =
-          Orchestrator.find_agent snap.Runtime.orchestrator patch_id
-        in
-        let in_gp =
-          Base.List.exists snap.Runtime.gameplan.Gameplan.patches
-            ~f:(fun (p : Patch.t) -> Patch_id.equal p.Patch.id patch_id)
-        in
-        (agent, in_gp))
-  in
-  match agent_opt with
-  | None ->
-      report setup ~patch_id
-        (Printf.sprintf "Cannot remove PR #%d — not registered" n)
-  | Some _ when in_gameplan ->
-      report setup ~patch_id
-        (Printf.sprintf
-           "Cannot remove PR #%d — gameplan patches cannot be removed" n)
-  | Some agent ->
-      if agent.Patch_agent.busy then
-        report setup ~patch_id
-          (Printf.sprintf
-             "Warning — PR #%d is currently running, it may create a GitHub PR \
-              before stopping"
-             n);
-      Runtime.update_orchestrator setup.runtime (fun orch ->
-          Orchestrator.remove_agent orch patch_id);
-      cap.unregister_pr_number ~patch_id;
-      report setup ~patch_id (Printf.sprintf "Removed ad-hoc PR #%d" n)
-
-(** Apply trailing-positional PR ops in command-line order, so [+5 -5 +5] leaves
-    PR #5 registered. *)
-let apply_pr_ops ~(setup : runtime_setup) ~(cap : constructed_capabilities)
-    (ops : pr_op list) =
-  List.iter
-    (function
-      | Add_pr n -> apply_add_pr ~setup ~cap n
-      | Remove_pr n -> apply_remove_pr ~setup ~cap n)
-    ops
-
-let run_with_config ~no_lock ~auto_merge ~pr_ops (config : config) gameplan
+let run_with_config ~no_lock ~auto_merge (config : config) gameplan
     existing_snapshot =
   let resolved = Resolved_config.of_config config |> ok_or_exit in
   let {
@@ -1239,7 +1061,6 @@ let run_with_config ~no_lock ~auto_merge ~pr_ops (config : config) gameplan
     setup_runtime env ~config:resolved ~gameplan ~existing_snapshot ~auto_merge
   in
   let capabilities = construct_capabilities ~net:(Eio.Stdenv.net env) setup in
-  apply_pr_ops ~setup ~cap:capabilities pr_ops;
   let tui_state = Tui_state.create () in
   let fiber_env = build_fiber_env setup capabilities ~tui_state in
   run_main_loop setup capabilities fiber_env ~tui_state
@@ -1261,7 +1082,7 @@ let run_with_config ~no_lock ~auto_merge ~pr_ops (config : config) gameplan
 let run ~project ~gameplan_path ~github_token ~backend ~model
     ~(main_branch : Branch.t option) ~poll_interval ~(repo_root : string option)
     ~max_concurrency ~max_ci_failures ~headless ~no_lock ~auto_merge
-    ~clone_scheme ~pr_ops =
+    ~clone_scheme =
   match
     resolve_config ~project ~gameplan_path ~github_token ~backend ~model
       ~main_branch ~poll_interval ~repo_root ~max_concurrency ~max_ci_failures
@@ -1271,8 +1092,7 @@ let run ~project ~gameplan_path ~github_token ~backend ~model
       Base.List.iter errs ~f:(fun e -> Printf.eprintf "Error: %s\n" e);
       Stdlib.exit 1
   | Ok (config, gameplan, existing_snapshot) ->
-      run_with_config ~no_lock ~auto_merge ~pr_ops config gameplan
-        existing_snapshot
+      run_with_config ~no_lock ~auto_merge config gameplan existing_snapshot
 
 (** {1 CLI via Cmdliner} *)
 
@@ -1283,104 +1103,15 @@ let project_arg =
     & pos 0 (some string) None
     & info [] ~docv:"PROJECT"
         ~doc:
-          "Project name to resume. If omitted, derived from --gameplan's \
-           project name.")
+          "Project name to resume. If omitted, derived from --plan's project \
+           name.")
 
-(** A token is a PR op iff it matches [^[+-][0-9]+$]. We classify before
-    cmdliner sees argv because cmdliner would otherwise reject [-N] as an
-    unknown short option. False positives are vanishingly rare: no current onton
-    flag uses [-<digits>] form, and project names of the same shape are
-    pathological. *)
-let looks_like_pr_op (s : string) : bool =
-  let len = String.length s in
-  len >= 2
-  && (Char.equal s.[0] '+' || Char.equal s.[0] '-')
-  && String.for_all
-       (function '0' .. '9' -> true | _ -> false)
-       (String.sub s 1 (len - 1))
-
-let parse_pr_op_token (s : string) : (pr_op, string) result =
-  if not (looks_like_pr_op s) then
-    Error
-      (Printf.sprintf
-         "unrecognized PR op token %S — expected +N or -N (e.g. +123, -123)" s)
-  else
-    let rest = String.sub s 1 (String.length s - 1) in
-    match int_of_string_opt rest with
-    | Some n when n > 0 ->
-        let pr = Pr_number.of_int n in
-        if Char.equal s.[0] '+' then Ok (Add_pr pr) else Ok (Remove_pr pr)
-    | _ ->
-        Error
-          (Printf.sprintf
-             "invalid PR number in %S — expected a positive integer after the \
-              sign"
-             s)
-
-let cli_option_takes_value (s : string) : bool =
-  match String.index_opt s '=' with
-  | Some _ -> false
-  | None -> (
-      (* Keep this in sync with Cmdliner [opt] arguments below:
-         --gameplan, --token, --backend, --model, --repo, --main-branch,
-         --poll-interval, and --max-concurrency. *)
-      match s with
-      | "--gameplan" | "--token" | "--backend" | "--model" | "--repo"
-      | "--main-branch" | "--poll-interval" | "--max-concurrency" ->
-          true
-      | _ -> false)
-
-let is_flag_like_token (s : string) : bool =
-  String.length s > 0 && Char.equal s.[0] '-'
-
-(** Strip [+N]/[-N] tokens out of [argv] before cmdliner parses it. Returns the
-    list of ops in left-to-right order alongside the filtered argv. *)
-let extract_pr_ops_from_argv (argv : string array) :
-    (pr_op list * string array, string) result =
-  let n = Array.length argv in
-  let ops = ref [] in
-  let kept = ref [] in
-  let err = ref None in
-  let saw_project = ref false in
-  let i = ref 0 in
-  while !i < n && Option.is_none !err do
-    let tok = argv.(!i) in
-    if !i = 0 then kept := tok :: !kept
-    else if cli_option_takes_value tok then (
-      kept := tok :: !kept;
-      if !i + 1 < n && not (looks_like_pr_op argv.(!i + 1)) then (
-        incr i;
-        kept := argv.(!i) :: !kept))
-    else if is_flag_like_token tok && not (looks_like_pr_op tok) then
-      kept := tok :: !kept
-    else if looks_like_pr_op tok then
-      match parse_pr_op_token tok with
-      | Ok op -> ops := op :: !ops
-      | Error msg -> err := Some msg
-    else if not !saw_project then (
-      saw_project := true;
-      kept := tok :: !kept)
-    else
-      err :=
-        Some
-          (Printf.sprintf
-             "unrecognized positional argument %S — expected +N or -N (e.g. \
-              +123, -123)"
-             tok);
-    incr i
-  done;
-  match !err with
-  | Some msg -> Error msg
-  | None ->
-      let kept_argv = Array.of_list (List.rev !kept) in
-      Ok (List.rev !ops, kept_argv)
-
-let gameplan_path_arg =
+let plan_path_arg =
   let open Cmdliner in
   Arg.(
     value
     & opt (some string) None
-    & info [ "gameplan" ] ~docv:"GAMEPLAN" ~doc:"Path to the gameplan file.")
+    & info [ "plan" ] ~docv:"PLAN" ~doc:"Path to the JSON plan.")
 
 let github_token_arg =
   let open Cmdliner in
@@ -1410,14 +1141,10 @@ let model_arg =
         ~doc:
           "Model name to pass to the selected backend (e.g. [sonnet], [opus], \
            [sonnet-4-6] for claude; [gpt-5.6-sol] for codex). The literal \
-           value [auto] picks a model per patch from the gameplan's \
-           [complexity] field (1/2/3 → cheap/standard/strongest tier of the \
-           selected backend). The per-backend ladder can be overridden by \
-           writing [~/.config/onton/<owner>/<repo>/config.json] with a \
-           [routing] map; the same file's [default.{backend,model}] block sets \
-           per-repo defaults below CLI flags and stored values — see \
-           lib_core/repo_config.mli for the schema. When omitted, onton does \
-           not pass --model to the underlying CLI, so the backend's own \
+           selected model applies to every patch in the run. A per-repository \
+           [default.{backend,model}] block may be written to \
+           [~/.config/onton/<owner>/<repo>/config.json]. When omitted, onton \
+           does not pass --model to the underlying CLI, so the backend's own \
            default applies.")
 
 let repo_arg =
@@ -1487,15 +1214,6 @@ let headless_arg =
     value & flag
     & info [ "headless" ] ~doc:"Run without TUI (plain log output).")
 
-let upload_debug_arg =
-  let open Cmdliner in
-  Arg.(
-    value & flag
-    & info [ "upload-debug" ]
-        ~doc:
-          "Upload project debug state for troubleshooting. Requires a project \
-           name.")
-
 let no_lock_arg =
   let open Cmdliner in
   Arg.(
@@ -1512,7 +1230,7 @@ let prune_arg =
     value & flag
     & info [ "prune" ]
         ~doc:
-          "Remove every stored project whose gameplan patches are all terminal \
+          "Remove every stored project whose plan patches are all terminal \
            (merged or closed). Skips projects whose lock is held by a live \
            onton process. By default, each stored PR for a non-merged agent is \
            reconciled with the forge first (one PR-state query per eligible \
@@ -1535,42 +1253,26 @@ let auto_merge_arg =
     value & flag
     & info [ "auto-merge" ]
         ~doc:
-          "Enable automerge for every patch in the gameplan at project start. \
-           Only valid when paired with --gameplan; ignored on resume so \
-           per-patch toggles set via the TUI survive restarts. Individual \
-           patches can still be toggled off in the TUI manage overlay.")
+          "Enable automerge for every patch in the plan at project start. Only \
+           valid when paired with --plan; ignored on resume so per-patch \
+           toggles set via the TUI survive restarts. Individual patches can \
+           still be toggled off in the TUI manage overlay.")
 
-let main_cmd ~pr_ops =
+let main_cmd =
   let open Cmdliner in
   let run_cmd project gameplan_path github_token backend model main_branch
-      poll_interval repo_root max_concurrency max_ci_failures headless
-      upload_debug no_lock prune no_refresh auto_merge clone_scheme =
+      poll_interval repo_root max_concurrency max_ci_failures headless no_lock
+      prune no_refresh auto_merge clone_scheme =
     if prune then
       Stdlib.exit
         ( Eio_main.run @@ fun env ->
           Prune_runner.run_prune ~net:(Eio.Stdenv.net env)
             ~clock:(Eio.Stdenv.clock env) ~github_token
             ~refresh:(not no_refresh) () )
-    else if upload_debug then (
-      match project with
-      | None ->
-          Printf.eprintf
-            "Error: --upload-debug requires a project name.\n\
-             Usage: onton PROJECT --upload-debug\n";
-          Stdlib.exit 1
-      | Some project_name ->
-          if not (Project_store.project_exists project_name) then (
-            Printf.eprintf "Error: no stored project %S.\n" project_name;
-            Printf.eprintf "Known projects: %s\n"
-              (String.concat ", " (Project_store.list_projects ()));
-            Stdlib.exit 1);
-          Eio_main.run @@ fun env ->
-          Debug_upload.run ~net:(Eio.Stdenv.net env) ~project_name
-            ~version:Version.s)
     else (
       if auto_merge && Base.Option.is_none gameplan_path then (
         Printf.eprintf
-          "Error: --auto-merge requires --gameplan. It only seeds the initial \
+          "Error: --auto-merge requires --plan. It only seeds the initial \
            state of a fresh project.\n";
         Stdlib.exit 1);
       let main_branch =
@@ -1581,33 +1283,23 @@ let main_cmd ~pr_ops =
         ~backend:(Base.String.strip backend)
         ~model:(Base.String.strip model) ~main_branch ~poll_interval ~repo_root
         ~max_concurrency ~max_ci_failures ~headless ~no_lock ~auto_merge
-        ~clone_scheme ~pr_ops)
+        ~clone_scheme)
   in
   let term =
     Term.(
-      const run_cmd $ project_arg $ gameplan_path_arg $ github_token_arg
+      const run_cmd $ project_arg $ plan_path_arg $ github_token_arg
       $ backend_arg $ model_arg $ main_branch_arg $ poll_interval_arg $ repo_arg
-      $ max_concurrency_arg $ max_ci_failures_arg $ headless_arg
-      $ upload_debug_arg $ no_lock_arg $ prune_arg $ no_refresh_arg
-      $ auto_merge_arg $ clone_scheme_arg)
+      $ max_concurrency_arg $ max_ci_failures_arg $ headless_arg $ no_lock_arg
+      $ prune_arg $ no_refresh_arg $ auto_merge_arg $ clone_scheme_arg)
   in
   let info =
     Cmd.info "onton" ~version:Version.s
       ~doc:
         "Orchestrate parallel patch development with an LLM coding agent.\n\n\
          Usage:\n\
-        \  onton [PROJECT] --gameplan GAMEPLAN [OPTIONS]   Start a new project\n\
-        \  onton PROJECT [OPTIONS]                         Resume a saved \
-         project\n\
-        \  onton PROJECT (+N|-N) ... [OPTIONS]             Resume and \
-         add/remove PR #N as an ad-hoc patch"
+        \  onton [PROJECT] --plan PLAN [OPTIONS]   Start a new project\n\
+        \  onton PROJECT [OPTIONS]                 Resume a saved project"
   in
   Cmd.v info term
 
-let () =
-  match extract_pr_ops_from_argv Sys.argv with
-  | Error msg ->
-      Printf.eprintf "onton: %s\n" msg;
-      Stdlib.exit 1
-  | Ok (pr_ops, argv) ->
-      Stdlib.exit (Cmdliner.Cmd.eval ~argv (main_cmd ~pr_ops))
+let () = Stdlib.exit (Cmdliner.Cmd.eval main_cmd)

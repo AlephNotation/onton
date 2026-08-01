@@ -24,7 +24,7 @@ type disposition =
 let disposition (a : Patch_agent.t) : disposition =
   if a.merged then Skip
   else if Patch_agent.needs_intervention a then Blocked
-  else if a.busy then Busy
+  else if Patch_agent.is_busy a then Busy
   else if not (Patch_agent.has_pr a) then Ready_start
   else
     match Patch_agent.highest_priority a with
@@ -82,7 +82,7 @@ let on_checks_passing (a : Patch_agent.t) ~(checks_passing : bool) :
 let should_clear_conflict (a : Patch_agent.t) : bool =
   not
     (List.mem a.queue Operation_kind.Merge_conflict ~equal:Operation_kind.equal
-    || Option.equal Operation_kind.equal a.current_op
+    || Option.equal Operation_kind.equal (Patch_agent.current_op a)
          (Some Operation_kind.Merge_conflict))
 
 (** {2 Respond delivery — pre-session decisions for the runner} *)
@@ -126,8 +126,9 @@ let filter_undelivered_ci_failures (agent : Patch_agent.t) : Ci_check.t list =
 let on_ci_failure (a : Patch_agent.t) : ci_decision =
   if a.ci_failure_count >= a.max_ci_failures then Cap_reached
   else if
-    a.busy
-    && Option.equal Operation_kind.equal a.current_op (Some Operation_kind.Ci)
+    Patch_agent.is_busy a
+    && Option.equal Operation_kind.equal (Patch_agent.current_op a)
+         (Some Operation_kind.Ci)
   then Ci_fix_in_progress
   else if List.mem a.queue Operation_kind.Ci ~equal:Operation_kind.equal then
     Ci_already_queued
@@ -157,7 +158,8 @@ let respond_delivery ~(agent : Patch_agent.t) ~(kind : Operation_kind.t)
   if
     agent.merged
     || Patch_agent.needs_intervention agent
-    || agent.branch_blocked || not agent.busy
+    || agent.branch_blocked
+    || not (Patch_agent.is_busy agent)
   then Respond_stale
   else
     let source = Option.value pre_fire_agent ~default:agent in

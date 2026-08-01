@@ -12,18 +12,47 @@ open Base
 type session_fallback = Fresh_available | Tried_fresh | Given_up
 [@@deriving show, eq, sexp_of, compare, yojson]
 
+type session_state =
+  | Not_started
+  | Started of { resume_id : string option; fallback : session_fallback }
+[@@deriving show, eq, sexp_of, compare]
+
 type op_state = Queued | Running
 [@@deriving show, eq, sexp_of, compare, yojson]
+
+type activity =
+  | Inactive
+  | Interrupted of {
+      operation : Types.Operation_kind.t option;
+      message_id : Types.Message_id.t option;
+    }
+  | Active of {
+      operation : Types.Operation_kind.t option;
+      phase : op_state;
+      message_id : Types.Message_id.t option;
+    }
+[@@deriving show, eq, sexp_of, compare]
+
+type automerge_state =
+  | Disabled
+  | Enabled of { deadline : float option; failure_count : int }
+[@@deriving show, eq, sexp_of, compare]
+
+type review_state =
+  | Review_not_requested
+  | Review_requested of string
+  | Review_failed of { head_oid : string; error : string }
+[@@deriving show, eq, sexp_of, compare]
 
 type t = private {
   patch_id : Types.Patch_id.t;
   branch : Types.Branch.t;
-  pr_status : Patch_pr_status.t;
-      (** Lifecycle status of the patch's PR. Use the accessor functions
-          ([has_pr], [is_pr_present], [is_pr_missing], [pr_number]) rather than
-          pattern-matching the field — see {!Patch_pr_status}. *)
-  has_session : bool;
-  busy : bool;
+  pr_status : Patch_pr_status.t;  (** Lifecycle status of the patch's PR. *)
+  session : session_state;
+  activity : activity;
+      (** Atomic execution lifecycle. [Inactive] carries no operation metadata;
+          [Interrupted] retains an accepted delivery for crash replay, and
+          [Active] carries a live fiber's queued/running phase. *)
   merged : bool;
   queue : Types.Operation_kind.t list;
   satisfies : bool;
@@ -40,7 +69,6 @@ type t = private {
           construction (and re-stamped on snapshot restore via
           {!Orchestrator.set_max_ci_failures}) from the [--max-ci-failures] flag
           / stored project config; defaults to {!default_max_ci_failures}. *)
-  session_fallback : session_fallback;
   human_messages : string list;
   inflight_human_messages : string list;
   ci_checks : Types.Ci_check.t list;
@@ -137,25 +165,11 @@ type t = private {
           unreachable from HEAD and walks back to the oldest still- reachable
           entry. Capped at {!Anchor_history.cap}. *)
   checks_passing : bool;
-  current_op : Types.Operation_kind.t option;
-  current_op_state : op_state;
-      (** Sub-state of [current_op]. [Queued] when the action fiber is alive but
-          its work has not begun (typically waiting on the Claude semaphore).
-          [Running] once the work has actually started. Meaningful only when
-          [busy] is true; reset to [Queued] on [complete]. Drives the TUI
-          "(queued)" suffix so a saturated semaphore can be told apart from an
-          actively-running session. *)
-  current_message_id : Types.Message_id.t option;
   generation : int;
   worktree_path : string option;
   branch_blocked : bool;
-  llm_session_id : string option;
-  automerge_enabled : bool;
-  automerge_deadline : float option;
-  automerge_inflight : bool;
-  review_requested_for_oid : string option;
-  review_request_inflight : bool;
-  automerge_failure_count : int;
+  automerge : automerge_state;
+  review : review_state;
   delivered_ci_run_ids : int list;
       (** CheckRun [databaseId]s already delivered as CI feedback. Sorted and
           deduplicated. Drives per-run deduplication in the CI delivery path so
@@ -174,53 +188,39 @@ val create :
 (** Initial state for a patch: no PR, not busy, empty queue. [max_ci_failures]
     defaults to {!default_max_ci_failures}. *)
 
-val create_adhoc :
-  patch_id:Types.Patch_id.t ->
-  branch:Types.Branch.t ->
-  pr_number:Types.Pr_number.t ->
-  max_ci_failures:int ->
-  t
-(** Initial state for an ad-hoc patch: has PR, not busy, empty queue. Ad-hoc
-    agents are created in a live orchestrator context
-    ({!Orchestrator.add_agent}), where the resolved project cap is already known
-    and must be stamped explicitly. Corresponds to the spec's Add action:
-    {v PatchCtx ~> Add | p: Patch. --- has-pr' p. ~busy' p. ~in-gameplan' p. v}
-*)
-
 (** {2 Derived predicates} *)
 
 val has_pr : t -> bool
-(** [true] when this agent has a recorded PR identity (either [Present] or
-    [Missing] in [pr_status]). Used as the orchestrator-invariant predicate:
-    every graph node must be in the gameplan or have a PR identity. *)
-
-val is_pr_present : t -> bool
-(** [true] only when [pr_status = Present _]. Use this for any callsite that is
-    about to act on the PR (rebase, respond, merge, set draft) — a [Missing] PR
-    cannot be acted on. *)
-
-val is_pr_missing : t -> bool
-(** [true] only when [pr_status = Missing _]. Contributes to
-    {!needs_intervention}. *)
+(** [true] when this planned patch has a tracked PR. *)
 
 val pr_number : t -> Types.Pr_number.t option
-(** The recorded PR number, if any. [Some] for both [Present] and [Missing];
-    [None] for [Absent]. *)
+(** The tracked PR number, if any. *)
+
+val is_busy : t -> bool
+val current_op : t -> Types.Operation_kind.t option
+val current_op_state : t -> op_state option
+val current_message_id : t -> Types.Message_id.t option
+val has_session : t -> bool
+val session_fallback : t -> session_fallback
+val llm_session_id : t -> string option
+val automerge_enabled : t -> bool
+val automerge_deadline : t -> float option
+val automerge_failure_count : t -> int
+val review_requested_for_oid : t -> string option
+val review_failure : t -> (string * string) option
 
 val intervention_reason : t -> string option
 (** [Some reason] when the agent needs intervention; [None] otherwise. Returns
     the first triggering condition's short label, in the same priority order as
-    the predicate. The label strings — ["pr_missing"],
-    ["conflict_noop_count>=2"], etc. — are stable and intended to land verbatim
-    in the event log so operators can grep "why is this patch stuck?" by reason.
-    The CI label embeds the configured cap (["ci_failure_count>=3"] under the
-    default) — match it by the ["ci_failure_count>="] prefix, not the full
-    string. *)
+    the predicate. The label strings — ["conflict_noop_count>=2"], etc. — are
+    stable and intended to land verbatim in the event log so operators can grep
+    "why is this patch stuck?" by reason. The CI label embeds the configured cap
+    (["ci_failure_count>=3"] under the default) — match it by the
+    ["ci_failure_count>="] prefix, not the full string. *)
 
 val intervention_reason_of_fields :
   merged:bool ->
   has_pr:bool ->
-  is_pr_missing:bool ->
   session_given_up:bool ->
   human_in_queue:bool ->
   ci_failure_count:int ->
@@ -242,9 +242,6 @@ val needs_intervention : t -> bool
 (** [Option.is_some (intervention_reason t)]. Derived predicate. True iff the
     agent is not [merged] AND any of:
     - [session_fallback = Given_up] (bypasses the Human exemption)
-    - [is_pr_missing t] (PR vanished from the remote — bypasses the Human
-      exemption; queued Human entries are deferred until [Missing → Present]
-      recovery rather than dispatched while [Missing])
     - [Human] not in queue AND any of: [ci_failure_count >= max_ci_failures],
       [(not has_pr) && start_attempts_without_pr >= 2],
       [conflict_noop_count >= 2], [no_commits_push_count >= 2],
@@ -255,7 +252,6 @@ val needs_intervention : t -> bool
 val needs_intervention_of_fields :
   merged:bool ->
   has_pr:bool ->
-  is_pr_missing:bool ->
   session_given_up:bool ->
   human_in_queue:bool ->
   ci_failure_count:int ->
@@ -576,14 +572,13 @@ val mark_inflight_human_messages_delivered : t -> t
 
 val set_automerge_enabled : t -> bool -> t
 (** Enable or disable automerge for this patch. When the value actually changes,
-    the inflight flag is cleared and [automerge_failure_count] is reset;
-    disabling additionally clears any pending deadline so the next enable starts
-    a fresh timer. Calling with the current value is a no-op — the failure
-    count, inflight flag, and [automerge_deadline] are NOT reset in that case.
-    If the preserved deadline has already elapsed, the next reconcile tick will
-    fire immediately rather than waiting [automerge_idle_timeout]; callers that
-    need a fresh timer must call [clear_automerge_deadline] explicitly after
-    this function. *)
+    [automerge_failure_count] is reset; disabling additionally clears any
+    pending deadline so the next enable starts a fresh timer. Calling with the
+    current value is a no-op — the failure count and [automerge_deadline] are
+    NOT reset in that case. If the preserved deadline has already elapsed, the
+    next reconcile tick will fire immediately rather than waiting
+    [automerge_idle_timeout]; callers that need a fresh timer must call
+    [clear_automerge_deadline] explicitly after this function. *)
 
 val set_automerge_deadline : t -> float -> t
 (** Record the Unix timestamp at which the supervisor should merge this patch if
@@ -592,13 +587,8 @@ val set_automerge_deadline : t -> float -> t
 val clear_automerge_deadline : t -> t
 (** Clear a pending automerge deadline without disabling automerge. *)
 
-val set_automerge_inflight : t -> bool -> t
-(** Set the [automerge_inflight] flag. The reconciler sets it [true] when it
-    claims a merge decision; the caller clears it on every exit path (success,
-    failure, exception). *)
-
-val set_review_requested_for_oid : t -> string option -> t
-val set_review_request_inflight : t -> bool -> t
+val mark_review_requested : t -> string -> t
+val mark_review_failed : t -> head_oid:string -> error:string -> t
 
 val increment_automerge_failure_count : t -> t
 (** Record a failed automerge call. After [automerge_max_failures] consecutive
@@ -630,52 +620,26 @@ val highest_priority : t -> Types.Operation_kind.t option
 val set_pr_number : t -> Types.Pr_number.t -> t
 (** Store [pr_number] (making [has_pr] true). Dispatches on
     {!Patch_pr_status.classify_set_present}:
-    - [Set_present_recover_same] (prior was [Missing N] or [Present N] with the
-      same number): preserves all world-state — the body is still delivered, CI
-      runs already accounted, [notified_base_branch] still authoritative.
-    - [Set_present_adopt_new] (prior was [Absent], or the number differs):
-      resets PR-bootstrap fields ([is_draft = true],
-      [pr_body_delivered = false], [start_attempts_without_pr = 0]) plus
-      PR-keyed CI history that no longer matches the new PR's check runs
-      ([ci_checks = []], [ci_failure_count = 0], [delivered_ci_run_ids = []]).
-      Does NOT touch [base_branch] / [notified_base_branch] — those are owned by
-      [start] during bootstrap and by the poller during renumbering. *)
+    - [Preserve_existing] ([Present N] observed again): preserves world-state.
+    - [Adopt_new] (prior was [Absent], or the number differs): resets
+      PR-bootstrap fields ([is_draft = true], [pr_body_delivered = false],
+      [start_attempts_without_pr = 0]) plus PR-keyed CI history that no longer
+      matches the new PR's check runs ([ci_checks = []], [ci_failure_count = 0],
+      [delivered_ci_run_ids = []]). Does NOT touch [base_branch] /
+      [notified_base_branch] — those are owned by [start] during bootstrap and
+      by the poller during renumbering. *)
 
 val clear_pr : t -> t
-(** Remove the PR number and reset PR-related state, returning the agent to the
-    no-PR bootstrap path. Tightens to [Present]-only: raises [Invalid_argument]
-    on [Absent] or [Missing]. The gameplan-recreate path is the only legitimate
-    caller; ad-hoc-vanished should use {!mark_pr_missing} instead. *)
-
-val mark_pr_missing : t -> t
-(** Transition the agent from [Present pr] to [Missing pr]: the remote no longer
-    has the PR. Minimal: clears only the world-state assertions that are no
-    longer authoritative ([is_draft], [merge_ready], [checks_passing],
-    [ci_checks]). Everything else — queue (including Human, Ci, Pr_body,
-    Findings, Rebase, Review_comments, Merge_conflict), counters,
-    [notified_base_branch], [delivered_ci_run_ids], [pr_body_delivered],
-    [current_op], [busy], [base_branch] — is preserved so a [Missing → Present]
-    recovery via {!set_pr_number} (same-number) is a near-no-op.
-
-    {b Human messages on a [Missing] agent are deferred, not actively
-       dispatched.} {!needs_intervention} fires on [is_pr_missing], so the
-    planner's Respond/Rebase branches gate the agent off. Queued Human entries
-    survive the [Missing] phase and dispatch normally once the PR recovers to
-    [Present] (via {!Patch_pr_status.classify_recovery_on_observe} →
-    {!Orchestrator.set_pr_number}). The operator's escape if the PR is not
-    coming back is [Orchestrator.remove_agent] (i.e., [-N] in the TUI).
-
-    Raises [Invalid_argument] on [Absent] (cannot mark missing what was never
-    had) or [Missing] (idempotency is the caller's responsibility — see
-    {!Orchestrator.mark_pr_missing} for the idempotent integration-level
-    wrapper). *)
+(** Remove the PR number and reset PR-related state, returning the planned patch
+    to the no-PR bootstrap path. Raises [Invalid_argument] when already absent.
+*)
 
 val restore :
   patch_id:Types.Patch_id.t ->
   branch:Types.Branch.t ->
   pr_status:Patch_pr_status.t ->
-  has_session:bool ->
-  busy:bool ->
+  session:session_state ->
+  activity:activity ->
   merged:bool ->
   queue:Types.Operation_kind.t list ->
   satisfies:bool ->
@@ -685,7 +649,6 @@ val restore :
   notified_base_branch:Types.Branch.t option ->
   ci_failure_count:int ->
   ?max_ci_failures:int ->
-  session_fallback:session_fallback ->
   human_messages:string list ->
   inflight_human_messages:string list ->
   ci_checks:Types.Ci_check.t list ->
@@ -712,19 +675,11 @@ val restore :
   branch_rebased_onto_sha:string option ->
   anchor_history:Anchor_history.t ->
   checks_passing:bool ->
-  current_op:Types.Operation_kind.t option ->
-  current_op_state:op_state ->
-  current_message_id:Types.Message_id.t option ->
   generation:int ->
   worktree_path:string option ->
   branch_blocked:bool ->
-  llm_session_id:string option ->
-  automerge_enabled:bool ->
-  automerge_deadline:float option ->
-  automerge_inflight:bool ->
-  ?review_requested_for_oid:string option ->
-  ?review_request_inflight:bool ->
-  automerge_failure_count:int ->
+  automerge:automerge_state ->
+  ?review:review_state ->
   delivered_ci_run_ids:int list ->
   unit ->
   t

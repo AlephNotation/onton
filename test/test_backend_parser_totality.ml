@@ -116,24 +116,6 @@ let json_accessors_are_total =
         true
       with _ -> false)
 
-let gen_complexity =
-  let open QCheck2.Gen in
-  oneof [ return None; map (fun k -> Some k) (int_range (-5) 10) ]
-
-(* [auto_model] always names a concrete model. *)
-let claude_auto_model_is_total =
-  QCheck2.Test.make ~name:"claude auto_model names a model for any complexity"
-    ~count:200 gen_complexity (fun complexity ->
-      match Claude_event_parser.auto_model ~complexity with
-      | Some m -> String.length m > 0
-      | None -> false)
-
-(* [max_turns_for] is positive for any complexity. *)
-let claude_max_turns_for_is_positive =
-  QCheck2.Test.make ~name:"claude max_turns_for is positive" ~count:200
-    gen_complexity (fun complexity ->
-      Claude_event_parser.max_turns_for ~complexity > 0)
-
 (* [model_args] emits ["--model"; m] for a non-empty model and [] otherwise. *)
 let claude_model_args_round_trips =
   QCheck2.Test.make ~name:"claude model_args wraps non-empty model" ~count:200
@@ -209,8 +191,8 @@ let claude_build_args_carry_prompt =
     (fun (prompt, resume_session) ->
       let args =
         Claude_event_parser.build_args ~getenv_opt:Claude_event_parser.no_env
-          ~warn:Claude_event_parser.ignore_warn ~model:None ~complexity:None
-          ~prompt ~resume_session
+          ~warn:Claude_event_parser.ignore_warn ~model:None ~prompt
+          ~resume_session
       in
       List.mem args prompt ~equal:String.equal
       &&
@@ -225,8 +207,8 @@ let claude_build_stream_args_carry_prompt =
       let args =
         Claude_event_parser.build_stream_args
           ~getenv_opt:Claude_event_parser.no_env
-          ~warn:Claude_event_parser.ignore_warn ~model:None ~complexity:None
-          ~prompt ~minted_session_id:None ~resume_session:None
+          ~warn:Claude_event_parser.ignore_warn ~model:None ~prompt
+          ~minted_session_id:None ~resume_session:None
       in
       List.mem args prompt ~equal:String.equal)
 
@@ -264,14 +246,12 @@ let claude_parse_stream_event_matches_head =
 let claude_public_surface_is_linked =
   QCheck2.Test.make ~name:"claude parser public surface is linked"
     QCheck2.Gen.unit (fun () ->
-      ignore Claude_event_parser.auto_model;
       ignore Claude_event_parser.bare_args;
       ignore Claude_event_parser.budget_cap_args;
       ignore Claude_event_parser.build_args;
       ignore Claude_event_parser.build_stream_args;
       ignore Claude_event_parser.find_json_start;
       ignore Claude_event_parser.ignore_warn;
-      ignore Claude_event_parser.max_turns_for;
       ignore Claude_event_parser.model_args;
       ignore Claude_event_parser.no_env;
       ignore Claude_event_parser.parse_stream_event;
@@ -310,8 +290,6 @@ let () =
       strip_ansi_removes_stray_controls;
       strip_ansi_known_sequences;
       json_accessors_are_total;
-      claude_auto_model_is_total;
-      claude_max_turns_for_is_positive;
       claude_model_args_round_trips;
       claude_bare_args_tracks_api_key;
       claude_budget_cap_args_tracks_env;

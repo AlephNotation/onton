@@ -2,67 +2,59 @@
 
 ![onton](onton.png)
 
-A methodology and orchestrator for breaking complex codebase changes into
-parallel, spec-verified patches executed by AI agents.
+A small, durable orchestrator for dependency-aware coding agents.
 
-## The gameplan approach
+Onton reads a strict JSON plan, builds its dependency graph, and runs one coding
+agent per patch in an isolated git worktree. It owns the operational loop:
+pull-request creation, CI and review follow-up, rebasing, merge policy, and
+crash recovery.
 
-Large changes are hard to review, easy to get wrong, and risky to merge. The
-gameplan approach decomposes them into small, ordered patches — each with a
-formal specification (written in
-[Pantagruel](https://github.com/subsetpark/pantagruel)) that states what must
-be true after the patch is applied. A dependency graph identifies which patches
-can run in parallel. An orchestrator spawns AI agents in isolated git worktrees
-and manages the full lifecycle: PR creation, code review, CI, rebasing, and
-merge.
+The plan contains only executor inputs: an observable goal, exact file scope,
+dependencies, and commands that prove the patch works. Onton rejects unknown
+fields, invalid paths, duplicate identifiers, missing dependencies, and cycles
+before it starts any agent.
 
-The approach has three layers:
-
-| Layer | What | Where |
-|-------|------|-------|
-| **Scoping** | Break a large project into sequenced gameplans (milestones) | `skills/write-workstream/` |
-| **Planning** | Structure a change into patches with specs, tests, and a dependency graph | `skills/write-gameplan/` |
-| **Execution** | Orchestrate parallel agents, poll GitHub, react to events | `onton` (this binary) |
-
-### Skills
-
-The `skills/` directory contains Claude Code skills for the planning layers:
-
-- **write-workstream** — Define a large project as a sequence of gameplans
-  (milestones), each a safe stopping point. Guided discovery process: vision,
-  challenges, milestones, dependencies.
-
-- **write-gameplan** — Create a structured JSON gameplan with typed
-  sections, patch classifications (INFRA/GATED/BEHAVIOR), formal specs,
-  test maps, and a dependency graph. Designed so it's 5-10x easier to review
-  the gameplan than the code it produces.
-
-To make these skills available to Claude Code from any project on your
-machine, run:
-
-```sh
-./scripts/install-hooks.sh
+```json
+{
+  "project": "safer-cache",
+  "repository": "acme/service",
+  "patches": [
+    {
+      "id": "cache-key",
+      "goal": "cache keys include the tenant identifier",
+      "dependsOn": [],
+      "files": ["lib/cache_key.ml", "test/cache_key_test.ml"],
+      "checks": [
+        {
+          "run": "dune exec test/cache_key_test.exe",
+          "proves": "tenants cannot share cache entries"
+        }
+      ]
+    }
+  ]
+}
 ```
 
-This symlinks each skill into `~/.claude/skills/` and installs a git
-`post-checkout` hook that keeps the symlinks pointed at the current checkout
-after branch switches. Running `./scripts/sync-skills.sh` directly has the
-same effect without installing the hook.
-
-## Onton: the orchestrator
-
-Onton parses a structured gameplan, builds a dependency graph, and spawns
-concurrent Claude Code agents in git worktrees — one per patch. It polls GitHub
-for PR status, detects merges, triggers rebases, and reacts to CI failures and
-review comments. A terminal UI shows live status with full markdown-rendered
-agent transcripts.
-
-Its control path is replay-safe: a pure controller derives the same follow-up
+The control path is replay-safe: a pure controller derives the same follow-up
 effects and the same patch-agent messages from the same durable snapshot on any
 tick. Patch-agent delivery is effectively-once: messages have stable logical
 IDs, are persisted in an outbox, are acknowledged durably before work begins,
 and can be resumed after crashes without reapplying the queue-consuming state
 transition that originally accepted them.
+
+GitHub mutations use a separate controller-owned command outbox. Draft and base
+changes, review requests, direct merges, merge-queue entry, and merge-queue exit
+are reconciled into deterministic commands and committed to the snapshot before
+the adapter can claim them. Claim and outcome transitions use the same durable
+commit boundary. A process crash while a command is `Running` restores it as
+`Pending`, so delivery is deliberately at-least-once; stable command identities
+and idempotent reconciliation prevent duplicate desired work. Transient failures
+retry with bounded backoff, while exhausted or permanent failures remain as
+non-runnable `Failed` commands with their last error instead of being dropped.
+If eligibility changes while a command is waiting to retry, reconciliation
+removes the obsolete command. An explicit automerge toggle durably resets its
+non-running automerge commands; an already-running external call cannot be
+canceled, so its outcome is still recorded.
 
 ## Install
 
@@ -275,29 +267,32 @@ dune 3.21, and opam. `opam install . --deps-only` installs the rest
 ## Usage
 
 ```sh
-onton --gameplan GAMEPLAN [OPTIONS]       # Start a new project from a gameplan
+onton --plan PLAN.json [OPTIONS]          # Start a new project from a plan
 onton PROJECT [OPTIONS]                  # Resume a saved project
-onton --repo ../my-repo [OPTIONS]        # Ad-hoc mode (no gameplan)
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `PROJECT` | (derived from gameplan) | Project name (positional). Required to resume, optional with `--gameplan` |
-| `--gameplan` | — | Path to the gameplan markdown file |
-| `--repo` | `.` | Path to the git repository. GitHub owner/repo are inferred from `git remote` |
+| `PROJECT` | (derived from plan) | Project name (positional). Required to resume, optional with `--plan` |
+| `--plan` | — | Path to the JSON plan |
+| `--repo` | stored managed checkout | Override the repository path when resuming |
 | `--token` | `$GITHUB_TOKEN` or `gh auth token` | GitHub API token |
 | `--backend` | `claude` | LLM backend: `claude`, `codex`, `opencode`, `pi`, `gemini`. See [Backend & model](#backend--model) |
 | `--model` | (backend CLI's own default) | Model name passed to the backend CLI |
 | `--main-branch` | (auto-detected) | Main branch name (inferred from remote HEAD if omitted) |
 | `--poll-interval` | `30.0` | GitHub polling interval in seconds |
 | `--max-concurrency` | `5` / `$ONTON_MAX_CONCURRENCY` | Maximum concurrent Claude processes |
-| `--auto-merge` | off | Enable automerge for every patch when starting a fresh `--gameplan` project; ignored on resume so per-patch TUI toggles persist |
+| `--auto-merge` | false | Enable automerge when starting a fresh `--plan` project; ignored on resume so per-patch TUI toggles persist |
 | `--headless` | off | Run without TUI (plain log output to stdout) |
 
 Project config and state are persisted to `~/.local/share/onton/<project>/`.
 Resuming a project reloads the saved snapshot (including agent transcripts) and
 reconciles against GitHub. The snapshot includes the durable patch-agent
 message ledger, so accepted but incomplete work can resume after restart.
+
+This release is an intentional compatibility cutover: it accepts only the
+strict `plan.json` format, project-config schema 1, and snapshot schema 7.
+Projects persisted by earlier releases must be started again from a new plan.
 
 ### User configuration
 
@@ -331,30 +326,20 @@ Worktrees are discovered from `git worktree list`. If no existing worktree is
 found for a patch's branch, one is created at
 `~/worktrees/<project>/patch-<id>`.
 
-### Ad-hoc mode
-
-When launched without `PROJECT` or `--gameplan`, onton starts with an empty
-patch list. Add PRs at runtime with `+N` in text mode (`:` then `+123`). Each
-`+N` creates a new agent that polls and responds to the given PR. Branch, base,
-and worktree are auto-discovered from GitHub and local git.
-
-State is persisted across restarts — ad-hoc agents survive session restarts and
-resume where they left off.
-
 ## Build & test
 
 ```sh
 dune build          # compile with strict warnings (most warnings are fatal)
 dune runtest        # inline tests + property tests (QCheck2)
 dune build @check   # type-check only (no linking), faster for quick feedback
-dune exec bin/main.exe -- --gameplan path/to/gameplan.md
+dune exec bin/main.exe -- --plan path/to/plan.json
 dune fmt            # auto-format via ocamlformat
 ```
 
 ## Architecture
 
 ```
-gameplan.md ──> Gameplan_parser ──> Graph + Patches
+plan.json ──> Gameplan_parser ──> Graph + Patches
                                          │
                   Patch_controller ──────┤
                     ├── poll ingestion + reconciliation
@@ -417,6 +402,23 @@ the runner loop picks up newly-queued operations on each 1-second cycle without
 waiting for running sessions to finish. Backpressure is provided by a
 `max_concurrency` semaphore.
 
+### GitHub command delivery
+
+The GitHub adapter consumes only commands already present in the durable
+outbox. It does not decide policy or update patch state directly. For each
+command the runner:
+
+1. durably changes `Pending` or due `Retry_at` to `Running`
+2. performs exactly the mutation encoded in the command
+3. durably applies the result and removes the command on success, schedules its
+   next retry, or retains it as `Failed`
+
+If the external mutation succeeds but the outcome write fails, onton stops that
+execution path and leaves the persisted claim for restart replay. This cannot
+provide exactly-once delivery across GitHub and the local snapshot—there is no
+cross-system transaction—but it cannot silently acknowledge an unpersisted
+outcome.
+
 ### Modules
 
 | Module | Purpose |
@@ -424,7 +426,7 @@ waiting for running sessions to finish. Backpressure is provided by a
 | `types` | Core types: `Patch_id`, `Branch`, `Operation_kind`, `Patch`, `Comment`, `Gameplan` |
 | `priority` | Operation priority queue — single source of truth for ordering |
 | `graph` | Dependency graph: unblocked detection, base branch resolution |
-| `gameplan_parser` | Markdown gameplan to structured `Gameplan.t` |
+| `gameplan_parser` | Strict JSON plan validation and conversion to `Gameplan.t` |
 | `patch_agent` | Per-patch state machine: start, respond, complete, rebase transitions (private type). Tracks `current_op`, current accepted message, and generation |
 | `patch_controller` | Pure evergreen controller: poll ingestion, lifecycle reconciliation, GitHub effects, and durable patch-agent message planning |
 | `patch_decision` | Pure decision logic: disposition, CI cap, review comment filtering, merge conflict handling. Extracted from main.ml for testability |
@@ -436,27 +438,27 @@ waiting for running sessions to finish. Backpressure is provided by a
 | `claude_process` | Claude CLI session state machine (No_session -> Has_session) |
 | `claude_runner` | Claude subprocess spawning, NDJSON streaming, defensive control-char stripping, `got_events` resume-failure detection |
 | `spawn_logic` | Pure spawn/scheduling logic: which patches to run next |
-| `orchestrator` | Durable patch state plus primitive transitions, including the patch-agent outbox |
+| `orchestrator` | Durable patch state plus primitive transitions, including patch-agent and GitHub command outboxes |
 | `reconciler` | Pure merge detection, rebase cascading, stale base detection, liveness enforcement |
 | `startup_reconciler` | PR discovery, worktree recovery, stale busy reset at startup |
 | `poller` | GitHub polling: comments, CI, merge conflicts, merge/approval state |
-| `state` | Spec context maps (PatchCtx, Comments) for invariant checking |
-| `runtime` | Mutex-protected shared snapshot across fibers (orchestrator + activity log + gameplan + transcripts) |
+| `state` | Pure context maps (PatchCtx, Comments) for invariant checking |
+| `runtime` | Mutex-protected shared snapshot across fibers (orchestrator + activity log + plan + transcripts) |
 | `activity_log` | Per-patch event, transition, and stream entry feed |
 | `event_log` | Structured event log for persistence and replay |
 | `pr_state` | Pull request state tracking and derived status |
 | `run_classification` | Classify agent run outcomes (success, failure, needs intervention) |
 | `forge` | Git forge (GitHub) abstraction |
-| `invariants` | Pure spec invariant checker over `State.t` — used by property tests and ad-hoc snapshot inspection (no production call site) |
-| `persistence` | JSON snapshot save/load for the current durable schema, including transcripts and the message ledger |
-| `project_store` | Project config and gameplan storage at `~/.local/share/onton/` |
+| `invariants` | Pure invariant checker over `State.t` — used by property tests and ad-hoc snapshot inspection (no production call site) |
+| `persistence` | JSON snapshot save/load for schema v7, including transcripts and both durable outboxes |
+| `project_store` | Project config and plan storage at `~/.local/share/onton/` |
 | `user_config` | Per-repo user configuration and hook execution from `~/.config/onton/<owner>/<repo>/` |
 | `prompt` | Agent prompt rendering with per-project template override support |
 | `worktree` | Git worktree CRUD, branch detection, orchestrator-executed `git rebase` |
 | `github` | GitHub GraphQL API client (HTTPS via Eio) |
 | `term` | ANSI terminal primitives (raw mode, key input, size, SIGTSTP/SIGCONT) |
 | `tui_input` | Keyboard -> command translation, text-mode parsing, history buffer |
-| `tui` | Terminal UI: list/detail/timeline views, status derivation, frame rendering, gameplan-ordered display |
+| `tui` | Terminal UI: list/detail/timeline views, status derivation, frame rendering, plan-ordered display |
 | `markdown_render` | CommonMark to ANSI terminal renderer via cmarkit |
 
 ### Design principles
@@ -469,8 +471,6 @@ waiting for running sessions to finish. Backpressure is provided by a
   I/O
 - **Strict compiler feedback** — all warnings fatal (except 44/70), `.mli`
   files enforce module boundaries
-- **Pantagruel spec alignment** — state machine transitions match the formal
-  spec
 - **Single source of truth** — priority ordering defined once in `Priority`;
   sorted patch display via shared `sorted_patch_ids` ref; `patch_controller`
   owns deterministic follow-up decisions; `current_op` plus the durable outbox
@@ -507,9 +507,7 @@ onton --backend opencode --model anthropic/claude-sonnet-4-5
 ```
 
 Both flags are persisted in project config and reused on resume unless
-overridden. Stored configs written by older onton versions (where `backend`
-was `claude-opus` or `claude-sonnet`) are migrated to the decomposed shape
-automatically on load.
+overridden.
 
 ### Per-repo defaults (`config.json`)
 
@@ -521,11 +519,7 @@ write a per-repo config at
 {
   "default": {
     "backend": "codex",
-    "model":   "auto"
-  },
-  "routing": {
-    "1": { "backend": "claude", "model": "haiku"   },
-    "3": { "backend": "codex",  "model": "gpt-5.6-sol" }
+    "model": "gpt-5.6-sol"
   }
 }
 ```
@@ -537,17 +531,10 @@ Resolution order, evaluated per field independently:
 3. `default.backend` / `default.model` from `config.json`
 4. Built-in (`claude`; model unset)
 
-`model: "auto"` from any source — the CLI flag or `default.model` —
-activates the `routing` map: each patch's complexity (1/2/3) picks its
-own `(backend, model)`, falling back to the effective backend's hardcoded
-ladder for tiers with no entry. Both subfields of `default` are
+One backend/model pair applies to the entire run. Both `default` fields are
 optional; pin just `backend`, just `model`, or both. Run
 `onton-check-repo-config <owner> <repo>` to verify how a `config.json`
 parses.
-
-For Codex, the built-in ladder maps complexity 1/2/3 to `gpt-5.6-luna`,
-`gpt-5.6-terra`, and `gpt-5.6-sol`. Missing or out-of-range complexity
-conservatively selects Sol.
 
 ### Supported models
 
@@ -571,8 +558,8 @@ release, and updates the Homebrew formula.
 ## TUI
 
 Three view modes:
-- **List view** — patch table with status badge, PR number, title (branch
-  name for ad-hoc), current operation, CI failures
+- **List view** — patch table with status badge, PR number, goal, current
+  operation, and CI failures
 - **Detail view** — single patch: status, branch, base, worktree path, PR,
   dependencies, conflict, pending comments, CI checks. Scrollable
   markdown-rendered transcript with timestamped prompt delivery and Claude
@@ -591,24 +578,20 @@ Key bindings:
 | `h` | Help overlay | Help overlay | Help overlay |
 | `q` | Quit | Quit | Quit |
 
-Text mode (Enter in detail view, or `:` in list):
+Text mode (Enter in detail view):
 - Type a message and press Enter — sent as human message to the currently
   viewed patch (clears `needs_intervention`)
 - `N> message` — send human message to patch N
-- `+123` — register ad-hoc PR #123 for the selected patch
-- `w /path` — register existing worktree directory
-- `-` — remove the selected patch from orchestration
 
 The input prompt is visible in the footer as `: <text>`.
 
 Headless mode (`--headless`) outputs plain timestamped log lines to stdout with
 dedup-based entry tracking.
 
-## Formal spec
+## Safety properties
 
-The state machine is specified in
-[Pantagruel](https://github.com/subsetpark/pantagruel). Key
-properties:
+The state machine and its controller are covered by example and property tests.
+Important properties include:
 
 - Sessions are never lost (`has_session p -> has_session' p`)
 - Merged is absorbing (terminal state)
@@ -622,10 +605,7 @@ properties:
 
 ## Docs site
 
-The project documentation is hosted at [write-gameplan.dev](https://write-gameplan.dev)
-and deployed to Vercel under the Flowglad org.
-
-The site is static HTML in the `docs/` directory. To update it:
+The documentation site is static HTML in the `docs/` directory. To update it:
 
 1. Edit files in `docs/` (HTML pages, `assets/styles.css`, etc.)
 2. Deploy with the Vercel CLI:

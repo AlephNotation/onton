@@ -11,15 +11,6 @@ type t = {
 and kind = Ephemeral of Llm_backend.t | Long_lived of Llm_backend_long_lived.t
 
 let display_name_of_claude_model = function
-  | Some m when Backend_routing.is_auto_model (Some m) ->
-      (* Under [--model auto] the registry caches one backend per
-         [(backend, "auto")] key and [run_streaming] resolves the actual
-         Claude alias from [complexity] at call time, so any single label
-         here would be wrong for at least some patches. Drop the
-         parenthetical: showing "Claude" matches the no-flag default and
-         avoids the literal "Claude (auto)" string treating the sentinel
-         as if it were a Claude model name. *)
-      "Claude"
   | Some m -> Printf.sprintf "Claude (%s)" m
   | None -> "Claude"
 
@@ -60,25 +51,9 @@ let create ~(process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t) ~clock
     cache = Hashtbl.Poly.create ();
   }
 
-let auto_model ~backend ~complexity =
-  match backend with
-  | "claude" -> Claude_runner.auto_model ~complexity
-  | "codex" -> Codex_backend.auto_model ~complexity
-  | "opencode" -> Opencode_backend.auto_model ~complexity
-  | "pi" -> Pi_backend.auto_model ~complexity
-  | "gemini" -> Gemini_backend.auto_model ~complexity
-  | "patch-agent" -> Some "claude-sonnet-4-5"
-  | other ->
-      invalid_arg
-        (Printf.sprintf "Backend_registry.auto_model: unknown backend %S" other)
-
-let resolve_model ~backend ~model ~complexity =
-  let model =
-    Llm_backend.resolve_auto_model ~model ~complexity
-      ~auto_model:(auto_model ~backend)
-  in
+let resolve_model ~backend ~model =
   match (backend, model) with
-  | "patch-agent", None -> auto_model ~backend ~complexity
+  | "patch-agent", None -> Some "claude-sonnet-4-5"
   | _ -> model
 
 let get t ~backend ~model =

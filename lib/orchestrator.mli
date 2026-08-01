@@ -66,12 +66,31 @@ val message_patch_id : patch_agent_message -> Patch_id.t
 val message_action : patch_agent_message -> action
 val message_status : patch_agent_message -> message_status
 
+(** {2 Durable GitHub command outbox} *)
+
+val enqueue_github_effect : t -> Github_effect.t -> t
+val find_github_effect : t -> Effect_id.t -> Github_effect.t option
+val all_github_effects : t -> Github_effect.t list
+val runnable_github_effects : t -> now:float -> Github_effect.t list
+
+val claim_github_effect :
+  t -> now:float -> Effect_id.t -> t * Github_effect.t option
+(** Mark a runnable command as [Running]. The returned command may be passed to
+    the GitHub adapter only after the enclosing runtime transition has been
+    durably committed. *)
+
+val update_github_effect : t -> Github_effect.t -> t
+val remove_github_effect : t -> Effect_id.t -> t
+val github_effects_for_patch : t -> Patch_id.t -> Github_effect.t list
+
+val remove_github_effects_for_patch :
+  t -> Patch_id.t -> f:(Github_effect.t -> bool) -> t
+
 (** {2 External event application} *)
 
 val complete : t -> Patch_id.t -> t
 val enqueue : t -> Patch_id.t -> Operation_kind.t -> t
 val mark_merged : t -> Patch_id.t -> t
-val remove_agent : t -> Patch_id.t -> t
 
 val send_human_message : t -> Patch_id.t -> string -> t
 (** Append a human message to the agent's [human_messages] queue, reset
@@ -79,18 +98,6 @@ val send_human_message : t -> Patch_id.t -> string -> t
 
 val set_pr_number : t -> Patch_id.t -> Pr_number.t -> t
 val clear_pr : t -> Patch_id.t -> t
-
-val mark_pr_missing : t -> Patch_id.t -> t
-(** Transition the patch's [pr_status] from [Present] to [Missing], or no-op if
-    already [Missing]. The effectful caller (typically the poller's
-    PR-rediscovery path) uses this when the remote has lost an ad-hoc PR.
-
-    Idempotent on [Missing] (the second poll cycle after a vanish will hit the
-    same classification; without idempotency that would crash). Raises
-    [Invalid_argument] on [Absent] — that case represents a caller bug (cannot
-    lose what was never had). See {!Patch_pr_status.classify_mark_missing} for
-    the pure decision this dispatches on. *)
-
 val set_session_failed : t -> Patch_id.t -> t
 
 val set_branch_rebased_onto_sha : t -> Patch_id.t -> string option -> t
@@ -162,6 +169,9 @@ val mark_inflight_human_messages_delivered : t -> Patch_id.t -> t
     {!Patch_agent.mark_inflight_human_messages_delivered}. *)
 
 val set_automerge_enabled : t -> Patch_id.t -> bool -> t
+(** Primitive agent-state update. Interactive policy changes must use
+    {!Patch_controller.set_automerge_enabled} so obsolete durable commands are
+    reset in the same transition. *)
 
 val set_automerge_deadline : t -> Patch_id.t -> float -> t
 (** Arm an automerge deadline via {!Automerge_state.arm_deadline}. If the patch
@@ -169,9 +179,8 @@ val set_automerge_deadline : t -> Patch_id.t -> float -> t
     of recording an incoherent timer. *)
 
 val clear_automerge_deadline : t -> Patch_id.t -> t
-val set_automerge_inflight : t -> Patch_id.t -> bool -> t
-val set_review_requested_for_oid : t -> Patch_id.t -> string option -> t
-val set_review_request_inflight : t -> Patch_id.t -> bool -> t
+val mark_review_requested : t -> Patch_id.t -> string -> t
+val mark_review_failed : t -> Patch_id.t -> head_oid:string -> error:string -> t
 val increment_automerge_failure_count : t -> Patch_id.t -> t
 val reset_automerge_failure_count : t -> Patch_id.t -> t
 
@@ -195,50 +204,20 @@ val main_branch : t -> Branch.t
 val set_main_branch : t -> Branch.t -> t
 
 val set_max_ci_failures : t -> max_ci_failures:int -> t
-(** Stamp the per-project CI-failure cap onto the orchestrator and every current
-    agent, and remember it for agents added later
-    ([add_agent]/[add_planned_patch]). Called once at startup by
-    [Runtime.create] with the resolved config value — both for fresh
-    orchestrators and for snapshot restores, so a changed [--max-ci-failures]
-    takes effect on resume. Does not bump agent [generation]s (config stamp, not
-    a state transition). *)
+(** Stamp the per-project CI-failure cap onto every current agent. Called once
+    at startup by [Runtime.create] with the resolved config value — both for
+    fresh orchestrators and for snapshot restores, so a changed
+    [--max-ci-failures] takes effect on resume. Does not bump agent
+    [generation]s (config stamp, not a state transition). *)
 
 val agents_map : t -> Patch_agent.t Map.M(Patch_id).t
-
-val add_agent :
-  t ->
-  patch_id:Patch_id.t ->
-  branch:Branch.t ->
-  base_branch:Branch.t ->
-  pr_number:Pr_number.t ->
-  t
-(** Add an ad-hoc agent for a PR not in the gameplan. No-op if the patch_id
-    already exists. The agent starts with [has_pr = true] and no deps by
-    default.
-
-    [base_branch] is inspected only for dependency-edge inference: if it matches
-    the [branch] of another unmerged tracked patch, a graph edge from the new
-    patch to that patch is recorded so the existing rebase machinery
-    (detect_rebases, initial_base) treats the stacked ad-hoc PR like any other
-    stacked patch. If [base_branch] is the main branch, an unknown branch, or a
-    merged patch's branch, no edge is inferred. The agent's own [base_branch]
-    field is populated by the poller on the next tick. Corresponds to the spec's
-    Add action. *)
-
-val add_planned_patch : t -> Patch.t -> deps:Patch_id.t list -> t
-(** Register a runtime-added gameplan patch. No-op if the patch id already
-    exists. Unlike {!add_agent} this births a PR-less agent (via
-    [Patch_agent.create], the startup constructor), so the poller promotes it to
-    [Ready_start] once [deps] are satisfied and its base is fresh. The caller
-    must insert [patch] into the gameplan in the same snapshot update — a
-    [Start] action requires the patch to be present in [gameplan.patches]. *)
 
 (** {2 Persistence support} *)
 
 (** [detail] carries the same formatted reason that [session_driver] writes to
     the activity log (truncated to ~500 chars) — backend, exit code, stderr
-    excerpt. It surfaces in [events.jsonl] via [show_session_result] so
-    [debug_upload] bundles are self-diagnosing. *)
+    excerpt. It surfaces in [events.jsonl] via [show_session_result] for
+    postmortem diagnosis. *)
 type session_result =
   | Session_ok
   | Session_process_error of { is_fresh : bool; detail : string option }
@@ -440,6 +419,9 @@ val apply_rebase_push_result :
     - [Rebase_push_error]: infrastructure error; enqueues [Rebase] to retry
       without entering the conflict path. *)
 
+val reject_rebase_publication : t -> Patch_id.t -> t * rebase_push_resolution
+(** Record that a rebased branch failed its declared contract before push. *)
+
 type conflict_rebase_decision =
   | Conflict_resolved
   | Deliver_to_agent
@@ -512,10 +494,15 @@ val apply_conflict_push_result :
       rebase itself didn't resolve the conflict).
     - [Conflict_give_up]: unrecoverable rebase error. *)
 
+val reject_conflict_publication : t -> Patch_id.t -> t * conflict_resolution
+(** Record that a conflict-resolution branch failed its declared contract before
+    push. *)
+
 val restore :
   graph:Graph.t ->
   agents:Patch_agent.t Map.M(Patch_id).t ->
   outbox:patch_agent_message Map.M(Message_id).t ->
+  ?github_outbox:Github_effect.t Map.M(Effect_id).t ->
   main_branch:Branch.t ->
   unit ->
   t

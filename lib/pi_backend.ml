@@ -8,11 +8,9 @@ open Base
 
 let build_args = Pi_event_parser.build_args
 let parse_event = Pi_event_parser.parse_event
-let auto_model = Pi_event_parser.auto_model
 
 let run_streaming ~model ~process_mgr ~clock ~timeout ~setsid_exec ~project_name
-    ~cwd ~patch_id ~prompt ~resume_session ~session_uuid ~complexity ~on_event =
-  let model = Llm_backend.resolve_auto_model ~model ~complexity ~auto_model in
+    ~cwd ~patch_id ~prompt ~resume_session ~session_uuid ~on_event =
   let cwd_path = snd cwd in
   let patch_id_str = Types.Patch_id.to_string patch_id in
   let args =
@@ -41,10 +39,9 @@ let create ~model ~process_mgr ~clock ~timeout ~setsid_exec : Llm_backend.t =
         ~prompt
         ~resume_session
         ~session_uuid
-        ~complexity
         ~on_event
       ->
         run_streaming ~model ~process_mgr ~clock ~timeout ~setsid_exec ~cwd
           ~project_name ~patch_id ~prompt ~resume_session ~session_uuid
-          ~complexity ~on_event);
+          ~on_event);
   }

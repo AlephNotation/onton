@@ -10,10 +10,17 @@ type snapshot = {
   transcripts : (Patch_id.t, string) Base.Hashtbl.t;
 }
 
-type t = { mutex : Eio.Mutex.t; mutable snap : snapshot }
+type durable_store = snapshot -> (unit, string) result
+
+type t = {
+  mutex : Eio.Mutex.t;
+  durable_store : durable_store;
+  mutable snap : snapshot;
+}
 
 let create ~gameplan ~(main_branch : Branch.t)
-    ?(max_ci_failures = Patch_agent.default_max_ci_failures) ?snapshot () =
+    ?(max_ci_failures = Patch_agent.default_max_ci_failures) ?snapshot
+    ~durable_store () =
   let snap =
     match snapshot with
     | Some s ->
@@ -42,7 +49,7 @@ let create ~gameplan ~(main_branch : Branch.t)
         Orchestrator.set_max_ci_failures snap.orchestrator ~max_ci_failures;
     }
   in
-  { mutex = Eio.Mutex.create (); snap }
+  { mutex = Eio.Mutex.create (); durable_store; snap }
 
 let read t f =
   Eio.Mutex.lock t.mutex;
@@ -81,24 +88,29 @@ let update_orchestrator_returning t f =
   | Some v -> v
   | None -> assert false
 
-let add_patch t ~title ~description ~dependencies =
-  (* Mutate gameplan and orchestrator together under one lock so a [Start]
-     action never observes a patch that is in the gameplan but not the agent
-     map (or vice versa). On validation failure the snapshot is left untouched. *)
-  let result = ref (Error "add_patch: callback did not run") in
-  update t (fun s ->
-      match Gameplan.add_patch s.gameplan ~title ~description ~dependencies with
-      | Error _ as e ->
-          result := e;
-          s
-      | Ok (gameplan, patch) ->
-          let orchestrator =
-            Orchestrator.add_planned_patch s.orchestrator patch
-              ~deps:patch.Patch.dependencies
-          in
-          result := Ok patch;
-          { s with gameplan; orchestrator });
-  !result
+let commit t f =
+  Eio.Mutex.lock t.mutex;
+  match f t.snap with
+  | next, value -> (
+      match t.durable_store next with
+      | Ok () ->
+          t.snap <- next;
+          Eio.Mutex.unlock t.mutex;
+          Ok value
+      | Error message ->
+          Eio.Mutex.unlock t.mutex;
+          Error message)
+  | exception ex ->
+      Eio.Mutex.unlock t.mutex;
+      raise ex
+
+let commit_orchestrator t f =
+  commit t (fun s -> ({ s with orchestrator = f s.orchestrator }, ()))
+
+let commit_orchestrator_returning t f =
+  commit t (fun s ->
+      let orchestrator, value = f s.orchestrator in
+      ({ s with orchestrator }, value))
 
 let update_activity_log t f =
   update t (fun s -> { s with activity_log = f s.activity_log })

@@ -20,29 +20,21 @@ type command =
   | Noop
   | Timeline
   | Send_message of string
-  | Add_pr of Types.Pr_number.t
   | Add_worktree of string
-  | Remove_patch
   | Open_in_browser
 [@@deriving show, eq]
 
 (** Input mode for the TUI prompt. *)
 type input_mode =
   | Normal
-  | Prompt_pr  (** Buffer holds digits for PR number *)
   | Prompt_worktree  (** Buffer holds path string *)
   | Prompt_message  (** Buffer holds message text, detail view only *)
   | Prompt_broadcast  (** Buffer holds message to send to all active patches *)
   | Manage_patch  (** Menu of break-glass patch actions, detail view only *)
-  | Prompt_patch_desc  (** Add-patch step 1: buffer holds the description *)
-  | Select_patch_deps
-      (** Add-patch step 2: multi-select dependency overlay (not a text prompt)
-      *)
 [@@deriving show, eq]
 
 val prompt_prefix : input_mode -> string
-(** Returns the prompt prefix for each mode, for example ["PR #: "] or ["> "].
-*)
+(** Returns the prompt prefix for each mode. *)
 
 val of_key : Term_key.t -> command
 (** Translate a key press into a TUI command. *)

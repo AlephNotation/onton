@@ -51,7 +51,7 @@ let sync_session_id_sidecars ~snapshot_path (snap : Runtime.snapshot) =
         let path =
           session_id_path ~snapshot_path ~patch_id:agent.Patch_agent.patch_id
         in
-        match (agent.Patch_agent.llm_session_id, agent.Patch_agent.busy) with
+        match (Patch_agent.llm_session_id agent, Patch_agent.is_busy agent) with
         | None, false ->
             (* The patch is idle and has no recorded id; clean up any stale
                sidecar.  We do NOT delete while the patch is busy: an
@@ -70,8 +70,8 @@ let overlay_session_id_sidecars ~snapshot_path (snap : Runtime.snapshot) =
           session_id_path ~snapshot_path ~patch_id:agent.Patch_agent.patch_id
         in
         if
-          agent.Patch_agent.busy
-          && Option.is_none agent.Patch_agent.llm_session_id
+          Patch_agent.is_busy agent
+          && Option.is_none (Patch_agent.llm_session_id agent)
           && Stdlib.Sys.file_exists path
         then
           try
@@ -106,8 +106,6 @@ let string_member key json =
   | Some (`String s) -> s
   | _ -> raise (Decode_error (Printf.sprintf "%s: expected a string" key))
 
-let string_member_opt key json = Json.string_field key json
-
 let int_member key json =
   match Json.field key json with
   | Some (`Int n) -> n
@@ -124,26 +122,52 @@ let list_member key json =
   | None -> raise (Decode_error (Printf.sprintf "%s: expected a list" key))
   | Some _ -> raise (Decode_error (Printf.sprintf "%s: expected a list" key))
 
+let required_member key json =
+  match json with
+  | `Assoc fields -> (
+      match List.Assoc.find fields ~equal:String.equal key with
+      | Some value -> value
+      | None -> raise (Decode_error (Printf.sprintf "%s: missing field" key)))
+  | _ -> raise (Decode_error "expected an object")
+
+let decode_value key decoder value =
+  match Json.try_of_yojson decoder value with
+  | Ok value -> value
+  | Error message -> raise (Decode_error (Printf.sprintf "%s: %s" key message))
+
+let decode_member key decoder json =
+  decode_value key decoder (required_member key json)
+
+let decode_result_member key decoder json =
+  match decoder (required_member key json) with
+  | Ok value -> value
+  | Error message -> raise (Decode_error (Printf.sprintf "%s: %s" key message))
+
+let nullable_member key decoder json =
+  match required_member key json with
+  | `Null -> None
+  | value -> Some (decoder value)
+
+let nullable_string_member key json =
+  nullable_member key
+    (function
+      | `String value -> value
+      | _ -> raise (Decode_error (Printf.sprintf "%s: expected a string" key)))
+    json
+
+let string_list_member key json =
+  List.map (list_member key json) ~f:(function
+    | `String value -> value
+    | _ -> raise (Decode_error (Printf.sprintf "%s: expected strings" key)))
+
+let int_list_member key json =
+  List.map (list_member key json) ~f:(function
+    | `Int value -> value
+    | _ -> raise (Decode_error (Printf.sprintf "%s: expected integers" key)))
+
 let to_assoc = function
   | `Assoc kvs -> kvs
   | _ -> raise (Decode_error "expected an object")
-
-let int_member_opt key json =
-  match member key json with
-  | `Null -> None
-  | `Int n -> Some n
-  | _ -> raise (Decode_error (Printf.sprintf "%s: expected an int" key))
-
-let bool_member_opt key json =
-  match member key json with
-  | `Null -> None
-  | `Bool b -> Some b
-  | _ -> raise (Decode_error (Printf.sprintf "%s: expected a bool" key))
-
-let legacy_mergeability_unknown json =
-  match string_member_opt "merge_state_status" json with
-  | Some status -> String.equal status "UNKNOWN"
-  | None -> false
 
 let result_all xs =
   List.fold_right xs ~init:(Ok []) ~f:(fun x acc ->
@@ -156,24 +180,160 @@ let try_of_yojson = Json.try_of_yojson
 
 (* ---------- Patch_agent ---------- *)
 
+let activity_to_yojson = function
+  | Patch_agent.Inactive -> `Assoc [ ("state", `String "inactive") ]
+  | Patch_agent.Interrupted { operation; message_id } ->
+      `Assoc
+        [
+          ("state", `String "interrupted");
+          ( "operation",
+            Option.value_map operation ~default:`Null
+              ~f:Operation_kind.yojson_of_t );
+          ( "message_id",
+            Option.value_map message_id ~default:`Null ~f:Message_id.yojson_of_t
+          );
+        ]
+  | Patch_agent.Active { operation; phase; message_id } ->
+      `Assoc
+        [
+          ("state", `String "active");
+          ( "operation",
+            Option.value_map operation ~default:`Null
+              ~f:Operation_kind.yojson_of_t );
+          ("phase", Patch_agent.yojson_of_op_state phase);
+          ( "message_id",
+            Option.value_map message_id ~default:`Null ~f:Message_id.yojson_of_t
+          );
+        ]
+
+let activity_of_yojson json =
+  match string_member "state" json with
+  | "inactive" -> Patch_agent.Inactive
+  | "interrupted" ->
+      Patch_agent.Interrupted
+        {
+          operation =
+            nullable_member "operation"
+              (decode_value "activity.operation" Operation_kind.t_of_yojson)
+              json;
+          message_id =
+            Option.map
+              (nullable_string_member "message_id" json)
+              ~f:Message_id.of_string;
+        }
+  | "active" ->
+      let operation =
+        nullable_member "operation"
+          (decode_value "activity.operation" Operation_kind.t_of_yojson)
+          json
+      in
+      let phase = decode_member "phase" Patch_agent.op_state_of_yojson json in
+      let message_id =
+        Option.map
+          (nullable_string_member "message_id" json)
+          ~f:Message_id.of_string
+      in
+      Patch_agent.Active { operation; phase; message_id }
+  | state ->
+      raise
+        (Decode_error (Printf.sprintf "activity.state: unknown value %S" state))
+
+let session_to_yojson = function
+  | Patch_agent.Not_started -> `Assoc [ ("state", `String "not_started") ]
+  | Patch_agent.Started { resume_id; fallback } ->
+      `Assoc
+        [
+          ("state", `String "started");
+          ( "resume_id",
+            Option.value_map resume_id ~default:`Null ~f:(fun id -> `String id)
+          );
+          ("fallback", Patch_agent.yojson_of_session_fallback fallback);
+        ]
+
+let session_of_yojson json =
+  match string_member "state" json with
+  | "not_started" -> Patch_agent.Not_started
+  | "started" ->
+      Patch_agent.Started
+        {
+          resume_id = nullable_string_member "resume_id" json;
+          fallback =
+            decode_member "fallback" Patch_agent.session_fallback_of_yojson json;
+        }
+  | state ->
+      raise
+        (Decode_error (Printf.sprintf "session.state: unknown value %S" state))
+
+let json_number key = function
+  | `Float value -> value
+  | `Int value -> Float.of_int value
+  | `Intlit value -> (
+      match Float.of_string_opt value with
+      | Some value -> value
+      | None ->
+          raise (Decode_error (Printf.sprintf "%s: expected a number" key)))
+  | _ -> raise (Decode_error (Printf.sprintf "%s: expected a number" key))
+
+let automerge_to_yojson = function
+  | Patch_agent.Disabled -> `Assoc [ ("state", `String "disabled") ]
+  | Patch_agent.Enabled { deadline; failure_count } ->
+      `Assoc
+        [
+          ("state", `String "enabled");
+          ( "deadline",
+            Option.value_map deadline ~default:`Null ~f:(fun value ->
+                `Float value) );
+          ("failure_count", `Int failure_count);
+        ]
+
+let automerge_of_yojson json =
+  match string_member "state" json with
+  | "disabled" -> Patch_agent.Disabled
+  | "enabled" ->
+      Patch_agent.Enabled
+        {
+          deadline = nullable_member "deadline" (json_number "deadline") json;
+          failure_count = int_member "failure_count" json;
+        }
+  | state ->
+      raise
+        (Decode_error (Printf.sprintf "automerge.state: unknown value %S" state))
+
+let review_to_yojson = function
+  | Patch_agent.Review_not_requested ->
+      `Assoc [ ("state", `String "not_requested") ]
+  | Patch_agent.Review_requested head_oid ->
+      `Assoc [ ("state", `String "requested"); ("head_oid", `String head_oid) ]
+  | Patch_agent.Review_failed { head_oid; error } ->
+      `Assoc
+        [
+          ("state", `String "failed");
+          ("head_oid", `String head_oid);
+          ("error", `String error);
+        ]
+
+let review_of_yojson json =
+  match string_member "state" json with
+  | "not_requested" -> Patch_agent.Review_not_requested
+  | "requested" -> Patch_agent.Review_requested (string_member "head_oid" json)
+  | "failed" ->
+      Patch_agent.Review_failed
+        {
+          head_oid = string_member "head_oid" json;
+          error = string_member "error" json;
+        }
+  | state ->
+      raise
+        (Decode_error (Printf.sprintf "review.state: unknown value %S" state))
+
 let patch_agent_to_yojson (a : Patch_agent.t) =
   `Assoc
     [
       ("patch_id", Patch_id.yojson_of_t a.patch_id);
       ("branch", Branch.yojson_of_t a.branch);
       ("pr_status", Patch_pr_status.yojson_of_t a.pr_status);
-      (* Legacy field, written alongside [pr_status] so an older onton binary
-         can still load snapshots produced by this version. The legacy reader
-         maps null -> Absent and bare int -> Present, which silently
-         degrades a Missing PR to Present on downgrade — safe, because the
-         poller will re-evaluate and re-Mark on the next cycle. Remove once
-         the downgrade window has closed. *)
-      ( "pr_number",
-        match Patch_agent.pr_number a with
-        | None -> `Null
-        | Some n -> Pr_number.yojson_of_t n );
-      ("has_session", `Bool a.has_session);
-      ("busy", `Bool a.busy);
+      ("session", session_to_yojson a.session);
+      ("activity", activity_to_yojson a.activity);
       ("merged", `Bool a.merged);
       ("queue", `List (List.map a.queue ~f:Operation_kind.yojson_of_t));
       ("satisfies", `Bool a.satisfies);
@@ -189,8 +349,6 @@ let patch_agent_to_yojson (a : Patch_agent.t) =
         | Some b -> Branch.yojson_of_t b );
       ("ci_failure_count", `Int a.ci_failure_count);
       ("max_ci_failures", `Int a.max_ci_failures);
-      ( "session_fallback",
-        Patch_agent.yojson_of_session_fallback a.session_fallback );
       ( "human_messages",
         `List (List.map a.human_messages ~f:(fun s -> `String s)) );
       ( "inflight_human_messages",
@@ -204,6 +362,10 @@ let patch_agent_to_yojson (a : Patch_agent.t) =
             `String s) );
       ("unresolved_comment_count", `Int a.unresolved_comment_count);
       ("mergeability_unknown", `Bool a.mergeability_unknown);
+      ("merge_queue_required", `Bool a.merge_queue_required);
+      ( "merge_queue_entry",
+        Option.value_map a.merge_queue_entry ~default:`Null
+          ~f:Pr_state.yojson_of_merge_queue_entry );
       ("is_draft", `Bool a.is_draft);
       ("pr_body_delivered", `Bool a.pr_body_delivered);
       ("pr_body_artifact_miss_count", `Int a.pr_body_artifact_miss_count);
@@ -227,290 +389,90 @@ let patch_agent_to_yojson (a : Patch_agent.t) =
       ("base_contains_merged_siblings", `Bool a.base_contains_merged_siblings);
       ("anchor_history", Anchor_history.yojson_of_t a.anchor_history);
       ("checks_passing", `Bool a.checks_passing);
-      ( "current_op",
-        match a.current_op with
-        | None -> `Null
-        | Some op -> Operation_kind.yojson_of_t op );
-      ("current_op_state", Patch_agent.yojson_of_op_state a.current_op_state);
-      ( "current_message_id",
-        match a.current_message_id with
-        | None -> `Null
-        | Some id -> Message_id.yojson_of_t id );
       ("generation", `Int a.generation);
       ( "worktree_path",
         match a.worktree_path with None -> `Null | Some p -> `String p );
       ("branch_blocked", `Bool a.branch_blocked);
-      ( "llm_session_id",
-        match a.llm_session_id with None -> `Null | Some s -> `String s );
-      ("automerge_enabled", `Bool a.automerge_enabled);
-      ( "automerge_deadline",
-        match a.automerge_deadline with None -> `Null | Some f -> `Float f );
-      (* [automerge_inflight] is intentionally not persisted: it guards an
-         in-flight GitHub call, which cannot still be running across a
-         supervisor restart. Deserialization hard-codes [false] to match. *)
-      ( "review_requested_for_oid",
-        Option.value_map a.review_requested_for_oid ~default:`Null ~f:(fun s ->
-            `String s) );
-      ("review_request_inflight", `Bool a.review_request_inflight);
-      ("automerge_failure_count", `Int a.automerge_failure_count);
+      ("automerge", automerge_to_yojson a.automerge);
+      ("review", review_to_yojson a.review);
       ( "delivered_ci_run_ids",
         `List (List.map a.delivered_ci_run_ids ~f:(fun i -> `Int i)) );
     ]
 
-let patch_agent_of_yojson ~gameplan json =
-  let ( let* ) r f = Result.bind r ~f in
-  let* queue =
-    result_all
-      (List.map (list_member "queue" json) ~f:(fun j ->
-           try_of_yojson Operation_kind.t_of_yojson_compat j))
+let patch_agent_of_yojson_unsafe json =
+  let nullable_decoded key decoder =
+    nullable_member key (decode_value key decoder) json
   in
-  let human_messages =
-    match member "human_messages" json with
-    | `List items -> List.filter_map items ~f:(fun j -> Json.string j)
-    | _ -> []
+  let nullable_branch key =
+    Option.map (nullable_string_member key json) ~f:Branch.of_string
   in
-  let inflight_human_messages =
-    match member "inflight_human_messages" json with
-    | `List items -> List.filter_map items ~f:(fun j -> Json.string j)
-    | _ -> []
-  in
-  let* session_fallback =
-    match member "session_fallback" json with
-    | `Null -> Error "patch_agent: missing session_fallback"
-    | v -> try_of_yojson Patch_agent.session_fallback_of_yojson v
-  in
-  let ci_checks_raw = list_member "ci_checks" json in
-  let* ci_checks =
-    result_all
-      (List.map ci_checks_raw ~f:(fun j -> try_of_yojson Ci_check.t_of_yojson j))
-  in
-  let has_session = bool_member "has_session" json in
-  Ok
-    (Patch_agent.restore
-       ~patch_id:(Patch_id.of_string (string_member "patch_id" json))
-       ~branch:
-         (let pid = string_member "patch_id" json in
-          (* Backward compat: old ad-hoc agents stored a synthetic "adhoc-N"
-             branch and the real branch in head_branch. Prefer head_branch
-             when present to migrate to the unified branch field. *)
-          let raw = string_member_opt "branch" json in
-          let head = string_member_opt "head_branch" json in
-          (* Treat synthetic "adhoc-N" raw values as unresolvable so they
-             fall through to the gameplan/pid default instead of creating
-             ghost worktrees that silently block worktree creation. *)
-          let resolved =
-            match head with
-            | Some _ -> head
-            | None -> (
-                match raw with
-                | Some r
-                  when String.is_prefix r ~prefix:"adhoc-"
-                       && String.for_all (String.drop_prefix r 6)
-                            ~f:Char.is_digit ->
-                    None
-                | _ -> raw)
-          in
-          Branch.of_string
-            (Option.value resolved
-               ~default:
-                 (match
-                    List.find gameplan.Gameplan.patches ~f:(fun p ->
-                        String.equal (Patch_id.to_string p.Patch.id) pid)
-                  with
-                 | Some p -> Branch.to_string p.Patch.branch
-                 | None -> pid)))
-       ~pr_status:
-         (match member "pr_status" json with
-         | `Null -> (
-             (* Legacy snapshot: no [pr_status] field. Derive from the legacy
-                [pr_number] field: int -> Present, null -> Absent. Missing
-                cannot appear in legacy data (the field was added with the
-                state). *)
-             match int_member_opt "pr_number" json with
-             | None -> Patch_pr_status.Absent
-             | Some n -> Patch_pr_status.Present (Pr_number.of_int n))
-         | v -> (
-             match Patch_pr_status.t_of_yojson_compat v with
-             | Ok s -> s
-             | Error _ -> (
-                 (* Malformed [pr_status] — fall back to the legacy field as
-                     a last resort so a single bad write doesn't lose the
-                     agent entirely. *)
-                 match int_member_opt "pr_number" json with
-                 | None -> Patch_pr_status.Absent
-                 | Some n -> Patch_pr_status.Present (Pr_number.of_int n))))
-       ~has_session ~busy:(bool_member "busy" json)
-       ~merged:(bool_member "merged" json)
-       ~queue
-       ~satisfies:(bool_member "satisfies" json)
-       ~changed:(bool_member "changed" json)
-       ~has_conflict:(bool_member "has_conflict" json)
-       ~base_branch:
-         (string_member_opt "base_branch" json |> Option.map ~f:Branch.of_string)
-       ~notified_base_branch:
-         (match string_member_opt "notified_base_branch" json with
-         | Some s -> Some (Branch.of_string s)
-         | None ->
-             (* Backward compat: only infer "already notified" for agents with
-                an active/established session. *)
-             if has_session then
-               string_member_opt "base_branch" json
-               |> Option.map ~f:Branch.of_string
-             else None)
-       ~ci_failure_count:(int_member "ci_failure_count" json)
-       ~max_ci_failures:
-         (* Legacy snapshots predate the field; the built-in default matches
-            their behavior. [Runtime.create] restamps from config right after
-            restore either way. *)
-         (Option.value
-            (int_member_opt "max_ci_failures" json)
-            ~default:Patch_agent.default_max_ci_failures)
-       ~session_fallback ~human_messages ~inflight_human_messages ~ci_checks
-       ~merge_ready:(bool_member "merge_ready" json)
-       ~head_oid:(string_member_opt "head_oid" json)
-       ~review_decision:(string_member_opt "review_decision" json)
-       ~unresolved_comment_count:
-         (Option.value
-            (int_member_opt "unresolved_comment_count" json)
-            ~default:0)
-       ~mergeability_unknown:
-         (match bool_member_opt "mergeability_unknown" json with
-         | Some v -> v
-         | None -> legacy_mergeability_unknown json)
-       ~merge_queue_required:
-         (Option.value
-            (bool_member_opt "merge_queue_required" json)
-            ~default:false)
-       ~merge_queue_entry:
-         (match member "merge_queue_entry" json with
-         | `Null -> None
-         | v -> Result.ok (try_of_yojson Pr_state.merge_queue_entry_of_yojson v))
-       ~merge_commit_sha:(string_member_opt "merge_commit_sha" json)
-       ~base_contains_merged_siblings:
-         (* Default [false] (fail-closed) when the key is absent — an older
-            snapshot predating this field must not fail-open the Start/Rebase
-            gate for a fan-in patch on load. Snapshots written by this version
-            always include the key, so round-trip identity is preserved; the
-            first poll recomputes the live value either way. *)
-         (Option.value
-            (bool_member_opt "base_contains_merged_siblings" json)
-            ~default:false)
-       ~is_draft:(bool_member "is_draft" json)
-       ~pr_body_delivered:
-         (Option.value (bool_member_opt "pr_body_delivered" json) ~default:true)
-       ~pr_body_artifact_miss_count:
-         (Option.value
-            (int_member_opt "pr_body_artifact_miss_count" json)
-            ~default:0)
-       ~review_unresolved_cycle_count:
-         (Option.value
-            (int_member_opt "review_unresolved_cycle_count" json)
-            ~default:0)
-       ~start_attempts_without_pr:(int_member "start_attempts_without_pr" json)
-       ~conflict_noop_count:
-         (Option.value (int_member_opt "conflict_noop_count" json) ~default:0)
-       ~no_commits_push_count:
-         (Option.value (int_member_opt "no_commits_push_count" json) ~default:0)
-       ~context_exhaustion_count:
-         (Option.value
-            (int_member_opt "context_exhaustion_count" json)
-            ~default:0)
-       ~push_failure_count:
-         (Option.value (int_member_opt "push_failure_count" json) ~default:0)
-       ~rebase_failure_count:
-         (Option.value (int_member_opt "rebase_failure_count" json) ~default:0)
-       ~branch_rebased_onto_sha:
-         (string_member_opt "branch_rebased_onto_sha" json)
-       ~anchor_history:
-         (match member "anchor_history" json with
-         | `Null -> Anchor_history.empty
-         | v -> (
-             match Anchor_history.of_yojson_opt v with
-             | Some h -> h
-             | None -> Anchor_history.empty))
-       ~branch_rebased_onto:
-         (match string_member_opt "branch_rebased_onto" json with
-         | Some s -> Some (Branch.of_string s)
-         | None ->
-             (* Backward compat: assume existing PR agents are rebased onto
-                their current base_branch so drift detection activates if
-                GitHub later auto-retargets the PR. *)
-             if Option.is_some (int_member_opt "pr_number" json) then
-               string_member_opt "base_branch" json
-               |> Option.map ~f:Branch.of_string
-             else None)
-       ~checks_passing:(bool_member "checks_passing" json)
-       ~current_op:
-         (match member "current_op" json with
-         | `Null -> None
-         | v -> (
-             match try_of_yojson Operation_kind.t_of_yojson_compat v with
-             | Ok op -> Some op
-             | Error _ -> None))
-       ~current_op_state:
-         (match member "current_op_state" json with
-         | `Null ->
-             (* Field absent in snapshots predating this feature (missing key
-                returns [`Null]) — default to [Queued]. A live agent will be
-                re-promoted to [Running] when its fiber resumes after restart.
-                An explicit JSON [null] would also land here and is treated
-                the same way. *)
-             Patch_agent.Queued
-         | v -> (
-             match try_of_yojson Patch_agent.op_state_of_yojson v with
-             | Ok s -> s
-             | Error _ -> Patch_agent.Queued))
-       ~current_message_id:
-         (string_member_opt "current_message_id" json
-         |> Option.map ~f:Message_id.of_string)
-       ~generation:(int_member "generation" json)
-       ~worktree_path:(string_member_opt "worktree_path" json)
-       ~branch_blocked:(bool_member "branch_blocked" json)
-       ~llm_session_id:(string_member_opt "llm_session_id" json)
-       ~automerge_enabled:
-         (Option.value
-            (bool_member_opt "automerge_enabled" json)
-            ~default:false)
-       ~automerge_deadline:
-         (match member "automerge_deadline" json with
-         | `Null -> None
-         | `Float f -> Some f
-         | `Int i -> Some (Float.of_int i)
-         | `Intlit s ->
-             (* Yojson emits [`Intlit] for integers that don't fit in an OCaml
-                int. Unix timestamps fit in a [float] on all supported
-                platforms, so conversion effectively always succeeds. If the
-                literal is malformed (corrupted snapshot), drop the deadline
-                rather than raise — [reconcile_automerge] will re-arm a fresh
-                idle window on the next tick once the patch is a candidate. *)
-             Float.of_string_opt s
-         | _ ->
-             (* Unexpected JSON shape (e.g. [`String], [`Bool], [`List]) — the
-                snapshot is corrupted or was written by an incompatible version.
-                Treat as absent; reconcile re-arms on the next tick. *)
-             None)
-       ~automerge_inflight:
-         (* Reset inflight on restore: any inflight flag persisted across a
-            supervisor restart refers to a merge call that cannot still be
-            running. Assuming [false] is the safe recovery default. *)
-         false
-       ~review_requested_for_oid:
-         (string_member_opt "review_requested_for_oid" json)
-       ~review_request_inflight:
-         (Option.value
-            (bool_member_opt "review_request_inflight" json)
-            ~default:false)
-       ~automerge_failure_count:
-         (Option.value
-            (int_member_opt "automerge_failure_count" json)
-            ~default:0)
-       ~delivered_ci_run_ids:
-         (match member "delivered_ci_run_ids" json with
-         | `List items ->
-             List.filter_map items ~f:(fun j -> Json.int j)
-             |> List.dedup_and_sort ~compare:Int.compare
-         | _ -> [])
-       ())
+  Patch_agent.restore
+    ~patch_id:(Patch_id.of_string (string_member "patch_id" json))
+    ~branch:(Branch.of_string (string_member "branch" json))
+    ~pr_status:
+      (decode_result_member "pr_status" Patch_pr_status.t_of_yojson json)
+    ~session:(session_of_yojson (required_member "session" json))
+    ~activity:(activity_of_yojson (required_member "activity" json))
+    ~merged:(bool_member "merged" json)
+    ~queue:
+      (List.map (list_member "queue" json) ~f:(fun value ->
+           decode_value "queue" Operation_kind.t_of_yojson value))
+    ~satisfies:(bool_member "satisfies" json)
+    ~changed:(bool_member "changed" json)
+    ~has_conflict:(bool_member "has_conflict" json)
+    ~base_branch:(nullable_branch "base_branch")
+    ~notified_base_branch:(nullable_branch "notified_base_branch")
+    ~ci_failure_count:(int_member "ci_failure_count" json)
+    ~max_ci_failures:(int_member "max_ci_failures" json)
+    ~human_messages:(string_list_member "human_messages" json)
+    ~inflight_human_messages:(string_list_member "inflight_human_messages" json)
+    ~ci_checks:
+      (List.map (list_member "ci_checks" json) ~f:(fun value ->
+           decode_value "ci_checks" Ci_check.t_of_yojson value))
+    ~merge_ready:(bool_member "merge_ready" json)
+    ~head_oid:(nullable_string_member "head_oid" json)
+    ~review_decision:(nullable_string_member "review_decision" json)
+    ~unresolved_comment_count:(int_member "unresolved_comment_count" json)
+    ~mergeability_unknown:(bool_member "mergeability_unknown" json)
+    ~merge_queue_required:(bool_member "merge_queue_required" json)
+    ~merge_queue_entry:
+      (nullable_decoded "merge_queue_entry" Pr_state.merge_queue_entry_of_yojson)
+    ~merge_commit_sha:(nullable_string_member "merge_commit_sha" json)
+    ~base_contains_merged_siblings:
+      (bool_member "base_contains_merged_siblings" json)
+    ~is_draft:(bool_member "is_draft" json)
+    ~pr_body_delivered:(bool_member "pr_body_delivered" json)
+    ~pr_body_artifact_miss_count:(int_member "pr_body_artifact_miss_count" json)
+    ~review_unresolved_cycle_count:
+      (int_member "review_unresolved_cycle_count" json)
+    ~start_attempts_without_pr:(int_member "start_attempts_without_pr" json)
+    ~conflict_noop_count:(int_member "conflict_noop_count" json)
+    ~no_commits_push_count:(int_member "no_commits_push_count" json)
+    ~context_exhaustion_count:(int_member "context_exhaustion_count" json)
+    ~push_failure_count:(int_member "push_failure_count" json)
+    ~rebase_failure_count:(int_member "rebase_failure_count" json)
+    ~branch_rebased_onto_sha:
+      (nullable_string_member "branch_rebased_onto_sha" json)
+    ~anchor_history:
+      (decode_member "anchor_history" Anchor_history.t_of_yojson json)
+    ~branch_rebased_onto:(nullable_branch "branch_rebased_onto")
+    ~checks_passing:(bool_member "checks_passing" json)
+    ~generation:(int_member "generation" json)
+    ~worktree_path:(nullable_string_member "worktree_path" json)
+    ~branch_blocked:(bool_member "branch_blocked" json)
+    ~automerge:(automerge_of_yojson (required_member "automerge" json))
+    ~review:(review_of_yojson (required_member "review" json))
+    ~delivered_ci_run_ids:
+      (int_list_member "delivered_ci_run_ids" json
+      |> List.dedup_and_sort ~compare:Int.compare)
+    ()
+
+let patch_agent_of_yojson json =
+  try Ok (patch_agent_of_yojson_unsafe json) with
+  | Decode_error message ->
+      Error (Printf.sprintf "malformed patch agent: %s" message)
+  | Invalid_argument message ->
+      Error (Printf.sprintf "malformed patch agent: %s" message)
 
 (* ---------- Activity_log ---------- *)
 
@@ -545,6 +507,93 @@ let activity_log_of_yojson json =
               Activity_log.add_event acc entry)))
 
 (* ---------- Orchestrator ---------- *)
+
+let github_action_to_yojson = function
+  | Github_effect.Set_pr_draft { pr_number; draft } ->
+      `Assoc
+        [
+          ("kind", `String "set_pr_draft");
+          ("pr_number", Pr_number.yojson_of_t pr_number);
+          ("draft", `Bool draft);
+        ]
+  | Github_effect.Set_pr_base { pr_number; base } ->
+      `Assoc
+        [
+          ("kind", `String "set_pr_base");
+          ("pr_number", Pr_number.yojson_of_t pr_number);
+          ("base", Branch.yojson_of_t base);
+        ]
+  | Github_effect.Request_review { pr_number; team_slug; head_oid } ->
+      `Assoc
+        [
+          ("kind", `String "request_review");
+          ("pr_number", Pr_number.yojson_of_t pr_number);
+          ("team_slug", `String team_slug);
+          ("head_oid", `String head_oid);
+        ]
+  | Github_effect.Direct_merge { pr_number } ->
+      `Assoc
+        [
+          ("kind", `String "direct_merge");
+          ("pr_number", Pr_number.yojson_of_t pr_number);
+        ]
+  | Github_effect.Enqueue { pr_number } ->
+      `Assoc
+        [
+          ("kind", `String "enqueue");
+          ("pr_number", Pr_number.yojson_of_t pr_number);
+        ]
+  | Github_effect.Dequeue { pr_number; entry_id } ->
+      `Assoc
+        [
+          ("kind", `String "dequeue");
+          ("pr_number", Pr_number.yojson_of_t pr_number);
+          ("entry_id", `String entry_id);
+        ]
+
+let github_action_of_yojson json =
+  let pr_number () = Pr_number.of_int (int_member "pr_number" json) in
+  match string_member "kind" json with
+  | "set_pr_draft" ->
+      Github_effect.Set_pr_draft
+        { pr_number = pr_number (); draft = bool_member "draft" json }
+  | "set_pr_base" ->
+      Github_effect.Set_pr_base
+        {
+          pr_number = pr_number ();
+          base = Branch.of_string (string_member "base" json);
+        }
+  | "request_review" ->
+      Github_effect.Request_review
+        {
+          pr_number = pr_number ();
+          team_slug = string_member "team_slug" json;
+          head_oid = string_member "head_oid" json;
+        }
+  | "direct_merge" -> Github_effect.Direct_merge { pr_number = pr_number () }
+  | "enqueue" -> Github_effect.Enqueue { pr_number = pr_number () }
+  | "dequeue" ->
+      Github_effect.Dequeue
+        { pr_number = pr_number (); entry_id = string_member "entry_id" json }
+  | kind ->
+      raise (Decode_error (Printf.sprintf "unknown GitHub action: %s" kind))
+
+let github_status_to_yojson = function
+  | Github_effect.Pending -> `Assoc [ ("state", `String "pending") ]
+  | Github_effect.Running -> `Assoc [ ("state", `String "running") ]
+  | Github_effect.Retry_at at ->
+      `Assoc [ ("state", `String "retry_at"); ("at", `Float at) ]
+  | Github_effect.Failed -> `Assoc [ ("state", `String "failed") ]
+
+let github_status_of_yojson json =
+  match string_member "state" json with
+  | "pending" -> Github_effect.Pending
+  | "running" -> Github_effect.Running
+  | "retry_at" -> Github_effect.Retry_at (json_number "at" (member "at" json))
+  | "failed" -> Github_effect.Failed
+  | state ->
+      raise
+        (Decode_error (Printf.sprintf "unknown GitHub effect state: %s" state))
 
 let orchestrator_to_yojson (o : Orchestrator.t) =
   let agents =
@@ -594,11 +643,27 @@ let orchestrator_to_yojson (o : Orchestrator.t) =
                   | Orchestrator.Obsolete -> "Obsolete") );
             ] ))
   in
+  let github_outbox =
+    Orchestrator.all_github_effects o
+    |> List.map ~f:(fun (command : Github_effect.t) ->
+        ( Effect_id.to_string command.id,
+          `Assoc
+            [
+              ("patch_id", Patch_id.yojson_of_t command.patch_id);
+              ("action", github_action_to_yojson command.action);
+              ("status", github_status_to_yojson command.status);
+              ("attempts", `Int command.attempts);
+              ( "last_error",
+                Option.value_map command.last_error ~default:`Null ~f:(fun e ->
+                    `String e) );
+            ] ))
+  in
   `Assoc
     [
       ("main_branch", Branch.yojson_of_t (Orchestrator.main_branch o));
       ("agents", `Assoc agents);
       ("outbox", `Assoc outbox);
+      ("github_outbox", `Assoc github_outbox);
     ]
 
 let action_of_yojson json =
@@ -611,8 +676,7 @@ let action_of_yojson json =
              Branch.of_string (string_member "base_branch" json) ))
   | "respond" ->
       let* op_kind =
-        try_of_yojson Operation_kind.t_of_yojson_compat
-          (member "operation_kind" json)
+        try_of_yojson Operation_kind.t_of_yojson (member "operation_kind" json)
       in
       Ok
         (Orchestrator.Respond
@@ -640,8 +704,7 @@ let orchestrator_of_yojson ~gameplan json =
       (result_all
          (member "agents" json |> to_assoc
          |> List.map ~f:(fun (key, value) ->
-             Result.bind (patch_agent_of_yojson ~gameplan value)
-               ~f:(fun agent ->
+             Result.bind (patch_agent_of_yojson value) ~f:(fun agent ->
                  let payload_id = Patch_id.to_string agent.patch_id in
                  if String.equal key payload_id then
                    Ok (Patch_id.of_string key, agent)
@@ -689,61 +752,60 @@ let orchestrator_of_yojson ~gameplan json =
                        (Printf.sprintf "duplicate outbox message_id: %s" key))
         in
         let* outbox = outbox in
+        let github_outbox =
+          member "github_outbox" json
+          |> to_assoc
+          |> List.fold
+               ~init:(Ok (Map.empty (module Effect_id)))
+               ~f:(fun acc_result (key, value) ->
+                 let* acc = acc_result in
+                 let effect_id = Effect_id.of_string key in
+                 let patch_id =
+                   Patch_id.of_string (string_member "patch_id" value)
+                 in
+                 let action = github_action_of_yojson (member "action" value) in
+                 let expected_id = Github_effect.identity ~patch_id action in
+                 if not (Effect_id.equal effect_id expected_id) then
+                   Error
+                     (Printf.sprintf
+                        "GitHub outbox key/payload mismatch: key=%s expected=%s"
+                        key
+                        (Effect_id.to_string expected_id))
+                 else
+                   let command =
+                     Github_effect.restore ~id:effect_id ~patch_id ~action
+                       ~status:(github_status_of_yojson (member "status" value))
+                       ~attempts:(int_member "attempts" value)
+                       ~last_error:(nullable_string_member "last_error" value)
+                   in
+                   match Map.add acc ~key:effect_id ~data:command with
+                   | `Ok acc -> Ok acc
+                   | `Duplicate ->
+                       Error
+                         (Printf.sprintf "duplicate GitHub outbox effect_id: %s"
+                            key))
+        in
+        let* github_outbox = github_outbox in
         let graph_pids =
           Graph.all_patch_ids graph |> Set.of_list (module Patch_id)
         in
         let agent_pids = Map.keys agents_map |> Set.of_list (module Patch_id) in
+        let github_command_pids =
+          Map.data github_outbox
+          |> List.map ~f:(fun command -> command.Github_effect.patch_id)
+          |> Set.of_list (module Patch_id)
+        in
         let missing_agent_pids = Set.diff graph_pids agent_pids in
         if not (Set.is_empty missing_agent_pids) then
-          Error "snapshot missing agent state for one or more gameplan patches"
+          Error "snapshot missing agent state for one or more plan patches"
+        else if not (Set.is_subset agent_pids ~of_:graph_pids) then
+          Error "snapshot contains agent state outside the plan"
+        else if not (Set.is_subset github_command_pids ~of_:agent_pids) then
+          Error "snapshot contains a GitHub command outside the plan"
         else
-          let adhoc_pids = Set.diff agent_pids graph_pids in
-          let graph = Set.fold adhoc_pids ~init:graph ~f:Graph.add_patch in
-          (* Infer stacking edges for ad-hoc patches whose persisted
-             base_branch matches another tracked unmerged agent's branch.
-             Mirrors the inference in [Orchestrator.add_agent] so a snapshot
-             restored after a stacked ad-hoc PR was added retains the edge
-             that drives detect_rebases on the dep's merge. *)
-          let branch_to_pid =
-            Map.fold agents_map
-              ~init:(Ok (Hashtbl.create (module String)))
-              ~f:(fun ~key:pid ~data:ag acc ->
-                match acc with
-                | Error _ as e -> e
-                | Ok tbl -> (
-                    let key = Branch.to_string ag.Patch_agent.branch in
-                    match Hashtbl.add tbl ~key ~data:pid with
-                    | `Ok -> Ok tbl
-                    | `Duplicate ->
-                        Error
-                          (Printf.sprintf "duplicate branch %s across agents"
-                             key)))
-          in
-          let* branch_to_pid = branch_to_pid in
-          let find_by_branch br =
-            Hashtbl.find branch_to_pid (Branch.to_string br)
-          in
-          let graph =
-            Set.fold adhoc_pids ~init:graph ~f:(fun g pid ->
-                match Map.find agents_map pid with
-                | None -> g
-                | Some ag -> (
-                    match ag.Patch_agent.base_branch with
-                    | None -> g
-                    | Some base when Branch.equal base main_branch -> g
-                    | Some base -> (
-                        match find_by_branch base with
-                        | None -> g
-                        | Some dep_pid when Patch_id.equal dep_pid pid -> g
-                        | Some dep_pid -> (
-                            match Map.find agents_map dep_pid with
-                            | Some dep_ag when not dep_ag.Patch_agent.merged ->
-                                Graph.add_dependency g pid ~dep:dep_pid
-                            | _ -> g))))
-          in
           Ok
-            (Orchestrator.restore ~graph ~agents:agents_map ~outbox ~main_branch
-               ()))
+            (Orchestrator.restore ~graph ~agents:agents_map ~outbox
+               ~github_outbox ~main_branch ()))
   with
   | Decode_error msg -> Error (Printf.sprintf "malformed orchestrator: %s" msg)
   | Invalid_argument msg ->
@@ -770,7 +832,7 @@ let transcripts_of_yojson json =
 let snapshot_to_yojson (snap : Runtime.snapshot) =
   `Assoc
     [
-      ("version", `Int 1);
+      ("version", `Int 7);
       ("orchestrator", orchestrator_to_yojson snap.orchestrator);
       ("activity_log", activity_log_to_yojson snap.activity_log);
       ("gameplan", Gameplan.yojson_of_t snap.gameplan);
@@ -780,7 +842,7 @@ let snapshot_to_yojson (snap : Runtime.snapshot) =
 let snapshot_of_yojson json =
   try
     let version = int_member "version" json in
-    if version <> 1 then
+    if version <> 7 then
       Error (Printf.sprintf "unsupported version: %d" version)
     else
       Result.bind
@@ -808,8 +870,12 @@ let save ~path (snap : Runtime.snapshot) =
   try
     let json = snapshot_to_yojson snap in
     let content = Yojson.Safe.pretty_to_string json in
-    Result.bind (write_file_atomically ~path ~content) ~f:(fun () ->
-        sync_session_id_sidecars ~snapshot_path:path snap)
+    Result.map (write_file_atomically ~path ~content) ~f:(fun () ->
+        (* The snapshot rename is the commit point. Sidecars are recovery hints,
+           and their delete-only janitor must not turn an already-committed
+           snapshot into a reported failure: Runtime would then retain the old
+           in-memory state while disk contained the new state. *)
+        ignore (sync_session_id_sidecars ~snapshot_path:path snap))
   with exn -> Error (Stdlib.Printexc.to_string exn)
 
 let load ~path =
@@ -846,20 +912,11 @@ let%test_module "session_id_sidecars" =
       Patch.
         {
           id = patch_id;
-          title = "Patch 5";
-          description = "";
+          goal = "Patch 5";
           branch = Branch.of_string "patch-5";
           dependencies = [];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         }
 
     let gameplan =
@@ -868,26 +925,30 @@ let%test_module "session_id_sidecars" =
           project_name = "sidecar-test";
           repo_owner = "";
           repo_name = "";
-          problem_statement = "";
-          solution_summary = "";
-          final_state_spec = "";
           patches = [ patch ];
-          current_state_analysis = "";
-          explicit_opinions = "";
-          acceptance_criteria = [];
-          open_questions = [];
-          functional_changes = [];
-          context_resources = [];
-          reachability_traces = [];
         }
 
     let snapshot ?(busy = false) ?llm_session_id () =
+      let activity =
+        if busy then
+          Patch_agent.Active
+            { operation = None; phase = Patch_agent.Running; message_id = None }
+        else Patch_agent.Inactive
+      in
+      let session =
+        if busy || Option.is_some llm_session_id then
+          Patch_agent.Started
+            {
+              resume_id = llm_session_id;
+              fallback = Patch_agent.Fresh_available;
+            }
+        else Patch_agent.Not_started
+      in
       let agent =
         Patch_agent.restore ~patch_id ~branch:patch.branch
-          ~pr_status:Patch_pr_status.Absent ~has_session:false ~busy
-          ~merged:false ~queue:[] ~satisfies:false ~changed:false
-          ~has_conflict:false ~base_branch:None ~notified_base_branch:None
-          ~ci_failure_count:0 ~session_fallback:Patch_agent.Fresh_available
+          ~pr_status:Patch_pr_status.Absent ~session ~activity ~merged:false
+          ~queue:[] ~satisfies:false ~changed:false ~has_conflict:false
+          ~base_branch:None ~notified_base_branch:None ~ci_failure_count:0
           ~human_messages:[] ~inflight_human_messages:[] ~ci_checks:[]
           ~merge_ready:false ~mergeability_unknown:false
           ~merge_queue_required:false ~merge_queue_entry:None
@@ -898,17 +959,16 @@ let%test_module "session_id_sidecars" =
           ~push_failure_count:0 ~rebase_failure_count:0
           ~branch_rebased_onto:None ~branch_rebased_onto_sha:None
           ~anchor_history:Anchor_history.empty ~checks_passing:false
-          ~current_op:None ~current_op_state:Patch_agent.Queued
-          ~current_message_id:None ~generation:0 ~worktree_path:None
-          ~branch_blocked:false ~llm_session_id ~automerge_enabled:false
-          ~automerge_deadline:None ~automerge_inflight:false
-          ~automerge_failure_count:0 ~delivered_ci_run_ids:[] ()
+          ~generation:0 ~worktree_path:None ~branch_blocked:false
+          ~automerge:Patch_agent.Disabled
+          ~review:Patch_agent.Review_not_requested ~delivered_ci_run_ids:[] ()
       in
       let orch =
         Orchestrator.restore
           ~graph:(Graph.of_patches [ patch ])
           ~agents:(Map.singleton (module Patch_id) patch_id agent)
           ~outbox:(Map.empty (module Message_id))
+          ~github_outbox:(Map.empty (module Effect_id))
           ~main_branch ()
       in
       {
@@ -943,7 +1003,8 @@ let%test_module "session_id_sidecars" =
             Orchestrator.find_agent loaded.Runtime.orchestrator patch_id
           with
           | Some agent ->
-              Option.equal String.equal agent.Patch_agent.llm_session_id
+              Option.equal String.equal
+                (Patch_agent.llm_session_id agent)
                 (Some "minted")
           | None -> false)
       | Error _ -> false
@@ -959,7 +1020,7 @@ let%test_module "session_id_sidecars" =
           match
             Orchestrator.find_agent loaded.Runtime.orchestrator patch_id
           with
-          | Some agent -> Option.is_none agent.Patch_agent.llm_session_id
+          | Some agent -> Option.is_none (Patch_agent.llm_session_id agent)
           | None -> false)
       | Error _ -> false
 

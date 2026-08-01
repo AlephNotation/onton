@@ -4,6 +4,11 @@
  (libraries onton onton_core))
 
 (test
+ (name test_patch_validator)
+ (modules test_patch_validator)
+ (libraries onton onton_core eio eio_main eio.unix unix))
+
+(test
  (name test_project_store)
  (modules test_project_store)
  (libraries onton unix))
@@ -41,13 +46,6 @@
  (name test_json)
  (modules test_json)
  (libraries onton_core base yojson ppx_yojson_conv_lib))
-
-(test
- (name test_gameplan_add_patch_properties)
- (modules test_gameplan_add_patch_properties)
- (libraries onton_core onton_test_support qcheck-core qcheck-core.runner base)
- (ocamlopt_flags (:standard -w -40-42))
- (ocamlc_flags (:standard -w -40-42)))
 
 (test
  (name test_patch_agent)
@@ -313,7 +311,7 @@
 (test
  (name test_properties)
  (modules test_properties)
- (libraries onton onton_core onton_test_support qcheck-core)
+ (libraries onton onton_core onton_test_support qcheck-core qcheck-core.runner)
  (ocamlopt_flags (:standard -w -40-42))
  (ocamlc_flags (:standard -w -40-42)))
 
@@ -378,6 +376,11 @@
 (test
  (name test_runtime_create)
  (modules test_runtime_create)
+ (libraries onton onton_core))
+
+(test
+ (name test_github_outbox)
+ (modules test_github_outbox)
  (libraries onton onton_core))
 
 (test
@@ -501,20 +504,6 @@
  (ocamlc_flags (:standard -w -40-42)))
 
 (test
- (name test_patch_pr_status_properties)
- (modules test_patch_pr_status_properties)
- (libraries onton_core qcheck-core qcheck-core.runner)
- (ocamlopt_flags (:standard -w -40-42))
- (ocamlc_flags (:standard -w -40-42)))
-
-(test
- (name test_rediscover_decision_properties)
- (modules test_rediscover_decision_properties)
- (libraries onton_core qcheck-core qcheck-core.runner)
- (ocamlopt_flags (:standard -w -40-42))
- (ocamlc_flags (:standard -w -40-42)))
-
-(test
  (name test_patch_controller)
  (modules test_patch_controller)
  (libraries onton onton_core onton_test_support qcheck-core qcheck-core.runner)
@@ -538,7 +527,7 @@
 (test
  (name test_interleaving_properties)
  (modules test_interleaving_properties)
- (libraries onton onton_core onton_test_support qcheck-core)
+ (libraries onton onton_core onton_test_support qcheck-core qcheck-core.runner)
  (ocamlopt_flags (:standard -w -40-42))
  (ocamlc_flags (:standard -w -40-42)))
 
@@ -619,11 +608,6 @@
  (name test_session_driver_telemetry)
  (modules test_session_driver_telemetry)
  (libraries onton onton_core unix))
-
-(test
- (name test_debug_upload)
- (modules test_debug_upload)
- (libraries onton onton_core qcheck-core unix))
 
 (test
  (name test_dependency_injection_functors)

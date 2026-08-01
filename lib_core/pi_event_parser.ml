@@ -59,10 +59,6 @@ let parse_event (line : string) : Types.Stream_event.t list =
           ]
       | _ -> [])
 
-let auto_model ~complexity =
-  ignore complexity;
-  None
-
 let%test "build_args without continue (no model)" =
   let args =
     build_args ~model:None ~cwd_path:"/tmp/work" ~patch_id:"patch-1"

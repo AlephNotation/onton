@@ -1,15 +1,7 @@
 (* @archlint.module interface
    @archlint.domain backend-registry *)
 
-(** Lazy cache of backend instances keyed by [(backend_name, model)].
-
-    A run can route different patches to different backends (see
-    [Repo_config.modelRouting]), so we may need several distinct [Llm_backend.t]
-    values during a single session — one per unique [(backend, model)] tuple
-    referenced by either the CLI flags or the routing map. Constructing them
-    eagerly would be wasteful when the routing only uses one or two; the
-    registry builds each on first lookup and caches it for the rest of the run.
-*)
+(** Lazy cache of backend instances keyed by [(backend_name, model)]. *)
 
 type t
 
@@ -32,19 +24,6 @@ val get : t -> backend:string -> model:string option -> kind
     request. Raises [Invalid_argument] for unrecognised backend names — callers
     are expected to validate against the known list before asking. *)
 
-val auto_model : backend:string -> complexity:int option -> string option
-(** Look up the named backend's hardcoded complexity → model ladder — the model
-    name it would resolve [--model auto] to for this complexity. Pure; no [t]
-    required, no IO. Raises [Invalid_argument] on unknown backend names,
-    matching {!get}. *)
-
-val resolve_model :
-  backend:string ->
-  model:string option ->
-  complexity:int option ->
-  string option
-(** Resolve the model name that should be shown or passed to lifecycle-specific
-    backend code for [(backend, model, complexity)]. [Some "auto"] is resolved
-    through {!auto_model}; backend-specific mandatory defaults, such as
-    [patch-agent]'s model argument, are also applied here so display and
-    execution agree. *)
+val resolve_model : backend:string -> model:string option -> string option
+(** Supply the concrete default required by [patch-agent]. Other backends keep
+    [None], allowing their provider to choose its own default. *)

@@ -20,10 +20,6 @@ type t = {
   patches_scroll_offset : int ref;
   patches_visible_count : int ref;
   detail_scrolls : (Types.Patch_id.t, int * bool) Stdlib.Hashtbl.t;
-  dep_select_cursor : int ref;
-      (** Highlighted row in the add-patch dependency-selection overlay. *)
-  dep_select_chosen : Set.M(Types.Patch_id).t ref;
-      (** Currently toggled-on dependencies in that overlay. *)
 }
 
 val create : unit -> t

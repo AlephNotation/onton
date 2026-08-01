@@ -24,7 +24,7 @@ module Make (Env : ENV) = struct
             match Orchestrator.find_agent orch patch_id with
             | None -> orch
             | Some before ->
-                if before.Patch_agent.busy then (
+                if Patch_agent.is_busy before then (
                   let orch' =
                     Orchestrator.apply_force_complete orch patch_id reason
                   in

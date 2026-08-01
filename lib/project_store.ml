@@ -40,15 +40,8 @@ let sessions_dir project_name =
 let config_path project_name =
   Stdlib.Filename.concat (project_dir project_name) "config.json"
 
-let gameplan_path project_name =
-  Stdlib.Filename.concat (project_dir project_name) "gameplan.md"
-
-let gameplan_json_path project_name =
-  Stdlib.Filename.concat (project_dir project_name) "gameplan.json"
-
-let stored_gameplan_path project_name =
-  let md = gameplan_path project_name in
-  if Stdlib.Sys.file_exists md then md else gameplan_json_path project_name
+let plan_path project_name =
+  Stdlib.Filename.concat (project_dir project_name) "plan.json"
 
 let artifacts_root project_name =
   Stdlib.Filename.concat (project_dir project_name) "artifacts"
@@ -58,8 +51,8 @@ let artifact_dir ~project_name ~patch_id =
     (artifacts_root project_name)
     (Types.Patch_id.to_string patch_id)
 
-let gameplan_artifact_path project_name =
-  Stdlib.Filename.concat (artifacts_root project_name) "gameplan.json"
+let plan_artifact_path project_name =
+  Stdlib.Filename.concat (artifacts_root project_name) "plan.json"
 
 let pr_body_artifact_path ~project_name ~patch_id =
   Stdlib.Filename.concat (artifact_dir ~project_name ~patch_id) "pr-body.md"
@@ -132,6 +125,7 @@ let reset_artifact_dir path =
             | Unix.Unix_error (Unix.EISDIR, _, _) -> ())
 
 type stored_config = {
+  schema_version : int;
   project_name : string;
   github_owner : string;
   github_repo : string;
@@ -141,15 +135,8 @@ type stored_config = {
   poll_interval : float;
   repo_root : string;
   max_concurrency : int;
-  max_ci_failures : int; [@yojson.default Patch_agent.default_max_ci_failures]
-      (* Per-project CI-failure cap (see [Patch_agent.max_ci_failures]).
-         Defaulted on legacy configs predating the field; persisted so a value
-         set once via --max-ci-failures survives flag-less resumes. *)
-  url_scheme : string option; [@yojson.default None]
-      (* Persisted transport scheme for the managed clone's [origin]. [None]
-         on legacy configs predating P0-D; on the next [ensure_managed_repo]
-         we auto-detect from sibling clones and rewrite to [Some "https"] or
-         [Some "ssh"]. *)
+  max_ci_failures : int;
+  url_scheme : string option;
 }
 [@@deriving yojson]
 
@@ -160,6 +147,7 @@ let save_config ~project_name ~github_owner ~github_repo ~backend ~model
   ensure_dir dir;
   let config =
     {
+      schema_version = 1;
       project_name;
       github_owner;
       github_repo;
@@ -181,43 +169,6 @@ let save_config ~project_name ~github_owner ~github_repo ~backend ~model
       Stdlib.output_string oc (Yojson.Safe.pretty_to_string json);
       Stdlib.flush oc)
 
-(* Migrate legacy combined backend strings (["claude-sonnet"], ["claude-opus"])
-   into the decomposed [backend] + [model] form, and ensure the [model] field
-   is always present (it was added after [backend] and is missing from older
-   configs). Only the legacy combined names inject a model; bare ["claude"]
-   stays bare and lets the runtime omit [--model] so the Claude CLI applies
-   its own default. *)
-let migrate_backend_model fields =
-  let assoc = List.Assoc.find fields ~equal:String.equal in
-  let stored_backend =
-    match assoc "backend" with Some (`String s) -> s | _ -> ""
-  in
-  let stored_model =
-    match assoc "model" with Some (`String s) -> s | _ -> ""
-  in
-  let backend, model =
-    match (stored_backend, stored_model) with
-    | "claude-sonnet", "" -> ("claude", "sonnet")
-    | "claude-opus", "" -> ("claude", "opus")
-    (* Legacy combined name with an explicitly stored model: keep the stored
-       model rather than overriding it from the legacy backend suffix. *)
-    | ("claude-sonnet" | "claude-opus"), m -> ("claude", m)
-    | b, m -> (b, m)
-  in
-  let without =
-    List.filter fields ~f:(fun (k, _) ->
-        not (String.equal k "backend" || String.equal k "model"))
-  in
-  ("backend", `String backend) :: ("model", `String model) :: without
-
-(* Drop fields that were persisted by older versions but are no longer part of
-   [stored_config]. [stored_config_of_yojson] is strict (no
-   [allow_extra_fields]), so a legacy [github_token] key would otherwise fail to
-   parse. The token is now resolved per run (env / [gh auth token]) and never
-   persisted; see [Managed_repo.infer_github_token]. *)
-let drop_legacy_fields fields =
-  List.filter fields ~f:(fun (k, _) -> not (String.equal k "github_token"))
-
 let load_config ~project_name =
   let path = config_path project_name in
   try
@@ -228,39 +179,32 @@ let load_config ~project_name =
         (fun () -> Stdlib.In_channel.input_all ic)
     in
     let json = Yojson.Safe.from_string content in
-    match json with
-    | `Assoc fields ->
-        Ok
-          (stored_config_of_yojson
-             (`Assoc (drop_legacy_fields (migrate_backend_model fields))))
-    | _ -> Ok (stored_config_of_yojson json)
+    let config = stored_config_of_yojson json in
+    if config.schema_version = 1 then Ok config
+    else
+      Error
+        (Printf.sprintf "unsupported project config version: %d"
+           config.schema_version)
   with exn -> Error (Stdlib.Printexc.to_string exn)
 
-let save_gameplan_source ~project_name ~source_path =
+let save_plan_source ~project_name ~source_path =
   let dir = project_dir project_name in
   ensure_dir dir;
-  let dest, stale =
-    if Stdlib.Filename.check_suffix source_path ".json" then
-      (gameplan_json_path project_name, gameplan_path project_name)
-    else (gameplan_path project_name, gameplan_json_path project_name)
-  in
   let ic = Stdlib.open_in source_path in
   let content =
     Stdlib.Fun.protect
       ~finally:(fun () -> Stdlib.close_in_noerr ic)
       (fun () -> Stdlib.In_channel.input_all ic)
   in
-  let oc = Stdlib.open_out_bin dest in
+  let oc = Stdlib.open_out_bin (plan_path project_name) in
   Stdlib.Fun.protect
     ~finally:(fun () -> Stdlib.close_out oc)
     (fun () ->
       Stdlib.output_string oc content;
-      Stdlib.flush oc);
-  if Stdlib.Sys.file_exists stale then
-    try Stdlib.Sys.remove stale with Sys_error _ -> ()
+      Stdlib.flush oc)
 
-let publish_gameplan_artifact ~project_name =
-  let source = gameplan_json_path project_name in
+let publish_plan_artifact ~project_name =
+  let source = plan_path project_name in
   if Stdlib.Sys.file_exists source then (
     let ic = Stdlib.open_in_bin source in
     let content =
@@ -268,7 +212,7 @@ let publish_gameplan_artifact ~project_name =
         ~finally:(fun () -> Stdlib.close_in_noerr ic)
         (fun () -> Stdlib.In_channel.input_all ic)
     in
-    let dest = gameplan_artifact_path project_name in
+    let dest = plan_artifact_path project_name in
     ensure_dir (Stdlib.Filename.dirname dest);
     let oc = Stdlib.open_out_bin dest in
     Stdlib.Fun.protect
@@ -514,20 +458,20 @@ let%test "publish_ci_check_artifact overwrites the same key cleanly" =
                       (Stdlib.Filename.concat dir' "summary.md"))
                    "new\n"))
 
-let%test "publish_gameplan_artifact copies the stored gameplan for agents" =
+let%test "publish_plan_artifact copies the stored plan for agents" =
   with_temp_data_dir (fun () ->
       let project_name = "publish-test" in
       ensure_dir (project_dir project_name);
       let content = "{\"project_name\": \"publish-test\", \"patches\": []}" in
-      let oc = Stdlib.open_out_bin (gameplan_json_path project_name) in
+      let oc = Stdlib.open_out_bin (plan_path project_name) in
       Stdlib.output_string oc content;
       Stdlib.close_out oc;
-      publish_gameplan_artifact ~project_name;
-      let dest = gameplan_artifact_path project_name in
+      publish_plan_artifact ~project_name;
+      let dest = plan_artifact_path project_name in
       Stdlib.Sys.file_exists dest
       && String.equal (read_file_for_test dest) content)
 
-let%test "publish_gameplan_artifact refreshes a stale copy" =
+let%test "publish_plan_artifact refreshes a stale copy" =
   with_temp_data_dir (fun () ->
       let project_name = "publish-test-refresh" in
       ensure_dir (project_dir project_name);
@@ -536,47 +480,19 @@ let%test "publish_gameplan_artifact refreshes a stale copy" =
         Stdlib.output_string oc content;
         Stdlib.close_out oc
       in
-      write (gameplan_json_path project_name) "{\"v\": 1}";
-      publish_gameplan_artifact ~project_name;
-      write (gameplan_json_path project_name) "{\"v\": 2}";
-      publish_gameplan_artifact ~project_name;
+      write (plan_path project_name) "{\"v\": 1}";
+      publish_plan_artifact ~project_name;
+      write (plan_path project_name) "{\"v\": 2}";
+      publish_plan_artifact ~project_name;
       String.equal
-        (read_file_for_test (gameplan_artifact_path project_name))
+        (read_file_for_test (plan_artifact_path project_name))
         "{\"v\": 2}")
 
-let%test "publish_gameplan_artifact does not publish markdown as JSON" =
-  with_temp_data_dir (fun () ->
-      let project_name = "publish-test-markdown" in
-      ensure_dir (project_dir project_name);
-      let oc = Stdlib.open_out_bin (gameplan_path project_name) in
-      Stdlib.output_string oc "# Markdown gameplan";
-      Stdlib.close_out oc;
-      publish_gameplan_artifact ~project_name;
-      not (Stdlib.Sys.file_exists (gameplan_artifact_path project_name)))
-
-let%test "publish_gameplan_artifact is a no-op without a stored gameplan" =
+let%test "publish_plan_artifact is a no-op without a stored plan" =
   with_temp_data_dir (fun () ->
       let project_name = "publish-test-empty" in
-      publish_gameplan_artifact ~project_name;
-      not (Stdlib.Sys.file_exists (gameplan_artifact_path project_name)))
-
-(* A config written by an older version still carries a [github_token] key.
-   [stored_config_of_yojson] is strict, so [load_config] must drop the legacy
-   key (via [drop_legacy_fields]) rather than fail to parse. *)
-let%test "load_config tolerates a legacy persisted github_token" =
-  with_temp_data_dir (fun () ->
-      let project_name = "legacy-token" in
-      ensure_dir (project_dir project_name);
-      let legacy =
-        {|{"project_name":"legacy-token","github_token":"ghp_stale","github_owner":"o","github_repo":"r","backend":"claude","model":"sonnet","main_branch":"main","poll_interval":5.0,"repo_root":"/tmp/r","max_concurrency":4}|}
-      in
-      let oc = Stdlib.open_out_bin (config_path project_name) in
-      Stdlib.output_string oc legacy;
-      Stdlib.close_out oc;
-      match load_config ~project_name with
-      | Ok cfg ->
-          String.equal cfg.github_owner "o" && String.equal cfg.github_repo "r"
-      | Error _ -> false)
+      publish_plan_artifact ~project_name;
+      not (Stdlib.Sys.file_exists (plan_artifact_path project_name)))
 
 (* The token is no longer persisted: [save_config] must not write a
    [github_token] key, and the config it writes must round-trip through

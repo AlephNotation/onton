@@ -114,20 +114,11 @@ let mk_patch ~pid ~branch =
   Types.Patch.
     {
       id = pid;
-      title = "P";
-      description = "";
+      goal = "prepare the worktree base";
       branch = Types.Branch.of_string branch;
       dependencies = [];
-      spec = "";
-      acceptance_criteria = [];
       files = [];
-      classification = "";
-      changes = [];
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
+      checks = [];
     }
 
 let empty_gameplan =
@@ -135,17 +126,7 @@ let empty_gameplan =
     Types.Gameplan.project_name = "";
     repo_owner = "";
     repo_name = "";
-    problem_statement = "";
-    solution_summary = "";
-    final_state_spec = "";
     patches = [];
-    current_state_analysis = "";
-    explicit_opinions = "";
-    acceptance_criteria = [];
-    open_questions = [];
-    functional_changes = [];
-    context_resources = [];
-    reachability_traces = [];
   }
 
 (** Instantiate the real [Worktree_setup.Make] over a real git-backed [W] for
@@ -160,7 +141,10 @@ let run_ensure env ~managed_dir ~project_name ~pid ~branch ~base_ref =
   let gameplan = { empty_gameplan with Types.Gameplan.patches = [ patch ] } in
   let module Env : Worktree_setup.ENV = struct
     let runtime =
-      Runtime.create ~gameplan ~main_branch:(Types.Branch.of_string "main") ()
+      Runtime.create ~gameplan
+        ~main_branch:(Types.Branch.of_string "main")
+        ~durable_store:(fun _ -> Ok ())
+        ()
 
     let clock = Eio.Stdenv.clock env
     let fs = Eio.Stdenv.fs env

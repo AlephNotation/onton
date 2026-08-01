@@ -17,7 +17,7 @@ let string_member fields name =
   match member fields name with Some (`String value) -> Some value | _ -> None
 
 let operation_kind_of_json json =
-  match Json.try_of_yojson Operation_kind.t_of_yojson_compat json with
+  match Json.try_of_yojson Operation_kind.t_of_yojson json with
   | Ok op -> Some op
   | Error _ -> None
 
@@ -35,17 +35,9 @@ let has_pr fields =
   match member fields "pr_status" with
   | Some (`Assoc pr_fields) -> (
       match string_member pr_fields "kind" with
-      | Some ("present" | "missing") -> true
+      | Some "present" -> true
       | Some "absent" | Some _ | None -> false)
   | _ -> Option.is_some (int_member fields "pr_number")
-
-let is_pr_missing fields =
-  match member fields "pr_status" with
-  | Some (`Assoc pr_fields) -> (
-      match string_member pr_fields "kind" with
-      | Some "missing" -> true
-      | Some _ | None -> false)
-  | _ -> false
 
 let session_given_up fields =
   match member fields "session_fallback" with
@@ -56,8 +48,7 @@ let needs_intervention fields =
   let queue = operation_list_member fields "queue" in
   Patch_agent.needs_intervention_of_fields
     ~merged:(bool_member fields "merged")
-    ~has_pr:(has_pr fields) ~is_pr_missing:(is_pr_missing fields)
-    ~session_given_up:(session_given_up fields)
+    ~has_pr:(has_pr fields) ~session_given_up:(session_given_up fields)
     ~human_in_queue:
       (List.mem queue Operation_kind.Human ~equal:Operation_kind.equal)
     ~ci_failure_count:

@@ -7,22 +7,7 @@ open Onton_core
 
 let make_gameplan patches =
   Types.Gameplan.
-    {
-      project_name = "test-project";
-      repo_owner = "";
-      repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
-      patches;
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
-    }
+    { project_name = "test-project"; repo_owner = ""; repo_name = ""; patches }
 
 let tick orch ~patches =
   Patch_controller.tick orch ~project_name:"test-project"
@@ -151,20 +136,11 @@ let () =
      Types.Patch.
        {
          id = pid;
-         title = "";
-         description = "";
+         goal = "test transitive ancestors";
          branch = Types.Branch.of_string ("b-" ^ Types.Patch_id.to_string pid);
          dependencies = deps;
-         spec = "";
-         acceptance_criteria = [];
          files = [];
-         classification = "";
-         changes = [];
-         test_stubs_introduced = [];
-         test_stubs_implemented = [];
-         complexity = None;
-         precedents = [];
-         required_context = [];
+         checks = [];
        }
    in
    let a = Types.Patch_id.of_string "A" in
@@ -320,7 +296,7 @@ let () =
       Onton_test_support.Test_generators.gen_patch_list_unique (fun patches ->
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let _orch, _effects, actions = tick orch ~patches in
+          let _orch, actions = tick orch ~patches in
           match patches with
           | [] -> true
           | first :: _ ->
@@ -339,11 +315,11 @@ let () =
           let rec loop o n =
             if n = 0 then o
             else
-              let o, _effects, _actions = tick o ~patches in
+              let o, _actions = tick o ~patches in
               loop o (n - 1)
           in
           let orch_stable = loop orch (List.length patches + 1) in
-          let _orch_final, _effects, actions = tick orch_stable ~patches in
+          let _orch_final, actions = tick orch_stable ~patches in
           List.is_empty actions
         with _ -> false)
   in
@@ -355,7 +331,7 @@ let () =
           let rec tick_all o n =
             if n = 0 then o
             else
-              let o, _effects, _actions = tick o ~patches in
+              let o, _actions = tick o ~patches in
               tick_all o (n - 1)
           in
           let orch = tick_all orch (List.length patches + 1) in
@@ -363,7 +339,7 @@ let () =
             List.fold patches ~init:orch ~f:(fun o (p : Types.Patch.t) ->
                 let a = Orchestrator.agent o p.id in
                 let o =
-                  if a.Patch_agent.busy then
+                  if Patch_agent.is_busy a then
                     let o =
                       Orchestrator.set_pr_number o p.id
                         (Types.Pr_number.of_int 1)
@@ -373,7 +349,7 @@ let () =
                 in
                 Orchestrator.mark_merged o p.id)
           in
-          let _, _effects, actions = tick orch ~patches in
+          let _, actions = tick orch ~patches in
           List.is_empty actions
         with _ -> false)
   in
@@ -393,29 +369,20 @@ let () =
       Types.Patch.
         {
           id = pid;
-          title = "P1";
-          description = "";
+          goal = "patch P1 completes";
           branch = Types.Branch.of_string "b1";
           dependencies = [];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         };
     ]
   in
   let orch = Orchestrator.create ~patches ~main_branch:main in
-  let orch, _effects, _actions = tick orch ~patches in
+  let orch, _actions = tick orch ~patches in
   let orch = Orchestrator.set_pr_number orch pid (Types.Pr_number.of_int 1) in
   let orch = Orchestrator.complete orch pid in
   let orch = Orchestrator.enqueue orch pid Types.Operation_kind.Ci in
-  let _orch, _effects, actions = tick orch ~patches in
+  let _orch, actions = tick orch ~patches in
   assert (Int.equal (List.length actions) 1);
   assert (
     List.exists actions ~f:(function
@@ -460,20 +427,11 @@ let () =
     Types.Patch.
       {
         id;
-        title = Types.Patch_id.to_string id;
-        description = "";
+        goal = "patch " ^ Types.Patch_id.to_string id ^ " completes";
         branch = Types.Branch.of_string "b1";
         dependencies = [];
-        spec = "";
-        acceptance_criteria = [];
         files = [];
-        classification = "";
-        changes = [];
-        test_stubs_introduced = [];
-        test_stubs_implemented = [];
-        complexity = None;
-        precedents = [];
-        required_context = [];
+        checks = [];
       }
   in
 
@@ -573,38 +531,20 @@ let () =
       Types.Patch.
         {
           id = p1;
-          title = "P1";
-          description = "";
+          goal = "patch P1 completes";
           branch = Types.Branch.of_string "b1";
           dependencies = [];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         };
       Types.Patch.
         {
           id = p2;
-          title = "P2";
-          description = "";
+          goal = "patch P2 completes";
           branch = Types.Branch.of_string "b2";
           dependencies = [ p1 ];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         };
     ]
   in
@@ -641,25 +581,16 @@ let () =
         Types.Patch.
           {
             id = pid;
-            title = "P";
-            description = "";
+            goal = "patch completes";
             branch = Types.Branch.of_string "b1";
             dependencies = [];
-            spec = "";
-            acceptance_criteria = [];
             files = [];
-            classification = "";
-            changes = [];
-            test_stubs_introduced = [];
-            test_stubs_implemented = [];
-            complexity = None;
-            precedents = [];
-            required_context = [];
+            checks = [];
           };
       ]
     in
     let orch = Orchestrator.create ~patches ~main_branch:main in
-    let orch, _effects, _actions = tick orch ~patches in
+    let orch, _actions = tick orch ~patches in
     (orch, pid)
   in
   (* Property: complete is idempotent (no crash on already-not-busy) *)
@@ -671,31 +602,22 @@ let () =
             Types.Patch.
               {
                 id = pid;
-                title = "P";
-                description = "";
+                goal = "patch completes";
                 branch = Types.Branch.of_string "b1";
                 dependencies = [];
-                spec = "";
-                acceptance_criteria = [];
                 files = [];
-                classification = "";
-                changes = [];
-                test_stubs_introduced = [];
-                test_stubs_implemented = [];
-                complexity = None;
-                precedents = [];
-                required_context = [];
+                checks = [];
               };
           ]
         in
         try
           let orch = Orchestrator.create ~patches ~main_branch:main in
-          let orch, _effects, _actions = tick orch ~patches in
+          let orch, _actions = tick orch ~patches in
           (* First complete: busy → not-busy *)
           let orch = Orchestrator.complete orch pid in
           (* Second complete: should be a no-op, not crash *)
           let orch = Orchestrator.complete orch pid in
-          not (Orchestrator.agent orch pid).Patch_agent.busy
+          not (Patch_agent.is_busy (Orchestrator.agent orch pid))
         with Invalid_argument _ -> false)
   in
   (* Property: apply_session_result never crashes on busy agent *)
@@ -736,12 +658,12 @@ let () =
         | Orchestrator.Session_no_commits ->
             (* LLM session succeeded — completion deferred to
                apply_respond_outcome, so agent stays busy here. *)
-            a.Patch_agent.busy
+            Patch_agent.is_busy a
         | Orchestrator.Session_process_error _ | Orchestrator.Session_no_resume
         | Orchestrator.Session_failed _ | Orchestrator.Session_give_up
         | Orchestrator.Session_worktree_missing
         | Orchestrator.Session_context_exhausted ->
-            not a.Patch_agent.busy)
+            not (Patch_agent.is_busy a))
   in
   (* Property: Session_give_up sets needs_intervention *)
   let prop_give_up_intervention =
@@ -780,25 +702,16 @@ let () =
         Types.Patch.
           {
             id = pid;
-            title = "P";
-            description = "";
+            goal = "patch completes";
             branch = Types.Branch.of_string "b1";
             dependencies = [];
-            spec = "";
-            acceptance_criteria = [];
             files = [];
-            classification = "";
-            changes = [];
-            test_stubs_introduced = [];
-            test_stubs_implemented = [];
-            complexity = None;
-            precedents = [];
-            required_context = [];
+            checks = [];
           };
       ]
     in
     let orch = Orchestrator.create ~patches ~main_branch:main in
-    let orch, _effects, _actions = tick orch ~patches in
+    let orch, _actions = tick orch ~patches in
     (orch, pid)
   in
   (* A1: Session_ok preserves llm_session_id *)
@@ -810,7 +723,9 @@ let () =
         let orch = Orchestrator.apply_session_result orch pid Session_ok in
         let orch = Orchestrator.complete orch pid in
         let a = Orchestrator.agent orch pid in
-        Option.equal String.equal a.Patch_agent.llm_session_id (Some "test-id"))
+        Option.equal String.equal
+          (Patch_agent.llm_session_id a)
+          (Some "test-id"))
   in
   (* A2: Resume failure preserves llm_session_id (session may still be valid) *)
   let prop_a2_resume_failure_preserves_session_id =
@@ -823,7 +738,9 @@ let () =
         let orch = Orchestrator.set_llm_session_id orch pid (Some "test-id") in
         let orch = Orchestrator.on_session_failure orch pid ~is_fresh:false in
         let a = Orchestrator.agent orch pid in
-        Option.equal String.equal a.Patch_agent.llm_session_id (Some "test-id"))
+        Option.equal String.equal
+          (Patch_agent.llm_session_id a)
+          (Some "test-id"))
   in
   (* A3: Session_give_up clears llm_session_id *)
   let prop_a3_give_up_clears_session_id =
@@ -833,7 +750,7 @@ let () =
         let orch = Orchestrator.set_llm_session_id orch pid (Some "test-id") in
         let orch = Orchestrator.apply_session_result orch pid Session_give_up in
         let a = Orchestrator.agent orch pid in
-        Option.is_none a.Patch_agent.llm_session_id)
+        Option.is_none (Patch_agent.llm_session_id a))
   in
   (* A4: set_llm_session_id is idempotent *)
   let prop_a4_set_session_id_idempotent =
@@ -847,20 +764,11 @@ let () =
               Types.Patch.
                 {
                   id = pid;
-                  title = "P";
-                  description = "";
+                  goal = "patch completes";
                   branch = Types.Branch.of_string "b1";
                   dependencies = [];
-                  spec = "";
-                  acceptance_criteria = [];
                   files = [];
-                  classification = "";
-                  changes = [];
-                  test_stubs_introduced = [];
-                  test_stubs_implemented = [];
-                  complexity = None;
-                  precedents = [];
-                  required_context = [];
+                  checks = [];
                 };
             ]
           in
@@ -869,8 +777,9 @@ let () =
           let twice = Orchestrator.set_llm_session_id once pid v in
           let a1 = Orchestrator.agent once pid in
           let a2 = Orchestrator.agent twice pid in
-          Option.equal String.equal a1.Patch_agent.llm_session_id
-            a2.Patch_agent.llm_session_id
+          Option.equal String.equal
+            (Patch_agent.llm_session_id a1)
+            (Patch_agent.llm_session_id a2)
         with Invalid_argument _ -> false)
   in
   (* A5: Fresh failure on respond path preserves llm_session_id *)
@@ -884,7 +793,9 @@ let () =
         let orch = Orchestrator.set_llm_session_id orch pid (Some "test-id") in
         let orch = Orchestrator.on_session_failure orch pid ~is_fresh:true in
         let a = Orchestrator.agent orch pid in
-        Option.equal String.equal a.Patch_agent.llm_session_id (Some "test-id"))
+        Option.equal String.equal
+          (Patch_agent.llm_session_id a)
+          (Some "test-id"))
   in
   (* A6: Session_no_resume clears llm_session_id *)
   let prop_a6_no_resume_clears_session_id =
@@ -896,7 +807,7 @@ let () =
           Orchestrator.apply_session_result orch pid Session_no_resume
         in
         let a = Orchestrator.agent orch pid in
-        Option.is_none a.Patch_agent.llm_session_id)
+        Option.is_none (Patch_agent.llm_session_id a))
   in
   (* A7: Session_no_resume from Fresh_available stays Fresh_available.
      A stub-resume never spoke to the LLM — it must not consume retry budget. *)
@@ -909,7 +820,8 @@ let () =
           Orchestrator.apply_session_result orch pid Session_no_resume
         in
         let a = Orchestrator.agent orch pid in
-        Patch_agent.equal_session_fallback a.Patch_agent.session_fallback
+        Patch_agent.equal_session_fallback
+          (Patch_agent.session_fallback a)
           Patch_agent.Fresh_available)
   in
   (* A8: Session_no_resume from Tried_fresh stays Tried_fresh (no escalation
@@ -924,7 +836,8 @@ let () =
           Orchestrator.apply_session_result orch pid Session_no_resume
         in
         let a = Orchestrator.agent orch pid in
-        Patch_agent.equal_session_fallback a.Patch_agent.session_fallback
+        Patch_agent.equal_session_fallback
+          (Patch_agent.session_fallback a)
           Patch_agent.Tried_fresh)
   in
   (* A9: two consecutive Session_no_resume outcomes never reach Given_up.
@@ -944,7 +857,8 @@ let () =
         in
         let a = Orchestrator.agent orch pid in
         not
-          (Patch_agent.equal_session_fallback a.Patch_agent.session_fallback
+          (Patch_agent.equal_session_fallback
+             (Patch_agent.session_fallback a)
              Patch_agent.Given_up))
   in
   List.iter
@@ -977,25 +891,16 @@ let () =
         Types.Patch.
           {
             id = pid;
-            title = "P";
-            description = "";
+            goal = "patch completes";
             branch = Types.Branch.of_string "psf";
             dependencies = [];
-            spec = "";
-            acceptance_criteria = [];
             files = [];
-            classification = "";
-            changes = [];
-            test_stubs_introduced = [];
-            test_stubs_implemented = [];
-            complexity = None;
-            precedents = [];
-            required_context = [];
+            checks = [];
           };
       ]
     in
     let orch = Orchestrator.create ~patches ~main_branch:main in
-    let orch, _, _ = tick orch ~patches in
+    let orch, _ = tick orch ~patches in
     (orch, pid)
   in
   let prop_psf1_clears_session_fallback =
@@ -1010,7 +915,8 @@ let () =
           Orchestrator.apply_session_result orch pid (Session_push_failed None)
         in
         let a = Orchestrator.agent orch pid in
-        Patch_agent.equal_session_fallback a.Patch_agent.session_fallback
+        Patch_agent.equal_session_fallback
+          (Patch_agent.session_fallback a)
           Patch_agent.Fresh_available)
   in
   let prop_psf2_leaves_start_attempts_untouched =
@@ -1125,7 +1031,8 @@ let () =
         in
         let a = Orchestrator.agent orch pid in
         Patch_agent.needs_intervention a
-        && Patch_agent.equal_session_fallback a.Patch_agent.session_fallback
+        && Patch_agent.equal_session_fallback
+             (Patch_agent.session_fallback a)
              Patch_agent.Given_up
         && Int.equal a.Patch_agent.push_failure_count 0)
   in
@@ -1149,7 +1056,8 @@ let () =
         in
         let a = Orchestrator.agent orch pid in
         not
-          (Patch_agent.equal_session_fallback a.Patch_agent.session_fallback
+          (Patch_agent.equal_session_fallback
+             (Patch_agent.session_fallback a)
              Patch_agent.Given_up))
   in
   let prop_cp1_ok_pushok =
@@ -1293,7 +1201,8 @@ let () =
           Orchestrator.apply_session_result orch pid Session_no_commits
         in
         let a = Orchestrator.agent orch pid in
-        Patch_agent.equal_session_fallback a.Patch_agent.session_fallback
+        Patch_agent.equal_session_fallback
+          (Patch_agent.session_fallback a)
           Patch_agent.Fresh_available)
   in
   let prop_pnc2_increments_counter =
@@ -1369,7 +1278,7 @@ let () =
         (* Session_no_commits defers completion to apply_respond_outcome
            via Respond_no_commits, so agent stays busy after
            apply_session_result alone. *)
-        a.Patch_agent.busy)
+        Patch_agent.is_busy a)
   in
   let prop_pnc8_apply_preserves_other_counters =
     Test.make
@@ -1427,7 +1336,7 @@ let () =
           Patch_agent.set_llm_session_id (fresh_agent ()) (Some "overflowed")
         in
         let a = Patch_agent.on_context_exhausted a in
-        Option.is_none a.Patch_agent.llm_session_id)
+        Option.is_none (Patch_agent.llm_session_id a))
   in
   let prop_pce4_reset_intervention_clears_counter =
     Test.make ~name:"PCE-4: reset_intervention_state zeros context_exhaustion"
@@ -1454,8 +1363,8 @@ let () =
         in
         let a = Orchestrator.agent orch pid in
         Int.equal a.Patch_agent.context_exhaustion_count 1
-        && Option.is_none a.Patch_agent.llm_session_id
-        && not a.Patch_agent.busy)
+        && Option.is_none (Patch_agent.llm_session_id a)
+        && not (Patch_agent.is_busy a))
   in
   let prop_pce6_session_ok_resets =
     Test.make ~name:"PCE-6: Session_ok resets context_exhaustion_count"

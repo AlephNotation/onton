@@ -6,8 +6,7 @@ open Types
 
 (** Priority queue for operation ordering per patch.
 
-    Lower numeric priority = higher urgency. Implements the Pantagruel spec
-    fragment for [priority], [is_feedback], and [highest_priority]. *)
+    Lower numeric priority means higher urgency. *)
 
 type t [@@deriving show, eq, sexp_of]
 

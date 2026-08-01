@@ -14,17 +14,7 @@ let () =
       Gameplan.project_name = "test";
       repo_owner = "";
       repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
       patches = [];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
     }
   in
   let snapshot =
@@ -36,7 +26,10 @@ let () =
       transcripts = Base.Hashtbl.create (module Onton_core.Types.Patch_id);
     }
   in
-  let _rt = Onton.Runtime.create ~gameplan ~main_branch ~snapshot () in
+  let durable_store _ = Ok () in
+  let _rt =
+    Onton.Runtime.create ~gameplan ~main_branch ~snapshot ~durable_store ()
+  in
   Printf.printf "PASS: Runtime.create with snapshot outside Eio\n"
 
 (* Regression test: Runtime.create must override the snapshot's main_branch
@@ -51,17 +44,7 @@ let () =
       Gameplan.project_name = "test";
       repo_owner = "";
       repo_name = "";
-      problem_statement = "";
-      solution_summary = "";
-      final_state_spec = "";
       patches = [];
-      current_state_analysis = "";
-      explicit_opinions = "";
-      acceptance_criteria = [];
-      open_questions = [];
-      functional_changes = [];
-      context_resources = [];
-      reachability_traces = [];
     }
   in
   let snapshot =
@@ -74,7 +57,9 @@ let () =
     }
   in
   let rt =
-    Onton.Runtime.create ~gameplan ~main_branch:new_branch ~snapshot ()
+    Onton.Runtime.create ~gameplan ~main_branch:new_branch ~snapshot
+      ~durable_store:(fun _ -> Ok ())
+      ()
   in
   let actual =
     Onton.Runtime.read rt (fun s ->

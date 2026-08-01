@@ -301,7 +301,7 @@ type patch_view = {
   status : display_status;
   queue_len : int;
   current_op : Operation_kind.t option;
-  current_op_state : Patch_agent.op_state;
+  current_op_state : Patch_agent.op_state option;
       (** Carries the agent's queued/running sub-state for the current op. Used
           to render a "(queued)" suffix on busy statuses so a saturated Claude
           semaphore can be told apart from an actively running session. *)
@@ -318,17 +318,12 @@ type patch_view = {
   recent_stream : activity_entry list;
   pr_number : Pr_number.t option;
   merge_queue_entry : Pr_state.merge_queue_entry option;
-  pr_missing : bool;
-      (** [true] when [pr_number] is set but the remote no longer has the PR.
-          Distinguishes "we lost the PR" from "we have the PR" so the row label
-          can render a distinctive marker. *)
   base_branch : Branch.t option;
   worktree_path : string option;
   intervention_reason : string option;
   automerge_enabled : bool;
   automerge_deadline : float option;
   automerge_failure_count : int;
-  complexity : int option;
   backend : string;
   model : string option;
 }
@@ -357,9 +352,6 @@ let human_intervention_reason (agent : Patch_agent.t) =
         | "session_fallback=given_up" ->
             "Agent gave up after repeated session failures \xe2\x80\x94 needs \
              manual fix or restart"
-        | "pr_missing" ->
-            "PR is missing from the remote \xe2\x80\x94 recreate it or \
-             investigate why it vanished"
         | code when String.is_prefix code ~prefix:"ci_failure_count>=" ->
             Printf.sprintf
               "CI failed %d/%d times in a row - fix the failing checks below"
@@ -397,16 +389,13 @@ let human_intervention_reason (agent : Patch_agent.t) =
 let patch_view_of_agent (agent : Patch_agent.t)
     ~(patches_by_id : Patch.t Map.M(Patch_id).t) ~(graph : Graph.t)
     ~(main_branch : Branch.t) ~(agents_by_id : Patch_agent.t Map.M(Patch_id).t)
-    ~(resolve_routing : complexity:int option -> Backend_routing.decision) =
+    ~(backend_decision : Backend_routing.decision) =
   let patch_id = agent.patch_id in
   let patch_opt = Map.find patches_by_id patch_id in
-  let complexity = Option.bind patch_opt ~f:(fun p -> p.Patch.complexity) in
-  let { Backend_routing.backend = backend_name; model } =
-    resolve_routing ~complexity
-  in
+  let { Backend_routing.backend = backend_name; model } = backend_decision in
   let title =
     match patch_opt with
-    | Some p -> p.Patch.title
+    | Some p -> p.Patch.goal
     | None -> Branch.to_string agent.Patch_agent.branch
   in
   let branch =
@@ -414,14 +403,14 @@ let patch_view_of_agent (agent : Patch_agent.t)
     | Some p -> p.Patch.branch
     | None -> agent.Patch_agent.branch
   in
-  let current_op = agent.Patch_agent.current_op in
+  let current_op = Patch_agent.current_op agent in
   let needs_intervention = display_needs_intervention agent in
   let ctx =
     ( State.Patch_ctx.empty
     |> State.Patch_ctx.set_merged ~patch_id ~value:agent.merged
     |> State.Patch_ctx.set_needs_intervention ~patch_id
          ~value:needs_intervention
-    |> State.Patch_ctx.set_busy ~patch_id ~value:agent.busy
+    |> State.Patch_ctx.set_busy ~patch_id ~value:(Patch_agent.is_busy agent)
     |> State.Patch_ctx.set_has_pr ~patch_id ~value:(Patch_agent.has_pr agent)
     |> State.Patch_ctx.set_approved ~patch_id
          ~value:(Patch_agent.is_approved agent ~main_branch)
@@ -443,7 +432,7 @@ let patch_view_of_agent (agent : Patch_agent.t)
         let dep_status =
           match Map.find agents_by_id dep_id with
           | Some dep_agent ->
-              let dep_op = dep_agent.Patch_agent.current_op in
+              let dep_op = Patch_agent.current_op dep_agent in
               let dep_needs_intervention =
                 display_needs_intervention dep_agent
               in
@@ -454,7 +443,7 @@ let patch_view_of_agent (agent : Patch_agent.t)
                 |> State.Patch_ctx.set_needs_intervention ~patch_id:dep_id
                      ~value:dep_needs_intervention
                 |> State.Patch_ctx.set_busy ~patch_id:dep_id
-                     ~value:dep_agent.busy
+                     ~value:(Patch_agent.is_busy dep_agent)
                 |> State.Patch_ctx.set_has_pr ~patch_id:dep_id
                      ~value:(Patch_agent.has_pr dep_agent)
                 |> State.Patch_ctx.set_approved ~patch_id:dep_id
@@ -487,7 +476,7 @@ let patch_view_of_agent (agent : Patch_agent.t)
     status;
     queue_len = List.length agent.queue;
     current_op;
-    current_op_state = agent.Patch_agent.current_op_state;
+    current_op_state = Patch_agent.current_op_state agent;
     ci_failures = agent.ci_failure_count;
     ci_failure_cap = agent.max_ci_failures;
     dep_ids;
@@ -499,14 +488,12 @@ let patch_view_of_agent (agent : Patch_agent.t)
     recent_stream = [];
     pr_number = Patch_agent.pr_number agent;
     merge_queue_entry = agent.Patch_agent.merge_queue_entry;
-    pr_missing = Patch_agent.is_pr_missing agent;
     base_branch = agent.base_branch;
     worktree_path = agent.worktree_path;
     intervention_reason = human_intervention_reason agent;
-    automerge_enabled = agent.automerge_enabled;
-    automerge_deadline = agent.automerge_deadline;
-    automerge_failure_count = agent.automerge_failure_count;
-    complexity;
+    automerge_enabled = Patch_agent.automerge_enabled agent;
+    automerge_deadline = Patch_agent.automerge_deadline agent;
+    automerge_failure_count = Patch_agent.automerge_failure_count agent;
     backend = backend_name;
     model;
   }
@@ -610,7 +597,8 @@ let short_op_name = function
 
 let pv_queued (pv : patch_view) =
   is_running_status pv.status
-  && Patch_agent.equal_op_state pv.current_op_state Patch_agent.Queued
+  && Option.equal Patch_agent.equal_op_state pv.current_op_state
+       (Some Patch_agent.Queued)
 
 (** Compact automerge indicator for the overview row. Empty when automerge is
     disabled; otherwise a short colored badge describing the wait state. The
@@ -645,10 +633,6 @@ let render_patch_row ~width ~selected ~now (pv : patch_view) =
   in
   let pr_label =
     match pv.pr_number with
-    | Some n when pv.pr_missing ->
-        (* Vanished from remote — flag the number with a leading ! so the
-           operator can see which PR was lost. *)
-        Printf.sprintf "!%-5d" (Pr_number.to_int n)
     | Some n -> Printf.sprintf "#%-5d" (Pr_number.to_int n)
     | None -> "  --  "
   in
@@ -843,15 +827,11 @@ let detail_info_rows (pv : patch_view) ~width ~now =
         | None -> "(not set)");
       fit_value "  Worktree:    "
         (match pv.worktree_path with Some p -> p | None -> "(none)");
-      Printf.sprintf "  Complexity:  %s"
-        (match pv.complexity with Some n -> Int.to_string n | None -> "—");
       fit_value "  Backend:     " pv.backend;
       fit_value "  Model:       "
         (match pv.model with Some m -> m | None -> "(backend default)");
       Printf.sprintf "  PR:          %s"
         (match pv.pr_number with
-        | Some n when pv.pr_missing ->
-            Printf.sprintf "#%d (vanished from remote)" (Pr_number.to_int n)
         | Some n -> Printf.sprintf "#%d" (Pr_number.to_int n)
         | None -> "no");
       Printf.sprintf "  Dependencies: %s"
@@ -1214,65 +1194,9 @@ let render_manage_overlay ~width ~height ~automerge_enabled ~needs_intervention
       automerge_item;
     ]
     @ Option.to_list bump_item
-    @ [
-        Term.styled [ Term.Sgr.dim ]
-          "    p   Add patch to gameplan (description + dependencies)";
-      ]
   in
   let content = title :: "" :: items in
   let overlay_h = Int.max 0 (Int.min (List.length content) (height - 1)) in
-  let visible = List.sub content ~pos:0 ~len:overlay_h in
-  let pad_line line = if width <= 0 then "" else Term.fit_width width line in
-  List.map visible ~f:pad_line
-
-(** Multi-select dependency picker for the add-patch flow. Lists every existing
-    patch with a checkbox; [cursor] is the highlighted row and [chosen] the
-    toggled-on ids. Rows are windowed to fit [height] around the cursor so long
-    gameplans stay navigable. *)
-let render_deps_overlay ~width ~height ~(views : patch_view list) ~cursor
-    ~(chosen : Set.M(Patch_id).t) =
-  let dismiss =
-    Term.styled [ Term.Sgr.dim ]
-      "(↑/↓ move · space toggle · enter confirm · esc cancel)"
-  in
-  let title =
-    Term.styled
-      [ Term.Sgr.bold; Term.Sgr.fg_yellow ]
-      (Printf.sprintf " Select Dependencies  %s" dismiss)
-  in
-  let is_chosen pid = Set.mem chosen pid in
-  let body =
-    if List.is_empty views then
-      [ Term.styled [ Term.Sgr.dim ] "    (no existing patches to depend on)" ]
-    else
-      (* Window the rows around the cursor. Reserve the title + a blank line. *)
-      let total = List.length views in
-      let visible = Int.max 1 (height - 2) in
-      let cursor = Int.max 0 (Int.min cursor (total - 1)) in
-      let start =
-        if total <= visible then 0
-        else Int.max 0 (Int.min (cursor - (visible / 2)) (total - visible))
-      in
-      let window =
-        List.sub views ~pos:start ~len:(Int.min visible (total - start))
-      in
-      List.mapi window ~f:(fun i pv ->
-          let idx = start + i in
-          let mark = if is_chosen pv.patch_id then "[x]" else "[ ]" in
-          let pointer = if idx = cursor then "▸" else " " in
-          let label =
-            Printf.sprintf "%s %s %s  %s" pointer mark
-              (Patch_id.to_string pv.patch_id)
-              pv.title
-          in
-          let line = if width <= 0 then label else Term.fit_width width label in
-          if idx = cursor then Term.styled [ Term.Sgr.reverse ] line
-          else if is_chosen pv.patch_id then
-            Term.styled [ Term.Sgr.fg_green ] line
-          else line)
-  in
-  let content = title :: "" :: body in
-  let overlay_h = Int.max 0 (Int.min (List.length content) height) in
   let visible = List.sub content ~pos:0 ~len:overlay_h in
   let pad_line line = if width <= 0 then "" else Term.fit_width width line in
   List.map visible ~f:pad_line
@@ -1347,7 +1271,7 @@ let detail_info_height (pv : patch_view) =
 
 let views_of_orchestrator ~(orchestrator : Orchestrator.t)
     ~(gameplan : Gameplan.t) ~(activity : activity_entry list)
-    ~(resolve_routing : complexity:int option -> Backend_routing.decision)
+    ~(backend_decision : Backend_routing.decision)
     ?(intervention_reasons = Map.Poly.empty) () =
   let agents = Orchestrator.all_agents orchestrator in
   let graph = Orchestrator.graph orchestrator in
@@ -1366,7 +1290,7 @@ let views_of_orchestrator ~(orchestrator : Orchestrator.t)
         let main_branch = Orchestrator.main_branch orchestrator in
         let pv =
           patch_view_of_agent agent ~patches_by_id ~graph ~main_branch
-            ~agents_by_id ~resolve_routing
+            ~agents_by_id ~backend_decision
         in
         let pid_str = Patch_id.to_string agent.patch_id in
         let filtered =
@@ -1409,7 +1333,7 @@ let views_of_orchestrator ~(orchestrator : Orchestrator.t)
 let render_frame ~width ~height ~selected ~scroll_offset ~view_mode
     ~(activity : activity_entry list) ~project_name ~backend_name ~version
     ~show_help ~show_checks ~checks_scroll ~show_manage ~now ?(transcript = "")
-    ?status_msg ?prompt_line ?dep_select (views : patch_view list) =
+    ?status_msg ?prompt_line (views : patch_view list) =
   let no_patches =
     {
       lines = [];
@@ -1472,103 +1396,90 @@ let render_frame ~width ~height ~selected ~scroll_offset ~view_mode
     in
     { no_patches with lines = overlay; detail_scroll_offset = scroll_offset }
   else
-    match dep_select with
-    | Some (cursor, chosen) ->
-        let overlay =
-          render_deps_overlay ~width ~height ~views ~cursor ~chosen
-        in
-        {
-          no_patches with
-          lines = overlay;
-          detail_scroll_offset = scroll_offset;
-        }
-    | None -> (
-        let header = render_header ~project_name ~backend_name ~width in
-        let footer = render_footer ~width ~view_mode ?prompt_line () in
-        let status_line =
-          let rendered = render_status_msg ~width status_msg in
-          if String.is_empty rendered then [] else [ rendered ]
-        in
-        match view_mode with
-        | Detail_view patch_id -> (
-            match
-              List.find views ~f:(fun pv -> Patch_id.equal pv.patch_id patch_id)
-            with
-            | Some pv ->
-                let info_h = detail_info_height pv in
-                (* Chrome: header(2) + blank + info + blank before footer + status +
+    let header = render_header ~project_name ~backend_name ~width in
+    let footer = render_footer ~width ~view_mode ?prompt_line () in
+    let status_line =
+      let rendered = render_status_msg ~width status_msg in
+      if String.is_empty rendered then [] else [ rendered ]
+    in
+    match view_mode with
+    | Detail_view patch_id -> (
+        match
+          List.find views ~f:(fun pv -> Patch_id.equal pv.patch_id patch_id)
+        with
+        | Some pv ->
+            let info_h = detail_info_height pv in
+            (* Chrome: header(2) + blank + info + blank before footer + status +
                footer *)
-                let fixed =
-                  2 + 1 + info_h + 1 + List.length status_line
-                  + List.length footer
-                in
-                let max_section = Int.max 0 (height - fixed) in
-                let scroll =
-                  { offset = scroll_offset; total = 0; visible = max_section }
-                in
-                let info, transcript_section, at_bottom, clamped_offset =
-                  render_detail pv ~width ~scroll ~now ~transcript ()
-                in
-                let lines =
-                  header @ [ "" ] @ info @ transcript_section @ [ "" ]
-                  @ status_line @ footer
-                in
-                {
-                  no_patches with
-                  lines;
-                  detail_at_bottom = at_bottom;
-                  detail_scroll_offset = clamped_offset;
-                }
-            | None ->
-                let lines =
-                  header @ [ "" ] @ [ " (patch not found)" ] @ [ "" ]
-                  @ status_line @ footer
-                in
-                { no_patches with lines })
-        | Timeline_view ->
-            (* Budget: header(2) + blank + "Timeline" header(1) + scroll
-           indicators(2) + blank before footer + status + footer *)
-            let reserved =
-              2 + 1 + 1 + 2 + 1 + List.length status_line + List.length footer
+            let fixed =
+              2 + 1 + info_h + 1 + List.length status_line + List.length footer
             in
-            let max_rows = Int.max 0 (height - reserved) in
+            let max_section = Int.max 0 (height - fixed) in
             let scroll =
-              { offset = scroll_offset; total = 0; visible = max_rows }
+              { offset = scroll_offset; total = 0; visible = max_section }
             in
-            let timeline = render_timeline ~width ~scroll activity in
+            let info, transcript_section, at_bottom, clamped_offset =
+              render_detail pv ~width ~scroll ~now ~transcript ()
+            in
             let lines =
-              header @ [ "" ] @ timeline @ [ "" ] @ status_line @ footer
+              header @ [ "" ] @ info @ transcript_section @ [ "" ] @ status_line
+              @ footer
             in
-            { no_patches with lines }
-        | List_view ->
-            (* Patches get priority. Reserve only the non-patch, non-activity
+            {
+              no_patches with
+              lines;
+              detail_at_bottom = at_bottom;
+              detail_scroll_offset = clamped_offset;
+            }
+        | None ->
+            let lines =
+              header @ [ "" ] @ [ " (patch not found)" ] @ [ "" ] @ status_line
+              @ footer
+            in
+            { no_patches with lines })
+    | Timeline_view ->
+        (* Budget: header(2) + blank + "Timeline" header(1) + scroll
+           indicators(2) + blank before footer + status + footer *)
+        let reserved =
+          2 + 1 + 1 + 2 + 1 + List.length status_line + List.length footer
+        in
+        let max_rows = Int.max 0 (height - reserved) in
+        let scroll =
+          { offset = scroll_offset; total = 0; visible = max_rows }
+        in
+        let timeline = render_timeline ~width ~scroll activity in
+        let lines =
+          header @ [ "" ] @ timeline @ [ "" ] @ status_line @ footer
+        in
+        { no_patches with lines }
+    | List_view ->
+        (* Patches get priority. Reserve only the non-patch, non-activity
            chrome: header(2) + blank after header + blank before footer +
            status + footer. Scroll indicators are reserved only when patches
            actually overflow, so the rows they would have taken go to
            activity when the list fits. *)
-            let chrome_reserved =
-              2 + 1 + 1 + List.length status_line + List.length footer
-            in
-            let patches_section_max = Int.max 0 (height - chrome_reserved) in
-            let total_views = List.length views in
-            let max_patch_rows =
-              let without_indicators = Int.max 0 (patches_section_max - 1) in
-              if total_views <= without_indicators then without_indicators
-              else Int.max 0 (patches_section_max - 3)
-            in
-            let patches, patch_header_lines, scroll_off, visible_rows =
-              render_patches ~width ~selected ~max_visible:max_patch_rows ~now
-                views
-            in
-            let patches_start_row = 3 + patch_header_lines + 1 in
-            let lines_before_activity =
-              2 (* header *) + 1 (* blank *) + List.length patches
-            in
-            let lines_after_activity =
-              1 (* blank before footer *) + List.length status_line
-              + List.length footer
-            in
-            (* [activity_budget] is the total space available for the activity
+        let chrome_reserved =
+          2 + 1 + 1 + List.length status_line + List.length footer
+        in
+        let patches_section_max = Int.max 0 (height - chrome_reserved) in
+        let total_views = List.length views in
+        let max_patch_rows =
+          let without_indicators = Int.max 0 (patches_section_max - 1) in
+          if total_views <= without_indicators then without_indicators
+          else Int.max 0 (patches_section_max - 3)
+        in
+        let patches, patch_header_lines, scroll_off, visible_rows =
+          render_patches ~width ~selected ~max_visible:max_patch_rows ~now views
+        in
+        let patches_start_row = 3 + patch_header_lines + 1 in
+        let lines_before_activity =
+          2 (* header *) + 1 (* blank *) + List.length patches
+        in
+        let lines_after_activity =
+          1 (* blank before footer *) + List.length status_line
+          + List.length footer
+        in
+        (* [activity_budget] is the total space available for the activity
            block, which when rendered is: 1 blank separator + render_activity
            output ("Activity" header + one line per entry). Need ≥ 3 to fit
            separator + header + 1 entry. The separator is folded into
@@ -1576,27 +1487,27 @@ let render_frame ~width ~height ~selected ~scroll_offset ~view_mode
            sole invariant is [List.length activity_lines ≤ activity_budget],
            and there is no separate prepend at the concat site that could
            drift from the budget. *)
-            let activity_budget =
-              height - lines_before_activity - lines_after_activity
-            in
-            let activity_lines =
-              if List.is_empty activity || activity_budget < 3 then []
-              else
-                let raw = render_activity activity in
-                let max_raw = activity_budget - 1 in
-                "" :: List.take raw (Int.min (List.length raw) max_raw)
-            in
-            let lines =
-              header @ [ "" ] @ patches @ activity_lines @ [ "" ] @ status_line
-              @ footer
-            in
-            {
-              no_patches with
-              lines;
-              patches_start_row;
-              patches_scroll_offset = scroll_off;
-              patch_count = visible_rows;
-            })
+        let activity_budget =
+          height - lines_before_activity - lines_after_activity
+        in
+        let activity_lines =
+          if List.is_empty activity || activity_budget < 3 then []
+          else
+            let raw = render_activity activity in
+            let max_raw = activity_budget - 1 in
+            "" :: List.take raw (Int.min (List.length raw) max_raw)
+        in
+        let lines =
+          header @ [ "" ] @ patches @ activity_lines @ [ "" ] @ status_line
+          @ footer
+        in
+        {
+          no_patches with
+          lines;
+          patches_start_row;
+          patches_scroll_offset = scroll_off;
+          patch_count = visible_rows;
+        }
 
 let frame_to_string (frame : frame) = String.concat ~sep:"\n" frame.lines ^ "\n"
 let detail_at_bottom frame = frame.detail_at_bottom

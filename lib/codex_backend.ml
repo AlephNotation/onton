@@ -16,7 +16,6 @@ let parse_event_with_cost_tracking =
 
 let parse_event = Codex_event_parser.parse_event
 let build_args = Codex_event_parser.build_args
-let auto_model = Codex_event_parser.auto_model
 
 let is_likely_auth_refresh_failure (result : Llm_backend.result) =
   let contains haystack needle =
@@ -44,8 +43,7 @@ let budget_cap_nano_usd_from_env () =
       | Some _ | None -> None)
 
 let run_streaming ~model ~process_mgr ~clock ~timeout ~setsid_exec ~project_name
-    ~cwd ~patch_id ~prompt ~resume_session ~session_uuid ~complexity ~on_event =
-  let model = Llm_backend.resolve_auto_model ~model ~complexity ~auto_model in
+    ~cwd ~patch_id ~prompt ~resume_session ~session_uuid ~on_event =
   let cwd_path = snd cwd in
   let args = build_args ~model ~cwd_path ~prompt ~resume_session in
   let env =
@@ -88,10 +86,9 @@ let create ~model ~process_mgr ~clock ~timeout ~setsid_exec : Llm_backend.t =
         ~prompt
         ~resume_session
         ~session_uuid
-        ~complexity
         ~on_event
       ->
         run_streaming ~model ~process_mgr ~clock ~timeout ~setsid_exec ~cwd
           ~project_name ~patch_id ~prompt ~resume_session ~session_uuid
-          ~complexity ~on_event);
+          ~on_event);
   }

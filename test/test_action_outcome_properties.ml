@@ -43,10 +43,10 @@ let bootstrap_one () =
 (** Make an agent busy via enqueue + tick for the given operation kind. *)
 let make_busy orch _patches gameplan pid kind =
   let orch = Orchestrator.enqueue orch pid kind in
-  let orch, _effects, _actions =
+  let orch, _actions =
     Patch_controller.tick orch ~project_name:"test-project" ~gameplan
   in
-  assert (Orchestrator.agent orch pid).Patch_agent.busy;
+  assert (Patch_agent.is_busy (Orchestrator.agent orch pid));
   orch
 
 (* ========== AO-1a: Start_failed produces busy=false ========== *)
@@ -58,11 +58,11 @@ let () =
   let orch = Orchestrator.set_max_ci_failures orch ~max_ci_failures:5 in
   assert ((Orchestrator.agent orch pid).Patch_agent.max_ci_failures = 5);
   let orch = Orchestrator.fire orch (Orchestrator.Start (pid, main)) in
-  assert (Orchestrator.agent orch pid).Patch_agent.busy;
+  assert (Patch_agent.is_busy (Orchestrator.agent orch pid));
   let orch =
     Orchestrator.apply_start_outcome orch pid Orchestrator.Start_failed
   in
-  assert (not (Orchestrator.agent orch pid).Patch_agent.busy);
+  assert (not (Patch_agent.is_busy (Orchestrator.agent orch pid)));
   Stdlib.print_endline "AO-1a passed"
 
 (* ========== AO-1b: Start_ok keeps busy=true (caller completes after PR
@@ -73,13 +73,13 @@ let () =
   let orch = Orchestrator.create ~patches ~main_branch:main in
   let pid = pid_of_idx patches 0 in
   let orch = Orchestrator.fire orch (Orchestrator.Start (pid, main)) in
-  assert (Orchestrator.agent orch pid).Patch_agent.busy;
+  assert (Patch_agent.is_busy (Orchestrator.agent orch pid));
   let orch = Orchestrator.apply_start_outcome orch pid Orchestrator.Start_ok in
   (* busy stays true — caller will complete after PR discovery *)
-  assert (Orchestrator.agent orch pid).Patch_agent.busy;
+  assert (Patch_agent.is_busy (Orchestrator.agent orch pid));
   (* caller completes after discovery *)
   let orch = Orchestrator.complete orch pid in
-  assert (not (Orchestrator.agent orch pid).Patch_agent.busy);
+  assert (not (Patch_agent.is_busy (Orchestrator.agent orch pid)));
   Stdlib.print_endline "AO-1b passed"
 
 (* ========== AO-2: Non-stale respond outcomes produce busy=false ========== *)
@@ -116,7 +116,7 @@ let () =
           let orch, patches, gameplan, pid = bootstrap_one () in
           let orch = make_busy orch patches gameplan pid kind in
           let orch = Orchestrator.apply_respond_outcome orch pid kind outcome in
-          not (Orchestrator.agent orch pid).Patch_agent.busy
+          not (Patch_agent.is_busy (Orchestrator.agent orch pid))
         with _ -> false)
   in
   QCheck2.Test.check_exn prop;
@@ -277,7 +277,7 @@ let () =
   (* Messages should be restored to human_messages *)
   assert (not (List.is_empty agent.Patch_agent.human_messages));
   assert (List.is_empty agent.Patch_agent.inflight_human_messages);
-  assert (not agent.Patch_agent.busy);
+  assert (not (Patch_agent.is_busy agent));
   Stdlib.print_endline "AO-6 passed"
 
 (* ========== AO-6b: accepted Human delivery is not restored on failure ========== *)
@@ -489,7 +489,7 @@ let () =
               Orchestrator.Respond_pr_body_miss
           in
           let a = Orchestrator.agent orch pid in
-          (not a.Patch_agent.busy)
+          (not (Patch_agent.is_busy a))
           && (not a.Patch_agent.pr_body_delivered)
           && a.Patch_agent.pr_body_artifact_miss_count = before + 1
         with _ -> false)
@@ -560,7 +560,7 @@ let () =
               Orchestrator.Respond_review_unresolved
           in
           let a = Orchestrator.agent orch pid in
-          (not a.Patch_agent.busy)
+          (not (Patch_agent.is_busy a))
           && a.Patch_agent.review_unresolved_cycle_count = before + 1
         with _ -> false)
   in
@@ -646,7 +646,7 @@ let () =
             Orchestrator.apply_session_result orch pid
               Orchestrator.Session_no_commits
           in
-          assert (Orchestrator.agent orch pid).Patch_agent.busy;
+          assert (Patch_agent.is_busy (Orchestrator.agent orch pid));
           assert (
             (Orchestrator.agent orch pid).Patch_agent.no_commits_push_count = 1);
           let orch =
@@ -654,7 +654,7 @@ let () =
               Orchestrator.Respond_pr_body_miss
           in
           let a_miss = Orchestrator.agent orch pid in
-          assert (not a_miss.Patch_agent.busy);
+          assert (not (Patch_agent.is_busy a_miss));
           assert (a_miss.Patch_agent.no_commits_push_count = 1);
           assert (a_miss.Patch_agent.pr_body_artifact_miss_count = 1);
           assert (not (Patch_agent.needs_intervention a_miss));
@@ -674,7 +674,7 @@ let () =
               Orchestrator.Respond_ok
           in
           let a = Orchestrator.agent orch pid in
-          (not a.Patch_agent.busy)
+          (not (Patch_agent.is_busy a))
           && a.Patch_agent.no_commits_push_count = 0
           && a.Patch_agent.pr_body_delivered
           && a.Patch_agent.pr_body_artifact_miss_count = 0
@@ -692,49 +692,13 @@ let () =
   QCheck2.Test.check_exn
     (QCheck2.Test.make ~name:"orchestrator surface preserves well-formedness"
        ~count:50 QCheck2.Gen.bool (fun flag ->
-         let orch, _patches, gameplan, pid = bootstrap_one () in
+         let orch, _patches, _gameplan, pid = bootstrap_one () in
          let mid = Message_id.of_string "ao-surface-msg" in
          let orch = Orchestrator.set_main_branch orch main in
          let orch = Orchestrator.set_max_ci_failures orch ~max_ci_failures:5 in
          if (Orchestrator.agent orch pid).Patch_agent.max_ci_failures <> 5 then
            QCheck2.Test.fail_reportf "max_ci_failures was not stamped";
-         (* Compile-time check of the public [Gameplan.add_patch] contract:
-            [Ok] carries an immutable [(Gameplan.t * Patch.t)] tuple. *)
-         let gameplan_with_added, added_patch =
-           match
-             Gameplan.add_patch gameplan ~title:"runtime patch"
-               ~description:"created from TUI"
-               ~dependencies:(if flag then [ pid ] else [])
-           with
-           | Ok (added : Gameplan.t * Patch.t) -> added
-           | Error msg -> QCheck2.Test.fail_reportf "%s" msg
-         in
-         if
-           not
-             (List.exists gameplan_with_added.Gameplan.patches ~f:(fun p ->
-                  Patch_id.equal p.Patch.id added_patch.Patch.id))
-         then QCheck2.Test.fail_reportf "added patch missing from gameplan";
-         (* [Gameplan.t] and [Patch.t] are immutable records. [add_planned_patch]
-            registers the PR-less agent and graph edges; the patch record itself
-            remains owned by [Gameplan.t] and cannot be mutated in place. Keep
-            the generated id/deps as the expected immutable contract and assert
-            the orchestrator graph reflects them exactly. *)
-         let added_patch_id = added_patch.Patch.id in
-         let expected_deps = added_patch.Patch.dependencies in
-         let orch =
-           Orchestrator.add_planned_patch orch added_patch ~deps:expected_deps
-         in
-         let added_agent = Orchestrator.agent orch added_patch_id in
-         if Patch_agent.has_pr added_agent then
-           QCheck2.Test.fail_reportf "planned patch unexpectedly has a PR";
-         if
-           not
-             (List.equal Patch_id.equal
-                (Graph.deps (Orchestrator.graph orch) added_patch_id)
-                expected_deps)
-         then QCheck2.Test.fail_reportf "planned patch deps were not recorded";
          let orch = Orchestrator.set_automerge_enabled orch pid flag in
-         let orch = Orchestrator.set_automerge_inflight orch pid flag in
          let orch = Orchestrator.set_automerge_deadline orch pid 1.0 in
          let orch = Orchestrator.clear_automerge_deadline orch pid in
          let orch = Orchestrator.increment_automerge_failure_count orch pid in
@@ -747,10 +711,13 @@ let () =
            Orchestrator.set_unresolved_comment_count orch pid
              (if flag then 1 else 0)
          in
+         let orch = Orchestrator.mark_review_requested orch pid "deadbeef" in
          let orch =
-           Orchestrator.set_review_requested_for_oid orch pid (Some "deadbeef")
+           if flag then
+             Orchestrator.mark_review_failed orch pid ~head_oid:"deadbeef"
+               ~error:"denied"
+           else orch
          in
-         let orch = Orchestrator.set_review_request_inflight orch pid flag in
          let orch = Orchestrator.reset_ci_failure_count orch pid in
          let orch = Orchestrator.reset_conflict_noop_count orch pid in
          let orch = Orchestrator.set_branch_blocked orch pid in
@@ -791,7 +758,7 @@ let () =
            Patch_controller.apply_automerge_failure orch ~now:0.0 pid
          in
          let _orch, _review_request_decisions =
-           Patch_controller.reconcile_review_requests orch
+           Patch_controller.reconcile_review_requests orch ~team_slug:"team"
          in
          let _found = Orchestrator.find_message orch mid in
          let _current = Orchestrator.current_message orch pid in
@@ -816,17 +783,13 @@ let () =
          try
            let orch, _patches, _gameplan, pid = bootstrap_one () in
            let orch = Orchestrator.set_automerge_enabled orch pid true in
-           let orch = Orchestrator.set_automerge_inflight orch pid true in
            let orch = Orchestrator.set_automerge_deadline orch pid 10.0 in
            let orch =
              Orchestrator.apply_automerge_failure_state orch pid
                ~retry_deadline:20.0 ~max_failures:3
            in
            let after_failure = Orchestrator.agent orch pid in
-           if after_failure.Patch_agent.automerge_inflight then
-             QCheck2.Test.fail_reportf
-               "apply_automerge_failure_state left inflight=true";
-           if after_failure.Patch_agent.automerge_failure_count <> 1 then
+           if Patch_agent.automerge_failure_count after_failure <> 1 then
              QCheck2.Test.fail_reportf
                "apply_automerge_failure_state did not increment failures";
            let orch =
@@ -845,7 +808,7 @@ let () =
            then
              QCheck2.Test.fail_reportf
                "observe_merge_queue did not record observed entry";
-           if Option.is_some after_observe.Patch_agent.automerge_deadline then
+           if Option.is_some (Patch_agent.automerge_deadline after_observe) then
              QCheck2.Test.fail_reportf
                "observe_merge_queue left a stale automerge deadline";
            let orch = Orchestrator.entered_merge_queue orch pid entered_entry in
@@ -859,7 +822,6 @@ let () =
              QCheck2.Test.fail_reportf
                "entered_merge_queue did not replace queue entry";
            let orch =
-             Orchestrator.set_automerge_inflight orch pid true |> fun orch ->
              Orchestrator.set_automerge_deadline orch pid 30.0 |> fun orch ->
              Orchestrator.increment_automerge_failure_count orch pid
            in
@@ -869,7 +831,6 @@ let () =
            let after_controller = Orchestrator.agent orch pid in
            let dequeue_now = 100.0 in
            let orch =
-             Orchestrator.set_automerge_inflight orch pid true |> fun orch ->
              Orchestrator.set_automerge_deadline orch pid 40.0 |> fun orch ->
              Orchestrator.increment_automerge_failure_count orch pid
            in
@@ -888,14 +849,12 @@ let () =
              after_controller.Patch_agent.merge_queue_entry
              (Some observed_entry)
            && after_controller.Patch_agent.merge_queue_required
-           && Option.is_none after_controller.Patch_agent.automerge_deadline
-           && (not after_controller.Patch_agent.automerge_inflight)
-           && after_controller.Patch_agent.automerge_failure_count = 0
+           && Option.is_none (Patch_agent.automerge_deadline after_controller)
+           && Patch_agent.automerge_failure_count after_controller = 0
            && Option.is_none after_dequeued.Patch_agent.merge_queue_entry
            && after_dequeued.Patch_agent.merge_queue_required
-           && (not after_dequeued.Patch_agent.automerge_inflight)
-           && after_dequeued.Patch_agent.automerge_failure_count = 0
-           && (match after_dequeued.Patch_agent.automerge_deadline with
+           && Patch_agent.automerge_failure_count after_dequeued = 0
+           && (match Patch_agent.automerge_deadline after_dequeued with
              | Some deadline ->
                  Float.( = ) deadline
                    (dequeue_now +. Patch_controller.automerge_idle_timeout)

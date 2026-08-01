@@ -74,18 +74,13 @@ module Tui_env = struct
     val tui_state : Tui_state.t
     val backend_name : string
     val version : string
-    val resolve_routing : complexity:int option -> Backend_routing.decision
+    val backend_decision : Backend_routing.decision
     val find_pr_number : patch_id:Patch_id.t -> Pr_number.t option
-
-    val register_pr_number :
-      patch_id:Patch_id.t -> pr_number:Pr_number.t -> unit
-
-    val unregister_pr_number : patch_id:Patch_id.t -> unit
   end
 end
 
 module Make
-    (Forge : Forge.S with type error = Github.error)
+    (_ : Forge.S with type error = Github.error)
     (_ : Worktree.S)
     (Env : Tui_env.S) =
 struct
@@ -108,8 +103,6 @@ struct
       patches_start_row;
       patches_scroll_offset;
       patches_visible_count;
-      dep_select_cursor;
-      dep_select_chosen;
       _;
     } =
       Env.tui_state
@@ -141,7 +134,7 @@ struct
       in
       let views =
         Tui.views_of_orchestrator ~orchestrator:orch ~gameplan:gp ~activity
-          ~resolve_routing:Env.resolve_routing ~intervention_reasons ()
+          ~backend_decision:Env.backend_decision ~intervention_reasons ()
       in
       sorted_patch_ids :=
         List.map views ~f:(fun (pv : Tui.patch_view) -> pv.Tui.patch_id);
@@ -173,12 +166,6 @@ struct
           ~show_manage:
             (Tui_input.equal_input_mode !input_mode Tui_input.Manage_patch)
           ~now ~transcript ?status_msg:!status_msg ?prompt_line:!prompt_line
-          ?dep_select:
-            (if
-               Tui_input.equal_input_mode !input_mode
-                 Tui_input.Select_patch_deps
-             then Some (!dep_select_cursor, !dep_select_chosen)
-             else None)
           views
       in
       detail_scroll := Tui.detail_scroll_offset frame;
@@ -213,8 +200,6 @@ struct
       patches_start_row;
       patches_scroll_offset;
       patches_visible_count;
-      dep_select_cursor;
-      dep_select_chosen;
     } =
       Env.tui_state
     in
@@ -229,12 +214,9 @@ struct
     in
     let sync_input () =
       match !input_mode with
-      | Tui_input.Normal | Tui_input.Manage_patch | Tui_input.Select_patch_deps
-        ->
-          prompt_line := None
-      | Tui_input.Prompt_pr | Tui_input.Prompt_worktree
-      | Tui_input.Prompt_message | Tui_input.Prompt_broadcast
-      | Tui_input.Prompt_patch_desc ->
+      | Tui_input.Normal | Tui_input.Manage_patch -> prompt_line := None
+      | Tui_input.Prompt_worktree | Tui_input.Prompt_message
+      | Tui_input.Prompt_broadcast ->
           let prefix = Tui_input.prompt_prefix !input_mode in
           let contents = Tui_input.Edit_buffer.contents buf in
           let cursor_col =
@@ -249,9 +231,6 @@ struct
     in
     let history = Tui_input.History.create () in
     let saved_draft = ref "" in
-    (* Carries the description typed in [Prompt_patch_desc] into the
-       [Prompt_patch_deps] step of the add-patch flow. *)
-    let pending_patch_desc = ref None in
     let eof_count = ref 0 in
     let last_click_time = ref 0.0 in
     let last_click_row = ref (-1) in
@@ -306,14 +285,6 @@ struct
           then (
             (match key with
             | Term.Key.Escape -> input_mode := Tui_input.Normal
-            | Term.Key.Char 'p' ->
-                (* Add a new gameplan patch. Global action, not tied to the
-                   selected patch: begin the two-step description → deps prompt. *)
-                Tui_input.Edit_buffer.clear buf;
-                pending_patch_desc := None;
-                dep_select_cursor := 0;
-                dep_select_chosen := Set.empty (module Patch_id);
-                input_mode := Tui_input.Prompt_patch_desc
             | Term.Key.Char 'm' -> (
                 input_mode := Tui_input.Normal;
                 let target_patch_id =
@@ -330,16 +301,14 @@ struct
                             Orchestrator.agent snap.Runtime.orchestrator
                               patch_id
                           in
-                          ( agent.Patch_agent.busy,
-                            Patch_agent.is_pr_present agent ))
+                          (Patch_agent.is_busy agent, Patch_agent.has_pr agent))
                     in
                     if busy then
                       log_event Env.runtime ~patch_id
                         "Cannot force-mark as merged — patch is currently busy"
                     else if not has_pr then
                       log_event Env.runtime ~patch_id
-                        "Cannot force-mark as merged — patch has no usable PR \
-                         (Missing or Absent)"
+                        "Cannot force-mark as merged — patch has no PR"
                     else (
                       Runtime.update_orchestrator Env.runtime (fun orch ->
                           Orchestrator.mark_merged orch patch_id);
@@ -356,23 +325,30 @@ struct
                 match target_patch_id with
                 | Some patch_id -> (
                     match
-                      Runtime.update_orchestrator_returning Env.runtime
+                      Runtime.commit_orchestrator_returning Env.runtime
                         (fun orch ->
                           match Orchestrator.find_agent orch patch_id with
                           | None -> (orch, None)
                           | Some agent ->
-                              let v = not agent.Patch_agent.automerge_enabled in
+                              let v =
+                                not (Patch_agent.automerge_enabled agent)
+                              in
                               let orch =
-                                Orchestrator.set_automerge_enabled orch patch_id
-                                  v
+                                Patch_controller.set_automerge_enabled orch
+                                  patch_id v
                               in
                               (orch, Some v))
                     with
-                    | Some true ->
+                    | Ok (Some true) ->
                         log_event Env.runtime ~patch_id "Automerge enabled"
-                    | Some false ->
+                    | Ok (Some false) ->
                         log_event Env.runtime ~patch_id "Automerge disabled"
-                    | None -> ())
+                    | Ok None -> ()
+                    | Error message ->
+                        log_event Env.runtime ~patch_id
+                          (Printf.sprintf
+                             "Could not persist automerge setting — %s" message)
+                    )
                 | None -> ())
             | Term.Key.Char 'b' -> (
                 input_mode := Tui_input.Normal;
@@ -410,82 +386,6 @@ struct
             | Term.Key.Ctrl _ | Term.Key.Mouse _ | Term.Key.Unknown _ ->
                 ());
             loop ())
-          else if
-            Tui_input.equal_input_mode !input_mode Tui_input.Select_patch_deps
-          then (
-            (* Add-patch step 2: multi-select dependencies. Candidates are the
-               existing patches in display order (same ordering as [views], so
-               the cursor index lines up with the rendered overlay). *)
-            let candidates = !sorted_patch_ids in
-            let n = List.length candidates in
-            (match key with
-            | Term.Key.Escape ->
-                pending_patch_desc := None;
-                dep_select_cursor := 0;
-                dep_select_chosen := Set.empty (module Patch_id);
-                input_mode := Tui_input.Normal
-            | Term.Key.Up | Term.Key.Char 'k' ->
-                if n > 0 then
-                  dep_select_cursor := Int.max 0 (!dep_select_cursor - 1)
-            | Term.Key.Down | Term.Key.Char 'j' ->
-                if n > 0 then
-                  dep_select_cursor := Int.min (n - 1) (!dep_select_cursor + 1)
-            | Term.Key.Char ' ' -> (
-                match List.nth candidates !dep_select_cursor with
-                | None -> ()
-                | Some pid ->
-                    dep_select_chosen :=
-                      if Set.mem !dep_select_chosen pid then
-                        Set.remove !dep_select_chosen pid
-                      else Set.add !dep_select_chosen pid)
-            | Term.Key.Enter -> (
-                let description = !pending_patch_desc in
-                match description with
-                | None ->
-                    input_mode := Tui_input.Normal;
-                    log_event Env.runtime
-                      "Add patch failed — no pending description"
-                | Some description -> (
-                    (* Present deps in display order, not toggle order. *)
-                    let dependencies =
-                      List.filter candidates ~f:(fun p ->
-                          Set.mem !dep_select_chosen p)
-                    in
-                    let title =
-                      if String.length description <= 72 then description
-                      else String.prefix description 71 ^ "…"
-                    in
-                    match
-                      Runtime.add_patch Env.runtime ~title ~description
-                        ~dependencies
-                    with
-                    | Error msg ->
-                        log_event Env.runtime
-                          (Printf.sprintf "Cannot add patch — %s" msg)
-                    | Ok patch ->
-                        pending_patch_desc := None;
-                        input_mode := Tui_input.Normal;
-                        dep_select_chosen := Set.empty (module Patch_id);
-                        dep_select_cursor := 0;
-                        let deps_str =
-                          match patch.Patch.dependencies with
-                          | [] -> "no dependencies"
-                          | ds ->
-                              "depends on "
-                              ^ (List.map ds ~f:Patch_id.to_string
-                                |> String.concat ~sep:", ")
-                        in
-                        log_event Env.runtime ~patch_id:patch.Patch.id
-                          (Printf.sprintf "Added patch %s (%s) — %s"
-                             (Patch_id.to_string patch.Patch.id)
-                             deps_str title)))
-            | Term.Key.Char _ | Term.Key.Tab | Term.Key.Paste _
-            | Term.Key.Backspace | Term.Key.Left | Term.Key.Right
-            | Term.Key.Home | Term.Key.End | Term.Key.Page_up
-            | Term.Key.Page_down | Term.Key.Delete | Term.Key.F _
-            | Term.Key.Ctrl _ | Term.Key.Mouse _ | Term.Key.Unknown _ ->
-                ());
-            loop ())
           else if not (Tui_input.equal_input_mode !input_mode Tui_input.Normal)
           then
             match key with
@@ -495,9 +395,6 @@ struct
             | Term.Key.Escape ->
                 Tui_input.Edit_buffer.clear buf;
                 saved_draft := "";
-                pending_patch_desc := None;
-                dep_select_cursor := 0;
-                dep_select_chosen := Set.empty (module Patch_id);
                 Tui_input.History.reset_browse history;
                 input_mode := Tui_input.Normal;
                 loop ()
@@ -508,10 +405,7 @@ struct
                 let mode = !input_mode in
                 Tui_input.Edit_buffer.clear buf;
                 saved_draft := "";
-                if
-                  not
-                    (Tui_input.equal_input_mode mode Tui_input.Prompt_patch_desc)
-                then input_mode := Tui_input.Normal;
+                input_mode := Tui_input.Normal;
                 let line = String.strip line in
                 (match mode with
                 | Tui_input.Prompt_message -> (
@@ -551,7 +445,7 @@ struct
                         Runtime.read Env.runtime (fun snap ->
                             Orchestrator.all_agents snap.Runtime.orchestrator
                             |> List.filter ~f:(fun (a : Patch_agent.t) ->
-                                a.Patch_agent.has_session
+                                Patch_agent.has_session a
                                 && not a.Patch_agent.merged)
                             |> List.map ~f:(fun (a : Patch_agent.t) ->
                                 a.Patch_agent.patch_id))
@@ -566,69 +460,6 @@ struct
                               ~plural:"patches with a session")
                            line)
                     end
-                | Tui_input.Prompt_pr -> (
-                    match Int.of_string_opt line with
-                    | Some n when n > 0 ->
-                        let pr_number = Pr_number.of_int n in
-                        let patch_id = Patch_id.of_string (Int.to_string n) in
-                        let already_exists =
-                          Runtime.read Env.runtime (fun snap ->
-                              Option.is_some
-                                (Orchestrator.find_agent
-                                   snap.Runtime.orchestrator patch_id))
-                        in
-                        if already_exists then
-                          log_event Env.runtime ~patch_id
-                            (Printf.sprintf "Ad-hoc PR #%d already registered" n)
-                        else (
-                          status_msg :=
-                            Some
-                              {
-                                Tui.level = Tui.Info;
-                                text = Printf.sprintf "Fetching PR #%d…" n;
-                                expires_at = None;
-                              };
-                          match Forge.pr_state pr_number with
-                          | Error err ->
-                              status_msg := None;
-                              log_event Env.runtime ~patch_id
-                                (Printf.sprintf "Cannot add ad-hoc PR #%d — %s"
-                                   n (Forge.show_error err))
-                          | Ok pr_state when Pr_state.is_fork pr_state ->
-                              status_msg := None;
-                              log_event Env.runtime ~patch_id
-                                (Printf.sprintf
-                                   "Cannot add ad-hoc PR #%d — fork PRs not \
-                                    supported"
-                                   n)
-                          | Ok pr_state -> (
-                              status_msg := None;
-                              match pr_state.Pr_state.head_branch with
-                              | None ->
-                                  log_event Env.runtime ~patch_id
-                                    (Printf.sprintf
-                                       "Cannot add ad-hoc PR #%d — no head \
-                                        branch"
-                                       n)
-                              | Some branch ->
-                                  Env.register_pr_number ~patch_id ~pr_number;
-                                  Runtime.update_orchestrator Env.runtime
-                                    (fun orch ->
-                                      let base_branch =
-                                        Option.value
-                                          pr_state.Pr_state.base_branch
-                                          ~default:
-                                            (Orchestrator.main_branch orch)
-                                      in
-                                      Orchestrator.add_agent orch ~patch_id
-                                        ~branch ~base_branch ~pr_number);
-                                  log_event Env.runtime ~patch_id
-                                    (Printf.sprintf "Ad-hoc PR #%d added (%s)" n
-                                       (Branch.to_string branch))))
-                    | _ ->
-                        if not (String.is_empty line) then
-                          log_event Env.runtime
-                            (Printf.sprintf "Invalid PR number — %s" line))
                 | Tui_input.Prompt_worktree -> (
                     if not (String.is_empty line) then
                       let path = line in
@@ -639,9 +470,9 @@ struct
                       | Some patch_id -> (
                           let busy =
                             Runtime.read Env.runtime (fun snap ->
-                                (Orchestrator.agent snap.Runtime.orchestrator
-                                   patch_id)
-                                  .Patch_agent.busy)
+                                Patch_agent.is_busy
+                                  (Orchestrator.agent snap.Runtime.orchestrator
+                                     patch_id))
                           in
                           if busy then
                             log_event Env.runtime ~patch_id
@@ -745,22 +576,7 @@ struct
                               log_event Env.runtime ~patch_id
                                 (Printf.sprintf "Failed to add worktree — %s"
                                    msg)))
-                | Tui_input.Prompt_patch_desc ->
-                    (* Step 1: capture the description, then open the
-                       dependency-selection overlay. *)
-                    if String.is_empty line then (
-                      pending_patch_desc := None;
-                      input_mode := Tui_input.Normal;
-                      log_event Env.runtime
-                        "Add patch cancelled — empty description")
-                    else (
-                      pending_patch_desc := Some line;
-                      dep_select_cursor := 0;
-                      dep_select_chosen := Set.empty (module Patch_id);
-                      input_mode := Tui_input.Select_patch_deps)
-                | Tui_input.Normal | Tui_input.Manage_patch
-                | Tui_input.Select_patch_deps ->
-                    ());
+                | Tui_input.Normal | Tui_input.Manage_patch -> ());
                 loop ()
             | Term.Key.Backspace ->
                 Tui_input.Edit_buffer.delete_before buf;
@@ -912,11 +728,6 @@ struct
                 Tui_input.Edit_buffer.clear buf;
                 input_mode := Tui_input.Prompt_broadcast;
                 loop ()
-            | Term.Key.Char '+'
-              when Tui.equal_view_mode !view_mode Tui.List_view ->
-                Tui_input.Edit_buffer.clear buf;
-                input_mode := Tui_input.Prompt_pr;
-                loop ()
             | Term.Key.Char 'w'
               when Tui.equal_view_mode !view_mode Tui.List_view ->
                 Tui_input.Edit_buffer.clear buf;
@@ -1042,8 +853,7 @@ struct
                         | Tui_input.Page_up | Tui_input.Page_down
                         | Tui_input.Quit | Tui_input.Help | Tui_input.Select
                         | Tui_input.Back | Tui_input.Timeline | Tui_input.Noop
-                        | Tui_input.Send_message _ | Tui_input.Add_pr _
-                        | Tui_input.Add_worktree _ | Tui_input.Remove_patch
+                        | Tui_input.Send_message _ | Tui_input.Add_worktree _
                         | Tui_input.Open_in_browser ->
                             let delta =
                               match cmd with
@@ -1054,9 +864,8 @@ struct
                               | Tui_input.Quit | Tui_input.Help
                               | Tui_input.Select | Tui_input.Back
                               | Tui_input.Timeline | Tui_input.Noop
-                              | Tui_input.Send_message _ | Tui_input.Add_pr _
+                              | Tui_input.Send_message _
                               | Tui_input.Add_worktree _
-                              | Tui_input.Remove_patch
                               | Tui_input.Open_in_browser | Tui_input.Scroll_top
                               | Tui_input.Scroll_bottom ->
                                   0
@@ -1114,46 +923,7 @@ struct
                 | Tui_input.Help ->
                     show_help := true;
                     loop ()
-                | Tui_input.Remove_patch ->
-                    (match !view_mode with
-                    | Tui.List_view -> (
-                        match selected_pid () with
-                        | None ->
-                            log_event Env.runtime
-                              "Cannot remove patch — no selectable patch"
-                        | Some patch_id ->
-                            let busy, in_gameplan =
-                              Runtime.read Env.runtime (fun snap ->
-                                  let agent =
-                                    Orchestrator.agent snap.Runtime.orchestrator
-                                      patch_id
-                                  in
-                                  let in_gp =
-                                    List.exists
-                                      snap.Runtime.gameplan.Gameplan.patches
-                                      ~f:(fun (p : Patch.t) ->
-                                        Patch_id.equal p.Patch.id patch_id)
-                                  in
-                                  (agent.Patch_agent.busy, in_gp))
-                            in
-                            if in_gameplan then
-                              log_event Env.runtime ~patch_id
-                                "Cannot remove gameplan patch — only ad-hoc \
-                                 patches can be removed"
-                            else (
-                              if busy then
-                                log_event Env.runtime ~patch_id
-                                  "Warning — patch is currently running, it \
-                                   may create a GitHub PR before stopping";
-                              Runtime.update_orchestrator Env.runtime
-                                (fun orch ->
-                                  Orchestrator.remove_agent orch patch_id);
-                              Env.unregister_pr_number ~patch_id;
-                              log_event Env.runtime ~patch_id
-                                "Removed ad-hoc patch"))
-                    | Tui.Detail_view _ | Tui.Timeline_view -> ());
-                    loop ()
-                | Tui_input.Noop | Tui_input.Send_message _ | Tui_input.Add_pr _
+                | Tui_input.Noop | Tui_input.Send_message _
                 | Tui_input.Add_worktree _ | Tui_input.Open_in_browser ->
                     loop ()))
     in

@@ -6,11 +6,6 @@ open Onton_core.Types
 let log_event runtime ?patch_id msg =
   Runtime_logging.log_event runtime ?patch_id msg
 
-let patch_complexity ~(gameplan : Gameplan.t) ~patch_id =
-  Base.List.find gameplan.Gameplan.patches ~f:(fun (p : Patch.t) ->
-      Patch_id.equal p.Patch.id patch_id)
-  |> Base.Option.bind ~f:(fun (p : Patch.t) -> p.Patch.complexity)
-
 module Runner_env = struct
   module type S = sig
     include Run_env.S
@@ -31,10 +26,9 @@ module Runner_env = struct
 
     val transcripts : (Patch_id.t, string) Stdlib.Hashtbl.t
     val event_log : Event_log.t
-
-    val pick_backend :
-      complexity:int option -> Backend_registry.kind * Backend_routing.decision
-
+    val process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t
+    val backend : Backend_registry.kind
+    val backend_decision : Backend_routing.decision
     val register_pr : patch_id:Patch_id.t -> pr_number:Pr_number.t -> unit
   end
 end
@@ -44,6 +38,8 @@ module Make
     (W : Worktree.S)
     (Env : Runner_env.S) =
 struct
+  exception Durable_commit_failed of string
+
   module WS_Env : Worktree_setup.ENV = struct
     let runtime = Env.runtime
     let clock = Env.clock
@@ -82,39 +78,194 @@ struct
   module With_busy_guard = With_busy_guard.Make (Busy_guard_env)
   module Worktree_plan_executor = Worktree_plan_executor.Make (W) (WS_Env)
 
-  let execute_github_effects ~runtime effects =
-    Base.List.iter effects ~f:(fun github_effect ->
-        let label =
-          match github_effect with
-          | Patch_controller.Set_pr_draft { pr_number; draft; _ } ->
-              Printf.sprintf "set_pr_draft (PR #%d, draft=%b)"
-                (Pr_number.to_int pr_number)
-                draft
-          | Patch_controller.Set_pr_base { pr_number; base; _ } ->
-              Printf.sprintf "set_pr_base (PR #%d, base=%s)"
-                (Pr_number.to_int pr_number)
-                (Branch.to_string base)
-        in
-        try
-          let result =
-            match github_effect with
-            | Patch_controller.Set_pr_draft { patch_id = _; pr_number; draft }
-              ->
-                Forge.set_draft ~pr_number ~draft
-            | Patch_controller.Set_pr_base { patch_id = _; pr_number; base } ->
-                Forge.update_pr_base ~pr_number ~base
-          in
-          match result with
-          | Ok () ->
-              Runtime.update_orchestrator runtime (fun orch ->
-                  Patch_controller.apply_github_effect_success orch
-                    github_effect)
-          | Error err ->
-              Printf.eprintf "%s failed: %s\n%!" label (Forge.show_error err)
+  let durable_commit runtime f =
+    match Runtime.commit_orchestrator_returning runtime f with
+    | Ok value -> value
+    | Error message -> raise (Durable_commit_failed message)
+
+  let github_command_label (command : Github_effect.t) =
+    let pr_number =
+      match command.action with
+      | Github_effect.Set_pr_draft { pr_number; _ }
+      | Github_effect.Set_pr_base { pr_number; _ }
+      | Github_effect.Request_review { pr_number; _ }
+      | Github_effect.Direct_merge { pr_number }
+      | Github_effect.Enqueue { pr_number }
+      | Github_effect.Dequeue { pr_number; _ } ->
+          pr_number
+    in
+    Printf.sprintf "%s for PR #%d"
+      (match command.action with
+      | Github_effect.Set_pr_draft _ -> "set draft state"
+      | Github_effect.Set_pr_base _ -> "set base branch"
+      | Github_effect.Request_review _ -> "request review"
+      | Github_effect.Direct_merge _ -> "merge"
+      | Github_effect.Enqueue _ -> "enqueue"
+      | Github_effect.Dequeue _ -> "dequeue")
+      (Pr_number.to_int pr_number)
+
+  let github_error_is_permanent action = function
+    | Github.Http_error { status; _ } -> (
+        status >= 400 && status < 500
+        &&
+        match action with
+        | Github_effect.Direct_merge _ | Github_effect.Enqueue _
+        | Github_effect.Dequeue _ ->
+            status <> 405
+        | Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _
+        | Github_effect.Request_review _ ->
+            true)
+    | Github.Json_parse_error _ -> true
+    | Github.Timeout _ | Github.Transport_error _ | Github.Graphql_error _ ->
+        false
+
+  let claim_github_command ~runtime ~now effect_id =
+    durable_commit runtime (fun orch ->
+        Orchestrator.claim_github_effect orch ~now effect_id)
+
+  let finish_github_success ~runtime command success =
+    ignore
+      (durable_commit runtime (fun orch ->
+           let orch =
+             Patch_controller.finish_github_success orch
+               ~now:(Unix.gettimeofday ()) command success
+           in
+           (orch, ())))
+
+  let finish_github_failure ~runtime command err =
+    let error = Forge.show_error err in
+    let permanent =
+      github_error_is_permanent command.Github_effect.action err
+    in
+    ignore
+      (durable_commit runtime (fun orch ->
+           let orch =
+             Patch_controller.finish_github_failure orch
+               ~now:(Unix.gettimeofday ()) command ~permanent ~error
+           in
+           (orch, ())));
+    error
+
+  let call_github_adapter f =
+    try `Returned (f ()) with
+    | Eio.Cancel.Cancelled _ as exn -> raise exn
+    | exn -> `Crashed exn
+
+  let finish_github_crash ~runtime command exn =
+    let error = Printexc.to_string exn in
+    ignore
+      (durable_commit runtime (fun orch ->
+           let orch =
+             Patch_controller.finish_github_failure orch
+               ~now:(Unix.gettimeofday ()) command ~permanent:false ~error
+           in
+           (orch, ())));
+    error
+
+  let execute_github_command ~runtime (command : Github_effect.t) =
+    let label = github_command_label command in
+    let patch_id = command.patch_id in
+    let log_ok message = log_event runtime ~patch_id message in
+    match command.action with
+    | Github_effect.Set_pr_draft { pr_number; draft } -> (
+        match
+          call_github_adapter (fun () -> Forge.set_draft ~pr_number ~draft)
         with
-        | Eio.Cancel.Cancelled _ as exn -> raise exn
-        | exn ->
-            Printf.eprintf "%s crashed: %s\n%!" label (Printexc.to_string exn))
+        | `Returned (Ok ()) ->
+            finish_github_success ~runtime command
+              Patch_controller.Mutation_applied;
+            log_ok (Printf.sprintf "%s complete" label)
+        | `Returned (Error err) ->
+            let error = finish_github_failure ~runtime command err in
+            log_ok (Printf.sprintf "%s failed — %s" label error)
+        | `Crashed exn ->
+            let error = finish_github_crash ~runtime command exn in
+            log_ok (Printf.sprintf "%s crashed — %s" label error))
+    | Github_effect.Set_pr_base { pr_number; base } -> (
+        match
+          call_github_adapter (fun () -> Forge.update_pr_base ~pr_number ~base)
+        with
+        | `Returned (Ok ()) ->
+            finish_github_success ~runtime command
+              Patch_controller.Mutation_applied;
+            log_ok (Printf.sprintf "%s complete" label)
+        | `Returned (Error err) ->
+            let error = finish_github_failure ~runtime command err in
+            log_ok (Printf.sprintf "%s failed — %s" label error)
+        | `Crashed exn ->
+            let error = finish_github_crash ~runtime command exn in
+            log_ok (Printf.sprintf "%s crashed — %s" label error))
+    | Github_effect.Request_review { pr_number; team_slug; _ } -> (
+        match
+          call_github_adapter (fun () ->
+              Forge.request_review ~pr_number ~team_slug)
+        with
+        | `Returned (Ok ()) ->
+            finish_github_success ~runtime command
+              Patch_controller.Mutation_applied;
+            log_ok (Printf.sprintf "%s from team %s complete" label team_slug)
+        | `Returned (Error err) ->
+            let error = finish_github_failure ~runtime command err in
+            log_ok (Printf.sprintf "%s failed — %s" label error)
+        | `Crashed exn ->
+            let error = finish_github_crash ~runtime command exn in
+            log_ok (Printf.sprintf "%s crashed — %s" label error))
+    | Github_effect.Direct_merge { pr_number } -> (
+        match call_github_adapter (fun () -> Forge.merge_pr ~pr_number) with
+        | `Returned (Ok Forge.Merge_succeeded) ->
+            finish_github_success ~runtime command
+              Patch_controller.Merge_succeeded;
+            log_ok (Printf.sprintf "%s complete" label)
+        | `Returned (Ok (Forge.Merge_queued _))
+        | `Returned (Ok Forge.Merge_unconfirmed) ->
+            finish_github_success ~runtime command
+              Patch_controller.Merge_pending;
+            log_ok
+              (Printf.sprintf "%s accepted; awaiting poll confirmation" label)
+        | `Returned (Error err) ->
+            let error = finish_github_failure ~runtime command err in
+            log_ok (Printf.sprintf "%s failed — %s" label error)
+        | `Crashed exn ->
+            let error = finish_github_crash ~runtime command exn in
+            log_ok (Printf.sprintf "%s crashed — %s" label error))
+    | Github_effect.Enqueue { pr_number } -> (
+        match call_github_adapter (fun () -> Forge.enqueue_pr ~pr_number) with
+        | `Returned (Ok (Forge.Enqueued entry))
+        | `Returned (Ok (Forge.Already_enqueued entry)) ->
+            finish_github_success ~runtime command
+              (Patch_controller.Queue_entered entry);
+            log_ok (Printf.sprintf "%s complete" label)
+        | `Returned (Error err) ->
+            let error = finish_github_failure ~runtime command err in
+            log_ok (Printf.sprintf "%s failed — %s" label error)
+        | `Crashed exn ->
+            let error = finish_github_crash ~runtime command exn in
+            log_ok (Printf.sprintf "%s crashed — %s" label error))
+    | Github_effect.Dequeue { pr_number; _ } -> (
+        match call_github_adapter (fun () -> Forge.dequeue_pr ~pr_number) with
+        | `Returned (Ok ()) ->
+            finish_github_success ~runtime command
+              Patch_controller.Mutation_applied;
+            log_ok (Printf.sprintf "%s complete" label)
+        | `Returned (Error err) ->
+            let error = finish_github_failure ~runtime command err in
+            log_ok (Printf.sprintf "%s failed — %s" label error)
+        | `Crashed exn ->
+            let error = finish_github_crash ~runtime command exn in
+            log_ok (Printf.sprintf "%s crashed — %s" label error))
+
+  let execute_github_outbox ~runtime =
+    let now = Unix.gettimeofday () in
+    let runnable =
+      Runtime.read runtime (fun snap ->
+          Orchestrator.runnable_github_effects snap.Runtime.orchestrator ~now)
+    in
+    Eio.Fiber.List.iter ~max_fibers:4
+      (fun command ->
+        match claim_github_command ~runtime ~now command.Github_effect.id with
+        | None -> ()
+        | Some claimed -> execute_github_command ~runtime claimed)
+      runnable
 
   (** Pluralize a count for inline rendering: [pluralize 1 "comment"] →
       ["1 comment"], [pluralize 2 "comment"] → ["2 comments"]. Pass [~plural]
@@ -123,358 +274,57 @@ struct
     let many = match plural with Some p -> p | None -> singular ^ "s" in
     Printf.sprintf "%d %s" n (if n = 1 then singular else many)
 
-  (** Reconcile per-patch automerge deadlines. For each deadline that has
-      elapsed, merge the PR on GitHub and mark the patch merged on success. On
-      failure the failure counter is incremented and the deadline pushed out by
-      a fresh idle window, so the retry is at least 5 minutes out regardless of
-      how often the runner tick fires. Retries continue until the consecutive
-      failure cap is reached, at which point reconciliation stops issuing merge
-      calls until the user toggles automerge off/on. *)
-  let reconcile_and_execute_automerge ~runtime =
-    let now = Unix.gettimeofday () in
-    let decisions =
-      Runtime.update_orchestrator_returning runtime (fun orch ->
-          Patch_controller.reconcile_automerge orch ~now)
+  let command_failure_text (failure : Patch_validator.command_failure) =
+    let exit =
+      match failure.exit_code with
+      | Some code -> Printf.sprintf "exit %d" code
+      | None -> "no exit status"
     in
-    (* Dispatch concurrently with a bounded fiber pool. A slow merge call can
-     take up to GitHub's request timeout (~30s), so serial iteration would
-     compound that over [N] decisions.
-
-     This call still blocks the enclosing [amloop] fiber until all in-flight
-     merges return, which means under simultaneous slow responses the 1s
-     automerge cadence can degrade to one-per-timeout. That trade-off is
-     intentional: bounded concurrency avoids a thundering herd against GitHub
-     rate limits and keeps exactly one automerge fiber alive on the switch
-     (the runner loop is already decoupled — it does not wait on this). The
-     1s cadence is not load-bearing either: deadlines fire on 5-minute idle
-     windows, and [automerge_inflight] already prevents double-claiming. *)
-    Eio.Fiber.List.iter ~max_fibers:4
-      (fun Patch_controller.
-             { merge_patch_id = patch_id; merge_pr_number = pr_number; action }
-         ->
-        let label =
-          Printf.sprintf "automerge PR #%d" (Pr_number.to_int pr_number)
-        in
-        (* [reconcile_automerge] set [automerge_inflight = true] when it emitted
-         this decision. Every exit path below must either call
-         [apply_automerge_success]/[apply_automerge_failure] (both of which
-         clear the inflight flag) or run the [Fun.protect] finaliser. *)
-        let inflight_cleared = ref false in
-        let clear_inflight_if_needed () =
-          if not !inflight_cleared then (
-            inflight_cleared := true;
-            Runtime.update_orchestrator runtime (fun orch ->
-                Orchestrator.set_automerge_inflight orch patch_id false))
-        in
-        (* Push the deadline out by one idle window after a non-terminal response
-         (GitHub queued the merge or responded with an unrecognised shape) and
-         clear [inflight] in the same orchestrator update. The deadline that
-         fired this decision is already in the past, and merely clearing
-         [inflight] would make the patch eligible again on the very next
-         reconcile tick — producing a tight loop of PUT /merge calls until the
-         poller observes a terminal state. A fresh idle window gives the
-         poller time to catch up. Doing both writes atomically avoids a brief
-         window where a concurrent read sees the pushed-out deadline with
-         [inflight = true]. *)
-        let push_deadline_and_clear_inflight () =
-          if not !inflight_cleared then (
-            inflight_cleared := true;
-            let now_ts = Unix.gettimeofday () in
-            Runtime.update_orchestrator runtime (fun orch ->
-                let orch =
-                  Orchestrator.set_automerge_inflight orch patch_id false
-                in
-                Orchestrator.set_automerge_deadline orch patch_id
-                  (now_ts +. Patch_controller.automerge_idle_timeout)))
-        in
-        let apply_failure () =
-          inflight_cleared := true;
-          (* [apply_automerge_failure] delegates to the shared automerge-state
-             transition, which clears [automerge_inflight] before incrementing
-             the failure count or applying the retry/cap deadline rules. *)
-          Runtime.update_orchestrator runtime (fun orch ->
-              Patch_controller.apply_automerge_failure orch
-                ~now:(Unix.gettimeofday ()) patch_id)
-        in
-        let record_enqueued_and_clear_inflight entry =
-          if not !inflight_cleared then (
-            inflight_cleared := true;
-            Runtime.update_orchestrator runtime (fun orch ->
-                Patch_controller.apply_merge_queue_entered orch patch_id entry))
-        in
-        let handle_enqueue_result result =
-          match result with
-          | Ok (Forge.Enqueued entry) ->
-              record_enqueued_and_clear_inflight entry;
-              log_event runtime ~patch_id
-                (Printf.sprintf
-                   "Automerge enqueued PR #%d in GitHub merge queue (%s, \
-                    position %d)"
-                   (Pr_number.to_int pr_number)
-                   entry.Pr_state.id entry.Pr_state.position)
-          | Ok (Forge.Already_enqueued entry) ->
-              record_enqueued_and_clear_inflight entry;
-              log_event runtime ~patch_id
-                (Printf.sprintf
-                   "Automerge PR #%d already in GitHub merge queue (%s, \
-                    position %d)"
-                   (Pr_number.to_int pr_number)
-                   entry.Pr_state.id entry.Pr_state.position)
-          | Error err ->
-              apply_failure ();
-              log_event runtime ~patch_id
-                (Printf.sprintf "Automerge enqueue failed — %s"
-                   (Forge.show_error err))
-        in
-        Fun.protect ~finally:clear_inflight_if_needed (fun () ->
-            (* Re-read the patch just before hitting GitHub. The original
-             decision came from an earlier orchestrator snapshot; between then
-             and now the patch may have been merged, lost [merge_ready], gone
-             busy again, or had its failure cap hit (via a parallel tick). Any
-             of these make the call both unnecessary and noisy (GitHub 405).
-             We call [is_automerge_candidate] with [~ignore_inflight:true]
-             because we ourselves set the inflight flag when claiming this
-             decision — the default [ignore_inflight:false] would see our own
-             flag and short-circuit every merge. *)
-            let still_candidate =
-              Runtime.read runtime (fun snap ->
-                  match
-                    Orchestrator.find_agent snap.Runtime.orchestrator patch_id
-                  with
-                  | None -> false
-                  | Some agent -> (
-                      let main_branch =
-                        Orchestrator.main_branch snap.Runtime.orchestrator
-                      in
-                      (* Verify the agent's current PR still matches the one this
-                       decision was emitted for. If the poller has remapped
-                       the patch to a replacement PR between reconcile and
-                       execute, hitting GitHub with the stale [pr_number]
-                       would either merge the wrong PR (on the rare chance
-                       the old PR is still open) or 405 and bump
-                       [automerge_failure_count] for no reason. *)
-                      let same_pr =
-                        match Patch_agent.pr_number agent with
-                        | Some current -> Pr_number.equal current pr_number
-                        | None -> false
-                      in
-                      same_pr
-                      &&
-                      match action with
-                      | Patch_controller.Direct_merge ->
-                          Patch_controller.is_automerge_candidate
-                            ~ignore_inflight:true agent ~main_branch
-                      | Patch_controller.Enqueue ->
-                          agent.Patch_agent.merge_queue_required
-                          && (not agent.Patch_agent.merged)
-                          && agent.Patch_agent.automerge_enabled
-                          && Patch_agent.is_approved agent ~main_branch
-                          && agent.Patch_agent.checks_passing
-                          && List.is_empty agent.Patch_agent.queue
-                          && agent.Patch_agent.automerge_failure_count
-                             < Patch_controller.automerge_max_failures
-                      | Patch_controller.Dequeue entry_id ->
-                          Patch_controller.should_dequeue_merge_queue agent
-                            ~main_branch ~entry_id))
-            in
-            if not still_candidate then (
-              log_event runtime ~patch_id
-                (Printf.sprintf "%s skipped — no longer a candidate" label);
-              (* Clear inflight here explicitly (rather than relying on the
-               [Fun.protect] finaliser) and deliberately leave the deadline in
-               place — the next [reconcile_automerge] tick will clear it via
-               the [(false, Some _)] branch if candidacy is genuinely lost,
-               or re-arm it if the patch became a candidate again. Keeping
-               deadline-clearing centralised in reconcile avoids a redundant
-               write here and the divergence risk of two call sites managing
-               the same invariant. *)
-              clear_inflight_if_needed ())
-            else
-              try
-                match action with
-                | Patch_controller.Enqueue ->
-                    handle_enqueue_result (Forge.enqueue_pr ~pr_number)
-                | Patch_controller.Dequeue _ -> (
-                    match Forge.dequeue_pr ~pr_number with
-                    | Ok () ->
-                        inflight_cleared := true;
-                        Runtime.update_orchestrator runtime (fun orch ->
-                            Patch_controller.apply_merge_queue_dequeued orch
-                              ~now:(Unix.gettimeofday ()) patch_id);
-                        log_event runtime ~patch_id
-                          (Printf.sprintf
-                             "Automerge dequeued PR #%d from GitHub merge \
-                              queue after approval was lost or GitHub reported \
-                              a queue alarm"
-                             (Pr_number.to_int pr_number))
-                    | Error err ->
-                        apply_failure ();
-                        log_event runtime ~patch_id
-                          (Printf.sprintf
-                             "Automerge dequeue failed for PR #%d — %s"
-                             (Pr_number.to_int pr_number)
-                             (Forge.show_error err)))
-                | Patch_controller.Direct_merge -> (
-                    match Forge.merge_pr ~pr_number with
-                    | Ok Forge.Merge_succeeded ->
-                        inflight_cleared := true;
-                        Runtime.update_orchestrator runtime (fun orch ->
-                            Patch_controller.apply_automerge_success orch
-                              patch_id);
-                        log_event runtime ~patch_id
-                          (Printf.sprintf "Automerge complete — PR #%d merged"
-                             (Pr_number.to_int pr_number))
-                    | Ok (Forge.Merge_queued msg) ->
-                        (* GitHub accepted the request into its native auto-merge
-                         queue. Not a failure — don't bump the counter. Push the
-                         deadline forward (atomically with clearing [inflight]) so
-                         we don't re-fire before the poller observes the eventual
-                         merge. *)
-                        push_deadline_and_clear_inflight ();
-                        log_event runtime ~patch_id
-                          (Printf.sprintf
-                             "Automerge queued by GitHub — awaiting checks (%s)"
-                             msg)
-                    | Ok Forge.Merge_unconfirmed ->
-                        (* 2xx response with an unexpected shape. Not authoritative
-                         either way — let the poller confirm via PR state rather
-                         than guess. Don't count as failure, but push the
-                         deadline forward (atomic with clearing [inflight]) so we
-                         don't retry every tick. *)
-                        push_deadline_and_clear_inflight ();
-                        log_event runtime ~patch_id
-                          (Printf.sprintf
-                             "%s accepted but merge not confirmed — awaiting \
-                              poll"
-                             label)
-                    | Error err ->
-                        if Github.is_merge_queue_required_error err then (
-                          log_event runtime ~patch_id
-                            (Printf.sprintf
-                               "Automerge direct merge rejected by GitHub \
-                                merge queue — enqueuing PR #%d"
-                               (Pr_number.to_int pr_number));
-                          handle_enqueue_result (Forge.enqueue_pr ~pr_number))
-                        else (
-                          apply_failure ();
-                          log_event runtime ~patch_id
-                            (Printf.sprintf "Automerge failed — %s"
-                               (Forge.show_error err))))
-              with
-              | Eio.Cancel.Cancelled _ as exn -> raise exn
-              | exn ->
-                  apply_failure ();
-                  log_event runtime ~patch_id
-                    (Printf.sprintf "%s crashed — %s" label
-                       (Printexc.to_string exn))))
-      decisions
-
-  let request_review_permanent_error = function
-    | Github.Http_error { status; _ } -> status >= 400 && status < 500
-    | Github.Json_parse_error _ -> true
-    | Github.Timeout _ | Github.Transport_error _ | Github.Graphql_error _ ->
-        false
-
-  let reconcile_and_execute_review_requests ~runtime ~team_slug =
-    let decisions =
-      Runtime.update_orchestrator_returning runtime (fun orch ->
-          Patch_controller.reconcile_review_requests orch)
+    let output =
+      Base.String.concat ~sep:"\n"
+        [ Base.String.strip failure.stdout; Base.String.strip failure.stderr ]
+      |> Base.String.strip
     in
-    Eio.Fiber.List.iter ~max_fibers:4
-      (fun Patch_controller.{ review_patch_id = patch_id; review_pr_number } ->
-        let pr_number = review_pr_number in
-        let label =
-          Printf.sprintf "request review for PR #%d"
-            (Pr_number.to_int pr_number)
-        in
-        let inflight_cleared = ref false in
-        let clear_inflight_if_needed () =
-          if not !inflight_cleared then (
-            inflight_cleared := true;
-            Runtime.update_orchestrator runtime (fun orch ->
-                Orchestrator.set_review_request_inflight orch patch_id false))
-        in
-        let record_requested_and_clear_inflight head_oid =
-          if not !inflight_cleared then (
-            inflight_cleared := true;
-            Runtime.update_orchestrator runtime (fun orch ->
-                let orch =
-                  Orchestrator.set_review_requested_for_oid orch patch_id
-                    (Some head_oid)
-                in
-                Orchestrator.set_review_request_inflight orch patch_id false))
-        in
-        let live_head_oid ~default =
-          Runtime.read runtime (fun snap ->
-              match
-                Orchestrator.find_agent snap.Runtime.orchestrator patch_id
-              with
-              | None -> default
-              | Some agent -> Option.value agent.Patch_agent.head_oid ~default)
-        in
-        Fun.protect ~finally:clear_inflight_if_needed (fun () ->
-            let current_head_oid =
-              Runtime.read runtime (fun snap ->
-                  match
-                    Orchestrator.find_agent snap.Runtime.orchestrator patch_id
-                  with
-                  | None -> None
-                  | Some agent ->
-                      let same_pr =
-                        match Patch_agent.pr_number agent with
-                        | Some current -> Pr_number.equal current pr_number
-                        | None -> false
-                      in
-                      let main_branch =
-                        Orchestrator.main_branch snap.Runtime.orchestrator
-                      in
-                      let request_candidate =
-                        let agent =
-                          Patch_agent.set_review_request_inflight agent false
-                        in
-                        Patch_agent.should_request_review agent ~main_branch
-                      in
-                      if same_pr && request_candidate then agent.head_oid
-                      else None)
-            in
-            match current_head_oid with
-            | None ->
-                log_event runtime ~patch_id
-                  (Printf.sprintf "%s skipped — no longer a candidate" label);
-                clear_inflight_if_needed ()
-            | Some head_oid -> (
-                try
-                  match Forge.request_review ~pr_number ~team_slug with
-                  | Ok () ->
-                      record_requested_and_clear_inflight head_oid;
-                      log_event runtime ~patch_id
-                        (Printf.sprintf
-                           "Requested review from team %s for PR #%d" team_slug
-                           (Pr_number.to_int pr_number))
-                  | Error err ->
-                      if request_review_permanent_error err then (
-                        let head_oid = live_head_oid ~default:head_oid in
-                        record_requested_and_clear_inflight head_oid;
-                        log_event runtime ~patch_id
-                          (Printf.sprintf
-                             "Review request for PR #%d failed permanently — %s"
-                             (Pr_number.to_int pr_number)
-                             (Forge.show_error err)))
-                      else (
-                        clear_inflight_if_needed ();
-                        log_event runtime ~patch_id
-                          (Printf.sprintf
-                             "Review request for PR #%d failed — %s"
-                             (Pr_number.to_int pr_number)
-                             (Forge.show_error err)))
-                with
-                | Eio.Cancel.Cancelled _ as exn -> raise exn
-                | exn ->
-                    clear_inflight_if_needed ();
-                    log_event runtime ~patch_id
-                      (Printf.sprintf "%s crashed — %s" label
-                         (Printexc.to_string exn)))))
-      decisions
+    Printf.sprintf "%s (%s)\n%s" failure.command exit output
+
+  let run_patch_validation ~runtime ~patch_id ~worktree ~base_branch patch =
+    match
+      Patch_validator.run ~process_mgr:Env.process_mgr ~clock:Env.clock
+        ~fs:Env.fs ~cwd:worktree ~base_branch patch
+    with
+    | Ok () ->
+        log_event runtime ~patch_id
+          (Printf.sprintf "Scope and required checks passed (%d checks)"
+             (List.length patch.Patch.checks));
+        Ok ()
+    | Error (Patch_validator.Outside_scope paths) ->
+        log_event runtime ~patch_id
+          (Printf.sprintf "Patch changed files outside its declared scope: %s"
+             (Base.String.concat ~sep:", " paths));
+        Error "changed files fall outside the patch scope"
+    | Error (Scope_read_failed failure) ->
+        log_event runtime ~patch_id
+          ("Could not verify patch scope: " ^ command_failure_text failure);
+        Error "could not read the patch diff"
+    | Error (Check_failed (check, failure)) ->
+        log_event runtime ~patch_id
+          (Printf.sprintf "Required check failed: %s\n%s" check.Check.run
+             (command_failure_text failure));
+        Error (Printf.sprintf "required check failed: %s" check.Check.run)
+
+  let validate_patch_contract ~runtime ~patch_id ~worktree ~base_branch =
+    let patch =
+      Runtime.read runtime (fun snap ->
+          Base.List.find snap.Runtime.gameplan.Gameplan.patches
+            ~f:(fun (patch : Patch.t) -> Patch_id.equal patch.Patch.id patch_id))
+    in
+    match patch with
+    | Some patch ->
+        run_patch_validation ~runtime ~patch_id ~worktree ~base_branch patch
+    | None ->
+        log_event runtime ~patch_id
+          "Publication rejected: patch has no declared contract";
+        Error "patch has no declared contract"
 
   let read_optional_file path =
     try
@@ -497,7 +347,7 @@ struct
       tool call indicates the agent was blocked mid-call, not that it chose to
       skip notes). *)
   let apply_pr_body_artifact ~runtime ~project_name ~patch_id ~pr_number ~patch
-      ~gameplan : [ `Ok | `Missing | `Empty | `Patch_failed ] =
+      : [ `Ok | `Missing | `Empty | `Patch_failed ] =
     let artifact_path =
       Project_store.pr_body_artifact_path ~project_name ~patch_id
     in
@@ -513,13 +363,11 @@ struct
           "pr-body: artifact empty; keeping initial PR body";
         `Empty
     | Some notes -> (
-        let description =
-          Prompt.render_pr_description ~project_name patch gameplan
-        in
-        let spec_suffix = Prompt.render_spec_suffix patch gameplan in
+        let description = Prompt.render_pr_description ~project_name patch in
+        let check_suffix = Prompt.render_check_suffix patch in
         let body =
           Printf.sprintf "%s%s\n\n## Implementation Notes\n\n%s" description
-            spec_suffix (String.trim notes)
+            check_suffix (String.trim notes)
         in
         match Forge.update_pr_body ~pr_number ~body with
         | Ok () ->
@@ -558,7 +406,7 @@ struct
          dispatch fires this before [with_busy_guard] runs, so no Respond
          was ever dispatched — logging a force-complete close in that case
          would falsely claim a Respond/close pair. *)
-        if before.Patch_agent.busy then
+        if Patch_agent.is_busy before then
           Event_log.log_force_complete event_log ~patch_id
             ~reason:Orchestrator.Unexpected_exception ~agent_before:before
             ~agent_after:after)
@@ -630,7 +478,6 @@ struct
   let run ?status_msg () =
     let runtime = Env.runtime in
     let clock = Env.clock in
-    let pick_backend = Env.pick_backend in
     let project_name = Env.project_name in
     let findings_registry = Env.findings_registry in
     let review_clients = Env.review_clients in
@@ -659,18 +506,17 @@ struct
       Base.Option.value Env.patch_agent_effort ~default:"medium"
     in
     let run_llm_session ~sw ~gameplan_prompt ~patch_prompt ~kind ~patch_id
-        ~prompt ~agent ~on_pr_detected ~complexity =
-      match pick_backend ~complexity with
-      | Backend_registry.Ephemeral backend, _decision ->
+        ~prompt ~agent ~on_pr_detected =
+      let validate_before_push ~worktree ~base_branch =
+        validate_patch_contract ~runtime ~patch_id ~worktree ~base_branch
+      in
+      match Env.backend with
+      | Backend_registry.Ephemeral backend ->
           Session_driver.run ~kind ~patch_id ~prompt ~agent ~on_pr_detected
-            ~backend ~complexity
-      | Backend_registry.Long_lived backend, decision -> (
+            ~validate_before_push ~backend
+      | Backend_registry.Long_lived backend -> (
           let patch_agent_model_result =
-            match
-              Backend_registry.resolve_model
-                ~backend:decision.Backend_routing.backend
-                ~model:decision.Backend_routing.model ~complexity
-            with
+            match Env.backend_decision.Backend_routing.model with
             | Some m when not (Base.String.is_empty (Base.String.strip m)) ->
                 Ok (Base.String.strip m)
             | Some _ | None ->
@@ -701,7 +547,7 @@ struct
                     session
               in
               Session_driver.run_long_lived ~sw ~kind ~patch_id ~prompt ~agent
-                ~on_pr_detected ~session ~complexity)
+                ~on_pr_detected ~validate_before_push ~session)
     in
     let shutdown_finished_long_lived_sessions ~sw () =
       let finished =
@@ -716,8 +562,8 @@ struct
                   with
                   | None -> (patch_id, session) :: acc
                   | Some agent
-                    when agent.Patch_agent.merged && not agent.Patch_agent.busy
-                    ->
+                    when agent.Patch_agent.merged
+                         && not (Patch_agent.is_busy agent) ->
                       (patch_id, session) :: acc
                   | Some _ -> acc))
       in
@@ -735,10 +581,21 @@ struct
     let rec loop sw =
       shutdown_finished_long_lived_sessions ~sw ();
       let gameplan = Runtime.read runtime (fun snap -> snap.Runtime.gameplan) in
-      let lifecycle_effects, messages, pre_fire_agents =
-        Runtime.update_orchestrator_returning runtime (fun orch ->
-            let orch, effects, messages =
+      let messages, pre_fire_agents =
+        durable_commit runtime (fun orch ->
+            let orch, messages =
               Patch_controller.plan_tick_messages orch ~project_name ~gameplan
+            in
+            let orch, _automerge_commands =
+              Patch_controller.reconcile_automerge orch
+                ~now:(Unix.gettimeofday ())
+            in
+            let orch =
+              match Env.review_team with
+              | None -> orch
+              | Some team_slug ->
+                  fst
+                    (Patch_controller.reconcile_review_requests orch ~team_slug)
             in
             let pre_fire_agents =
               Base.List.filter_map messages
@@ -789,9 +646,9 @@ struct
                   | Orchestrator.Completed | Orchestrator.Obsolete ->
                       (acc, dispatched))
             in
-            (orch, (effects, List.rev dispatched, pre_fire_agents)))
+            (orch, (List.rev dispatched, pre_fire_agents)))
       in
-      execute_github_effects ~runtime lifecycle_effects;
+      execute_github_outbox ~runtime;
       (* Log dispatched actions to event log *)
       Base.List.iter messages
         ~f:(fun (msg : Orchestrator.patch_agent_message) ->
@@ -841,7 +698,7 @@ struct
                                     agent.Patch_agent.merged
                                     || Patch_agent.needs_intervention agent
                                     || agent.Patch_agent.branch_blocked
-                                    || not agent.Patch_agent.busy
+                                    || not (Patch_agent.is_busy agent)
                                   then (
                                     log_event runtime ~patch_id
                                       "Skipping action — became stale during \
@@ -920,9 +777,6 @@ struct
                                      REST API after the
                                      backend session finishes *)
                                         let on_pr_detected _pr_number = () in
-                                        let complexity =
-                                          patch_complexity ~gameplan ~patch_id
-                                        in
                                         let gameplan_prompt =
                                           Prompt.render_gameplan_layer
                                             ~project_name gameplan
@@ -940,7 +794,6 @@ struct
                                           run_llm_session ~sw ~gameplan_prompt
                                             ~patch_prompt ~kind:None ~patch_id
                                             ~prompt ~agent ~on_pr_detected
-                                            ~complexity
                                         in
                                         (r
                                           :> [ `Failed
@@ -1011,12 +864,12 @@ struct
                                   Printf.sprintf "[%s] Patch %s: %s"
                                     project_name
                                     (Patch_id.to_string patch.Patch.id)
-                                    patch.Patch.title
+                                    patch.Patch.goal
                                 in
                                 let pr_body =
                                   Prompt.render_pr_description ~project_name
-                                    patch gameplan
-                                  ^ Prompt.render_spec_suffix patch gameplan
+                                    patch
+                                  ^ Prompt.render_check_suffix patch
                                 in
                                 (match
                                    Forge.create_pull_request ~title:pr_title
@@ -1195,50 +1048,67 @@ struct
                                 W.read_branch_sha ~path:wt_path
                                   ~ref_name:("refs/heads/" ^ base_str)
                               in
-                              let result =
-                                W.force_push_with_lease ~path:wt_path ~branch
-                                  ~base:new_base
-                              in
-                              (match result with
-                              | Worktree.Push_ok ->
-                                  log_event runtime ~patch_id
-                                    "Force-pushed after rebase"
-                              | Worktree.Push_up_to_date ->
-                                  log_event runtime ~patch_id
-                                    "Push noop after rebase — already \
-                                     up-to-date"
-                              | Worktree.Push_no_commits ->
-                                  log_event runtime ~patch_id
-                                    "Force-push skipped after rebase — branch \
-                                     has no commits ahead of base"
-                              | Worktree.Push_rejected reason ->
-                                  log_event runtime ~patch_id
-                                    (Printf.sprintf "Force-push rejected — %s"
-                                       (Push_reject_classify.short_label reason))
-                              | Worktree.Push_worktree_missing ->
-                                  log_event runtime ~patch_id
-                                    (Printf.sprintf
-                                       "Worktree disappeared (%s) — rebase \
-                                        will reconstruct on retry"
-                                       wt_path)
-                              | Worktree.Push_error msg ->
-                                  log_event runtime ~patch_id
-                                    (Printf.sprintf "Force-push failed — %s" msg));
-                              Some
-                                ( result,
-                                  local_sha,
-                                  remote_tracking_sha,
-                                  base_sha ))
+                              match
+                                validate_patch_contract ~runtime ~patch_id
+                                  ~worktree:wt_path ~base_branch:new_base
+                              with
+                              | Error _ -> Some `Rejected
+                              | Ok () ->
+                                  let result =
+                                    W.force_push_with_lease ~path:wt_path
+                                      ~branch ~base:new_base
+                                  in
+                                  (match result with
+                                  | Worktree.Push_ok ->
+                                      log_event runtime ~patch_id
+                                        "Force-pushed after rebase"
+                                  | Worktree.Push_up_to_date ->
+                                      log_event runtime ~patch_id
+                                        "Push noop after rebase — already \
+                                         up-to-date"
+                                  | Worktree.Push_no_commits ->
+                                      log_event runtime ~patch_id
+                                        "Force-push skipped after rebase — \
+                                         branch has no commits ahead of base"
+                                  | Worktree.Push_rejected reason ->
+                                      log_event runtime ~patch_id
+                                        (Printf.sprintf
+                                           "Force-push rejected — %s"
+                                           (Push_reject_classify.short_label
+                                              reason))
+                                  | Worktree.Push_worktree_missing ->
+                                      log_event runtime ~patch_id
+                                        (Printf.sprintf
+                                           "Worktree disappeared (%s) — rebase \
+                                            will reconstruct on retry"
+                                           wt_path)
+                                  | Worktree.Push_error msg ->
+                                      log_event runtime ~patch_id
+                                        (Printf.sprintf "Force-push failed — %s"
+                                           msg));
+                                  Some
+                                    (`Pushed
+                                       ( result,
+                                         local_sha,
+                                         remote_tracking_sha,
+                                         base_sha )))
                         in
                         let push_outcome =
-                          Base.Option.map push_record ~f:(fun (r, _, _, _) -> r)
+                          Base.Option.bind push_record ~f:(function
+                            | `Rejected -> None
+                            | `Pushed (result, _, _, _) -> Some result)
                         in
                         let resolution, push_agent_after =
                           Runtime.update_orchestrator_returning runtime
                             (fun orch ->
                               let orch, resolution =
-                                Orchestrator.apply_rebase_push_result orch
-                                  patch_id push_outcome
+                                match push_record with
+                                | Some `Rejected ->
+                                    Orchestrator.reject_rebase_publication orch
+                                      patch_id
+                                | Some (`Pushed _) | None ->
+                                    Orchestrator.apply_rebase_push_result orch
+                                      patch_id push_outcome
                               in
                               let push_agent_after =
                                 Orchestrator.agent orch patch_id
@@ -1246,14 +1116,16 @@ struct
                               (orch, (resolution, push_agent_after)))
                         in
                         (match push_record with
-                        | Some (result, local_sha, remote_tracking_sha, base_sha)
+                        | Some
+                            (`Pushed
+                               (result, local_sha, remote_tracking_sha, base_sha))
                           ->
                             Event_log.log_push event_log ~patch_id
                               ~kind:Event_log.Rebase_resolution_push ~result
                               ~local_sha ~remote_tracking_sha ~base_sha
                               ~agent_before:agent_after
                               ~agent_after:push_agent_after
-                        | None -> ());
+                        | Some `Rejected | None -> ());
                         (match resolution with
                         | Orchestrator.Rebase_push_ok -> ()
                         | Orchestrator.Rebase_push_failed ->
@@ -1582,9 +1454,6 @@ struct
                                           else base_changed_prefix ^ "\n" ^ raw
                                         in
                                         let on_pr_detected _pr_number = () in
-                                        let complexity =
-                                          patch_complexity ~gameplan ~patch_id
-                                        in
                                         let gameplan_prompt =
                                           Prompt.render_gameplan_layer
                                             ~project_name gameplan
@@ -1605,7 +1474,7 @@ struct
                                               (Some
                                                  Operation_kind.Merge_conflict)
                                             ~patch_id ~prompt ~agent
-                                            ~on_pr_detected ~complexity
+                                            ~on_pr_detected
                                         in
                                         (match result with
                                         | `Ok
@@ -1792,65 +1661,97 @@ struct
                                                   ~ref_name:
                                                     ("refs/heads/" ^ base)
                                               in
-                                              let result =
-                                                W.force_push_with_lease
-                                                  ~path:wt_path ~branch
-                                                  ~base:
-                                                    (Types.Branch.of_string base)
+                                              let base_branch =
+                                                Types.Branch.of_string base
                                               in
-                                              (match result with
-                                              | Worktree.Push_ok ->
-                                                  log_event runtime ~patch_id
-                                                    "Force-pushed to resolve \
-                                                     conflict"
-                                              | Worktree.Push_up_to_date ->
-                                                  log_event runtime ~patch_id
-                                                    "Conflict push noop — \
-                                                     already up-to-date"
-                                              | Worktree.Push_no_commits ->
-                                                  log_event runtime ~patch_id
-                                                    "Conflict force-push \
-                                                     skipped — branch has no \
-                                                     commits ahead of base"
-                                              | Worktree.Push_rejected reason ->
-                                                  log_event runtime ~patch_id
-                                                    (Printf.sprintf
-                                                       "Conflict force-push \
-                                                        rejected — %s"
-                                                       (Push_reject_classify
-                                                        .short_label reason))
-                                              | Worktree.Push_worktree_missing
-                                                ->
-                                                  log_event runtime ~patch_id
-                                                    (Printf.sprintf
-                                                       "Worktree disappeared \
-                                                        (%s) — conflict \
-                                                        resolution will \
-                                                        reconstruct on retry"
-                                                       wt_path)
-                                              | Worktree.Push_error msg ->
-                                                  log_event runtime ~patch_id
-                                                    (Printf.sprintf
-                                                       "Conflict force-push \
-                                                        failed — %s"
-                                                       msg));
-                                              Some
-                                                ( result,
-                                                  local_sha,
-                                                  remote_tracking_sha,
-                                                  base_sha ))
+                                              match
+                                                validate_patch_contract ~runtime
+                                                  ~patch_id ~worktree:wt_path
+                                                  ~base_branch
+                                              with
+                                              | Error _ -> Some `Rejected
+                                              | Ok () ->
+                                                  let result =
+                                                    W.force_push_with_lease
+                                                      ~path:wt_path ~branch
+                                                      ~base:base_branch
+                                                  in
+                                                  (match result with
+                                                  | Worktree.Push_ok ->
+                                                      log_event runtime
+                                                        ~patch_id
+                                                        "Force-pushed to \
+                                                         resolve conflict"
+                                                  | Worktree.Push_up_to_date ->
+                                                      log_event runtime
+                                                        ~patch_id
+                                                        "Conflict push noop — \
+                                                         already up-to-date"
+                                                  | Worktree.Push_no_commits ->
+                                                      log_event runtime
+                                                        ~patch_id
+                                                        "Conflict force-push \
+                                                         skipped — branch has \
+                                                         no commits ahead of \
+                                                         base"
+                                                  | Worktree.Push_rejected
+                                                      reason ->
+                                                      log_event runtime
+                                                        ~patch_id
+                                                        (Printf.sprintf
+                                                           "Conflict \
+                                                            force-push \
+                                                            rejected — %s"
+                                                           (Push_reject_classify
+                                                            .short_label reason))
+                                                  | Worktree
+                                                    .Push_worktree_missing ->
+                                                      log_event runtime
+                                                        ~patch_id
+                                                        (Printf.sprintf
+                                                           "Worktree \
+                                                            disappeared (%s) — \
+                                                            conflict \
+                                                            resolution will \
+                                                            reconstruct on \
+                                                            retry"
+                                                           wt_path)
+                                                  | Worktree.Push_error msg ->
+                                                      log_event runtime
+                                                        ~patch_id
+                                                        (Printf.sprintf
+                                                           "Conflict \
+                                                            force-push failed \
+                                                            — %s"
+                                                           msg));
+                                                  Some
+                                                    (`Pushed
+                                                       ( result,
+                                                         local_sha,
+                                                         remote_tracking_sha,
+                                                         base_sha )))
                                         in
                                         let push_outcome =
-                                          Base.Option.map push_record
-                                            ~f:(fun (r, _, _, _) -> r)
+                                          Base.Option.bind push_record
+                                            ~f:(function
+                                            | `Rejected -> None
+                                            | `Pushed (result, _, _, _) ->
+                                                Some result)
                                         in
                                         let resolution, push_agent_after =
                                           Runtime.update_orchestrator_returning
                                             runtime (fun orch ->
                                               let orch, resolution =
-                                                Orchestrator
-                                                .apply_conflict_push_result orch
-                                                  patch_id decision push_outcome
+                                                match push_record with
+                                                | Some `Rejected ->
+                                                    Orchestrator
+                                                    .reject_conflict_publication
+                                                      orch patch_id
+                                                | Some (`Pushed _) | None ->
+                                                    Orchestrator
+                                                    .apply_conflict_push_result
+                                                      orch patch_id decision
+                                                      push_outcome
                                               in
                                               let push_agent_after =
                                                 Orchestrator.agent orch patch_id
@@ -1861,10 +1762,11 @@ struct
                                         in
                                         (match push_record with
                                         | Some
-                                            ( result,
-                                              local_sha,
-                                              remote_tracking_sha,
-                                              base_sha ) ->
+                                            (`Pushed
+                                               ( result,
+                                                 local_sha,
+                                                 remote_tracking_sha,
+                                                 base_sha )) ->
                                             Event_log.log_push event_log
                                               ~patch_id
                                               ~kind:
@@ -1874,7 +1776,7 @@ struct
                                               ~remote_tracking_sha ~base_sha
                                               ~agent_before:agent_after
                                               ~agent_after:push_agent_after
-                                        | None -> ());
+                                        | Some `Rejected | None -> ());
                                         match resolution with
                                         | Orchestrator.Conflict_done -> `Ok
                                         | Orchestrator.Conflict_retry_push ->
@@ -2215,11 +2117,10 @@ struct
                                               in
                                               let pr_body =
                                                 Prompt.render_pr_description
-                                                  ~project_name patch gameplan
+                                                  ~project_name patch
                                               in
-                                              let spec_suffix =
-                                                Prompt.render_spec_suffix patch
-                                                  gameplan
+                                              let check_suffix =
+                                                Prompt.render_check_suffix patch
                                               in
                                               let artifact_path =
                                                 Project_store
@@ -2245,7 +2146,7 @@ struct
                                                  ());
                                               Prompt.render_pr_body_prompt
                                                 ~project_name ~pr_number:pr
-                                                ~pr_body ~spec_suffix
+                                                ~pr_body ~check_suffix
                                                 ~artifact_path
                                           | Patch_decision
                                             .Merge_conflict_payload ->
@@ -2306,9 +2207,6 @@ struct
                                             (Project_store.pr_body_artifact_path
                                                ~project_name ~patch_id)
                                         in
-                                        let complexity =
-                                          patch_complexity ~gameplan ~patch_id
-                                        in
                                         let gameplan_prompt =
                                           Prompt.render_gameplan_layer
                                             ~project_name gameplan
@@ -2328,7 +2226,7 @@ struct
                                           run_llm_session ~sw ~gameplan_prompt
                                             ~patch_prompt ~kind:(Some kind)
                                             ~patch_id ~prompt ~agent
-                                            ~on_pr_detected ~complexity
+                                            ~on_pr_detected
                                         in
                                         let result =
                                           (result
@@ -2411,7 +2309,6 @@ struct
                                                           ~runtime ~project_name
                                                           ~patch_id
                                                           ~pr_number:pr ~patch
-                                                          ~gameplan
                                                       in
                                                       (Patch_decision
                                                        .classify_pr_body_respond
@@ -2671,8 +2568,7 @@ struct
                                                            ~runtime
                                                            ~project_name
                                                            ~patch_id
-                                                           ~pr_number:pr ~patch
-                                                           ~gameplan)
+                                                           ~pr_number:pr ~patch)
                                                   | None ->
                                                       log_event runtime
                                                         ~patch_id
@@ -2836,60 +2732,5 @@ struct
       Eio.Time.sleep clock 1.0;
       loop sw
     in
-    Eio.Switch.run @@ fun sw ->
-    (* Single long-lived automerge fiber. Spawning fork_daemon once before the
-     loop (rather than per-tick from inside [loop]) keeps at most one automerge
-     fiber alive on the switch — per-tick forking would let brief no-op fibers
-     accumulate during a slow GitHub call even though [automerge_inflight]
-     guards the real merge. The fiber paces itself with its own 1s sleep,
-     independent of the runner tick. *)
-    Eio.Fiber.fork_daemon ~sw (fun () ->
-        let rec amloop () =
-          (* Top-level guard: [reconcile_and_execute_automerge] catches
-           exceptions per-decision, but [Eio.Fiber.List.iter] (or a future
-           refactor) could still let one escape. Re-raise [Cancelled] so
-           switch teardown propagates normally; swallow any other exception
-           to the activity log so a single bad tick can't kill the fiber
-           permanently and leave automerge silently disabled. *)
-          (try reconcile_and_execute_automerge ~runtime with
-          | Eio.Cancel.Cancelled _ as exn -> raise exn
-          | exn ->
-              log_event runtime
-                (Printf.sprintf "automerge fiber error — %s"
-                   (Printexc.to_string exn)));
-          (* [Eio.Time.sleep] is the only yield point outside the guard above.
-           On switch teardown it raises [Cancelled]; catching it here and
-           returning [`Stop_daemon] gives the [fork_daemon] contract a clean
-           voluntary-exit signal (matching the other [fork_daemon] callers
-           in this file) rather than exiting by exception. *)
-          match
-            try Ok (Eio.Time.sleep clock 1.0)
-            with Eio.Cancel.Cancelled _ -> Error `Cancelled
-          with
-          | Error `Cancelled -> `Stop_daemon
-          | Ok () -> amloop ()
-        in
-        amloop ());
-    (match Env.review_team with
-    | None -> ()
-    | Some team_slug ->
-        Eio.Fiber.fork_daemon ~sw (fun () ->
-            let rec review_loop () =
-              (try
-                 reconcile_and_execute_review_requests ~runtime ~team_slug
-               with
-              | Eio.Cancel.Cancelled _ as exn -> raise exn
-              | exn ->
-                  log_event runtime
-                    (Printf.sprintf "review-request fiber error — %s"
-                       (Printexc.to_string exn)));
-              match
-                try Ok (Eio.Time.sleep clock 1.0)
-                with Eio.Cancel.Cancelled _ -> Error `Cancelled
-              with
-              | Error `Cancelled -> `Stop_daemon
-              | Ok () -> review_loop ()
-            in
-            review_loop ()));
-    loop sw
+    Eio.Switch.run @@ fun sw -> loop sw
 end

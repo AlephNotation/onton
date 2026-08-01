@@ -21,20 +21,11 @@ let make_patch pid branch =
   Patch.
     {
       id = pid;
-      title = "Test patch";
-      description = "";
+      goal = "test poll logging";
       branch;
       dependencies = [];
-      spec = "";
-      acceptance_criteria = [];
       files = [];
-      classification = "";
-      changes = [];
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
+      checks = [];
     }
 
 let make_orch patch agent =
@@ -47,24 +38,36 @@ let make_orch patch agent =
 let make_agent ~patch_id ~branch ~has_conflict ~ci_failure_count ~current_op
     ~checks_passing ~queue ~merged ~is_draft ~branch_blocked ~worktree_path =
   let busy = Option.is_some current_op in
+  let activity =
+    if busy then
+      Patch_agent.Active
+        {
+          operation = current_op;
+          phase = Patch_agent.Running;
+          message_id = None;
+        }
+    else Patch_agent.Inactive
+  in
+  let session =
+    if busy then
+      Patch_agent.Started
+        { resume_id = None; fallback = Patch_agent.Fresh_available }
+    else Patch_agent.Not_started
+  in
   Patch_agent.restore ~patch_id ~branch
     ~pr_status:(Patch_pr_status.Present (Pr_number.of_int 42))
-    ~has_session:busy ~busy ~merged ~queue ~satisfies:false ~changed:false
+    ~session ~activity ~merged ~queue ~satisfies:false ~changed:false
     ~has_conflict ~base_branch:(Some main) ~notified_base_branch:(Some main)
-    ~ci_failure_count ~session_fallback:Patch_agent.Fresh_available
-    ~human_messages:[] ~inflight_human_messages:[] ~ci_checks:[]
-    ~merge_ready:false ~mergeability_unknown:false ~merge_queue_required:false
-    ~merge_queue_entry:None ~is_draft ~pr_body_delivered:true
-    ~pr_body_artifact_miss_count:0 ~start_attempts_without_pr:0
-    ~conflict_noop_count:0 ~no_commits_push_count:0 ~context_exhaustion_count:0
-    ~push_failure_count:0 ~rebase_failure_count:0 ~branch_rebased_onto:None
-    ~branch_rebased_onto_sha:None ~merge_commit_sha:None
-    ~base_contains_merged_siblings:true
-    ~anchor_history:Onton_core.Anchor_history.empty ~checks_passing ~current_op
-    ~current_op_state:(if busy then Patch_agent.Running else Patch_agent.Queued)
-    ~current_message_id:None ~generation:0 ~worktree_path ~branch_blocked
-    ~llm_session_id:None ~automerge_enabled:false ~automerge_deadline:None
-    ~automerge_inflight:false ~automerge_failure_count:0
+    ~ci_failure_count ~human_messages:[] ~inflight_human_messages:[]
+    ~ci_checks:[] ~merge_ready:false ~mergeability_unknown:false
+    ~merge_queue_required:false ~merge_queue_entry:None ~is_draft
+    ~pr_body_delivered:true ~pr_body_artifact_miss_count:0
+    ~start_attempts_without_pr:0 ~conflict_noop_count:0 ~no_commits_push_count:0
+    ~context_exhaustion_count:0 ~push_failure_count:0 ~rebase_failure_count:0
+    ~branch_rebased_onto:None ~branch_rebased_onto_sha:None
+    ~merge_commit_sha:None ~base_contains_merged_siblings:true
+    ~anchor_history:Onton_core.Anchor_history.empty ~checks_passing
+    ~generation:0 ~worktree_path ~branch_blocked ~automerge:Patch_agent.Disabled
     ~delivered_ci_run_ids:[] ()
 
 let make_poll_observation ~branch_in_root ~worktree_path poll_result =
@@ -177,8 +180,9 @@ let print_case =
     agent.ci_failure_count agent.checks_passing agent.is_draft
     agent.branch_blocked
     (String.concat ~sep:"," (List.map agent.queue ~f:Operation_kind.to_label))
-    (Option.value_map agent.current_op ~default:"none"
-       ~f:Operation_kind.to_label)
+    (Option.value_map
+       (Patch_agent.current_op agent)
+       ~default:"none" ~f:Operation_kind.to_label)
     poll.Poller.merged (Poller.has_conflict poll) poll.checks_passing
     poll.is_draft
     (String.concat ~sep:"," (List.map poll.queue ~f:Operation_kind.to_label))
@@ -360,7 +364,8 @@ let () =
                         ~equal:Operation_kind.equal
                     in
                     let was_current_op =
-                      Option.equal Operation_kind.equal agent.current_op
+                      Option.equal Operation_kind.equal
+                        (Patch_agent.current_op agent)
                         (Some k)
                     in
                     (not was_queued) && not was_current_op

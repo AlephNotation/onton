@@ -88,13 +88,6 @@ let parse_event (line : string) : Types.Stream_event.t list =
           [ Types.Stream_event.Error msg ]
       | _ -> [])
 
-let auto_model ~complexity =
-  match complexity with
-  | Some 1 -> Some "gemini-2.5-flash"
-  | Some 2 -> Some "gemini-3-flash-preview"
-  | Some 3 -> Some "gemini-3-pro-preview"
-  | Some _ | None -> Some "gemini-3-pro-preview"
-
 let%test "build_args fresh (no resume, no model)" =
   let args = build_args ~model:None ~prompt:"do stuff" ~resume_session:None in
   List.equal String.equal args

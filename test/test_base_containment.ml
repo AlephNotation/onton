@@ -23,20 +23,11 @@ let main = br "main"
 let mk_patch ~id ~deps : Types.Patch.t =
   {
     id = pid id;
-    title = "";
-    description = "";
+    goal = "test dependency containment";
     branch = br id;
     dependencies = List.map deps ~f:pid;
-    spec = "";
-    acceptance_criteria = [];
     files = [];
-    classification = "";
-    changes = [];
-    test_stubs_introduced = [];
-    test_stubs_implemented = [];
-    complexity = None;
-    precedents = [];
-    required_context = [];
+    checks = [];
   }
 
 (* P -> {d1, d2, d3}, d2 a stacked child of d1, d3 an independent sibling. *)

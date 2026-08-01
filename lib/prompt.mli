@@ -34,14 +34,8 @@ val substitute_variables : string -> (string * string) list -> string
     structure intact. *)
 
 val render_gameplan_layer : project_name:string -> Gameplan.t -> string
-(** Gameplan-stable prefix. Contains the project heading, problem statement,
-    solution summary, optional final state spec / explicit opinions / current
-    state analysis, the patches list, and a pointer to the read-only gameplan
-    copy at [Project_store.gameplan_artifact_path] (published once at startup by
-    {!Project_store.publish_gameplan_artifact}) for agents that need cross-patch
-    context on demand. The pointer path is a pure function of the project name,
-    so the layer stays byte-identical across the run. Ends with a trailing blank
-    line. *)
+(** Plan-stable prefix containing repository identity, merge policy, terminal
+    checks, patch goals, and a pointer to the read-only plan artifact. *)
 
 val render_patch_layer_of_gameplan :
   project_name:string ->
@@ -50,18 +44,8 @@ val render_patch_layer_of_gameplan :
   Gameplan.t ->
   base_branch:string ->
   string
-(** Patch-stable middle. Contains the patch heading, dependencies, a pointer to
-    each ancestor patch's implementation notes (when the patch has ancestors),
-    base-branch note, description, the functional changes the patch owns (if
-    any), the required context resources, changes, files, test stubs,
-    specification (with Pantagruel guide), acceptance criteria, git identifiers,
-    and PR instructions. Ends with a trailing blank line.
-
-    The functional changes, context resources, and ancestor list are all derived
-    from the gameplan here — this is deliberately the only exported way to
-    render a patch layer, so a call site cannot hand-assemble the inputs and
-    silently diverge from the composed prompt (the bug class that broke the
-    byte-identical prefix contract for long-lived session layers).
+(** Patch-stable middle containing the patch goal, dependencies, exact write
+    scope, executable checks, ancestor notes, and Git instructions.
 
     The ancestor note pointers are pure functions of the project name and
     ancestor ids ([Project_store.pr_body_artifact_path] — no filesystem probe),
@@ -137,8 +121,7 @@ val render_patch_prompt :
     built-in templates; project-level overrides are user-controlled and may not
     preserve this structure. *)
 
-val render_pr_description :
-  project_name:string -> Patch.t -> Gameplan.t -> string
+val render_pr_description : project_name:string -> Patch.t -> string
 
 (** Pure: choose between the agent-authored PR body artifact and a deterministic
     fallback (typically the gameplan-derived body). Returns [fallback] when
@@ -146,17 +129,14 @@ val render_pr_description :
     contents otherwise. Used by the supervisor when composing the final PR body
     for the implementation-notes phase. *)
 
-val render_spec_suffix : Types.Patch.t -> Types.Gameplan.t -> string
-(** Pure: render the Gameplan Specification and Patch Specification sections.
-    Returns the empty string when both specs are absent. Appended by the
-    supervisor after the agent-authored PR body, so the agent cannot
-    accidentally drop them. *)
+val render_check_suffix : Types.Patch.t -> string
+(** Pure: render executable patch checks for immutable PR evidence. *)
 
 val render_pr_body_prompt :
   project_name:string ->
   pr_number:Pr_number.t ->
   pr_body:string ->
-  spec_suffix:string ->
+  check_suffix:string ->
   artifact_path:string ->
   string
 

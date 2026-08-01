@@ -28,11 +28,11 @@ let%test "safe_session_id rejects traversal and separators" =
 
 let session_mode (agent : Patch_agent.t) :
     [ `Resume of string | `Fresh | `Give_up ] =
-  match agent.Patch_agent.session_fallback with
+  match Patch_agent.session_fallback agent with
   | Patch_agent.Given_up -> `Give_up
   | Patch_agent.Tried_fresh -> `Fresh
   | Patch_agent.Fresh_available -> (
-      match agent.Patch_agent.llm_session_id with
+      match Patch_agent.llm_session_id agent with
       | Some id -> `Resume id
       | None -> `Fresh)
 
@@ -145,8 +145,8 @@ module Make (W : Worktree.S) (Env : ENV) = struct
 
   let run_with_backend ~session_mode_for_agent
       ~(kind : Types.Operation_kind.t option) ~patch_id ~prompt
-      ~(agent : Patch_agent.t) ~on_pr_detected ~backend_name ~run_backend
-      ~complexity =
+      ~(agent : Patch_agent.t) ~on_pr_detected ~validate_before_push
+      ~backend_name ~run_backend =
     let runtime = Env.runtime in
     let fs = Env.fs in
     let project_name = Env.project_name in
@@ -471,7 +471,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                   try
                     Ok
                       (run_backend ~project_name ~cwd ~patch_id ~prompt
-                         ~resume_session ~session_uuid ~complexity ~on_event)
+                         ~resume_session ~session_uuid ~on_event)
                   with
                   | Eio.Cancel.Cancelled _ as exn ->
                       cancelled := Some exn;
@@ -714,12 +714,9 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                 | Some exn ->
                     ignore (apply_result_and_emit_complete session_result);
                     raise exn);
-                (* Supervisor-owned push: agent commits locally; we push every
-             local commit to the remote at session end. force_push_with_lease
-             is idempotent (Push_up_to_date when nothing new), and lease-safe
-             against concurrent remote updates. Runs regardless of the LLM's
-             session result so commits made before a partial failure still
-             reach the remote. *)
+                (* The supervisor is the sole publication boundary. Agent
+             commits remain local until the declared patch contract accepts
+             them; only then may the branch be pushed. *)
                 let branch = agent.Patch_agent.branch in
                 let base =
                   match agent.Patch_agent.base_branch with
@@ -748,43 +745,65 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                   Runtime.read runtime (fun snap ->
                       Orchestrator.agent snap.Runtime.orchestrator patch_id)
                 in
-                let push_outcome =
-                  W.force_push_with_lease ~path:worktree_path ~branch ~base
-                in
                 let branch_changed =
                   match (pre_session_branch_sha, push_local_sha) with
                   | Some before, Some after -> not (String.equal before after)
                   | None, _ | _, None -> true
                 in
-                (match push_outcome with
-                | Worktree.Push_ok ->
-                    log_event runtime ~patch_id "runner: pushed after session"
-                | Worktree.Push_up_to_date ->
+                let publication =
+                  if branch_changed then
+                    match
+                      validate_before_push ~worktree:worktree_path
+                        ~base_branch:base
+                    with
+                    | Ok () ->
+                        `Pushed
+                          (W.force_push_with_lease ~path:worktree_path ~branch
+                             ~base)
+                    | Error reason -> `Rejected reason
+                  else
+                    `Pushed
+                      (W.force_push_with_lease ~path:worktree_path ~branch ~base)
+                in
+                (match publication with
+                | `Rejected reason ->
                     log_event runtime ~patch_id
-                      "runner: push up-to-date after session (no new commits)"
-                | Worktree.Push_no_commits ->
-                    log_event runtime ~patch_id
-                      "runner: session ended with no commits on branch — push \
-                       skipped, PR creation deferred"
-                | Worktree.Push_rejected reason -> (
-                    log_event runtime ~patch_id
-                      (Printf.sprintf "runner: push rejected after session — %s"
-                         (Push_reject_classify.short_label reason));
-                    match Push_reject_classify.detail_excerpt reason with
-                    | Some msg ->
+                      ("runner: publication rejected — " ^ reason)
+                | `Pushed push_outcome -> (
+                    match push_outcome with
+                    | Worktree.Push_ok ->
                         log_event runtime ~patch_id
-                          (Printf.sprintf "runner: push rejected detail: %s" msg)
-                    | None -> ())
-                | Worktree.Push_worktree_missing ->
-                    log_event runtime ~patch_id
-                      (Printf.sprintf
-                         "runner: worktree disappeared mid-session (%s) — \
-                          local commits are lost; will reconstruct on next \
-                          attempt"
-                         worktree_path)
-                | Worktree.Push_error msg ->
-                    log_event runtime ~patch_id
-                      (Printf.sprintf "runner: push error after session: %s" msg));
+                          "runner: pushed after session"
+                    | Worktree.Push_up_to_date ->
+                        log_event runtime ~patch_id
+                          "runner: push up-to-date after session (no new \
+                           commits)"
+                    | Worktree.Push_no_commits ->
+                        log_event runtime ~patch_id
+                          "runner: session ended with no commits on branch — \
+                           push skipped, PR creation deferred"
+                    | Worktree.Push_rejected reason -> (
+                        log_event runtime ~patch_id
+                          (Printf.sprintf
+                             "runner: push rejected after session — %s"
+                             (Push_reject_classify.short_label reason));
+                        match Push_reject_classify.detail_excerpt reason with
+                        | Some msg ->
+                            log_event runtime ~patch_id
+                              (Printf.sprintf "runner: push rejected detail: %s"
+                                 msg)
+                        | None -> ())
+                    | Worktree.Push_worktree_missing ->
+                        log_event runtime ~patch_id
+                          (Printf.sprintf
+                             "runner: worktree disappeared mid-session (%s) — \
+                              local commits are lost; will reconstruct on next \
+                              attempt"
+                             worktree_path)
+                    | Worktree.Push_error msg ->
+                        log_event runtime ~patch_id
+                          (Printf.sprintf "runner: push error after session: %s"
+                             msg)));
                 if
                   (not branch_changed)
                   && Orchestrator.equal_session_result session_result
@@ -829,21 +848,28 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                       false
                 in
                 let final_session_result =
-                  let combined =
-                    Orchestrator.combine_session_and_push ~branch_changed
-                      ~session:session_result ~push:push_outcome
-                  in
-                  match combined with
-                  | Orchestrator.Session_no_commits when no_commits_is_ok ->
-                      Orchestrator.Session_ok
-                  | Orchestrator.Session_ok | Orchestrator.Session_no_commits
-                  | Orchestrator.Session_process_error _
-                  | Orchestrator.Session_no_resume
-                  | Orchestrator.Session_failed _ | Orchestrator.Session_give_up
-                  | Orchestrator.Session_worktree_missing
-                  | Orchestrator.Session_push_failed _
-                  | Orchestrator.Session_context_exhausted ->
-                      combined
+                  match publication with
+                  | `Rejected reason ->
+                      Orchestrator.Session_failed
+                        { is_fresh; detail = Some reason }
+                  | `Pushed push_outcome -> (
+                      let combined =
+                        Orchestrator.combine_session_and_push ~branch_changed
+                          ~session:session_result ~push:push_outcome
+                      in
+                      match combined with
+                      | Orchestrator.Session_no_commits when no_commits_is_ok ->
+                          Orchestrator.Session_ok
+                      | Orchestrator.Session_ok
+                      | Orchestrator.Session_no_commits
+                      | Orchestrator.Session_process_error _
+                      | Orchestrator.Session_no_resume
+                      | Orchestrator.Session_failed _
+                      | Orchestrator.Session_give_up
+                      | Orchestrator.Session_worktree_missing
+                      | Orchestrator.Session_push_failed _
+                      | Orchestrator.Session_context_exhausted ->
+                          combined)
                 in
                 let final_user_result =
                   match final_session_result with
@@ -865,20 +891,23 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                 let _, push_agent_after =
                   apply_result_and_emit_complete final_session_result
                 in
-                Event_log.log_push Env.event_log ~patch_id
-                  ~kind:Event_log.Session_end_push ~result:push_outcome
-                  ~local_sha:push_local_sha
-                  ~remote_tracking_sha:push_remote_tracking_sha
-                  ~base_sha:push_base_sha ~agent_before:push_agent_before
-                  ~agent_after:push_agent_after;
+                (match publication with
+                | `Rejected _ -> ()
+                | `Pushed push_outcome ->
+                    Event_log.log_push Env.event_log ~patch_id
+                      ~kind:Event_log.Session_end_push ~result:push_outcome
+                      ~local_sha:push_local_sha
+                      ~remote_tracking_sha:push_remote_tracking_sha
+                      ~base_sha:push_base_sha ~agent_before:push_agent_before
+                      ~agent_after:push_agent_after);
                 (final_user_result, List.rev !tool_failures)))
 
   let run ~(kind : Types.Operation_kind.t option) ~patch_id ~prompt
-      ~(agent : Patch_agent.t) ~on_pr_detected ~backend ~complexity =
+      ~(agent : Patch_agent.t) ~on_pr_detected ~validate_before_push ~backend =
     run_with_backend ~kind ~patch_id ~prompt ~agent ~on_pr_detected
-      ~session_mode_for_agent:session_mode
+      ~validate_before_push ~session_mode_for_agent:session_mode
       ~backend_name:backend.Llm_backend.name
-      ~run_backend:backend.Llm_backend.run_streaming ~complexity
+      ~run_backend:backend.Llm_backend.run_streaming
 
   type long_lived_session =
     | Long_lived_session : {
@@ -960,10 +989,11 @@ module Make (W : Worktree.S) (Env : ENV) = struct
         match handle with None -> () | Some handle -> session.shutdown handle)
 
   let run_long_lived ~sw ~(kind : Types.Operation_kind.t option) ~patch_id
-      ~prompt ~(agent : Patch_agent.t) ~on_pr_detected ~session ~complexity =
+      ~prompt ~(agent : Patch_agent.t) ~on_pr_detected ~validate_before_push
+      ~session =
     let (Long_lived_session session) = session in
     let run_backend ~project_name ~cwd ~patch_id ~prompt ~resume_session:_
-        ~session_uuid:_ ~complexity:_ ~on_event =
+        ~session_uuid:_ ~on_event =
       let failed_result message =
         on_event (Types.Stream_event.Error message);
         {
@@ -1049,6 +1079,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                 failed_result message)
     in
     run_with_backend ~kind ~patch_id ~prompt ~agent ~on_pr_detected
+      ~validate_before_push
       ~session_mode_for_agent:(fun _ -> `Fresh)
-      ~backend_name:session.name ~run_backend ~complexity
+      ~backend_name:session.name ~run_backend
 end

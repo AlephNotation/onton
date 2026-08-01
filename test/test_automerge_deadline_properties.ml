@@ -43,20 +43,11 @@ let make_patch pid branch =
   Patch.
     {
       id = pid;
-      title = "Test patch";
-      description = "";
+      goal = "test automerge deadlines";
       branch;
       dependencies = [];
-      spec = "";
-      acceptance_criteria = [];
       files = [];
-      classification = "";
-      changes = [];
-      test_stubs_introduced = [];
-      test_stubs_implemented = [];
-      complexity = None;
-      precedents = [];
-      required_context = [];
+      checks = [];
     }
 
 (* Build an agent with a PR present, parameterized over exactly the fields
@@ -65,25 +56,43 @@ let make_patch pid branch =
 let make_agent ~patch_id ~branch ~merge_ready ~mergeability_unknown
     ~checks_passing ~queue ~is_draft ~busy ~merged ~branch_blocked ~base_branch
     ~merge_queue_required ~merge_queue_entry ~automerge_enabled
-    ~automerge_deadline ~automerge_inflight ~automerge_failure_count =
+    ~automerge_deadline ~automerge_failure_count =
+  let activity =
+    if busy then
+      Patch_agent.Active
+        { operation = None; phase = Patch_agent.Running; message_id = None }
+    else Patch_agent.Inactive
+  in
+  let session =
+    if busy then
+      Patch_agent.Started
+        { resume_id = None; fallback = Patch_agent.Fresh_available }
+    else Patch_agent.Not_started
+  in
+  let automerge =
+    if automerge_enabled then
+      Patch_agent.Enabled
+        {
+          deadline = automerge_deadline;
+          failure_count = automerge_failure_count;
+        }
+    else Patch_agent.Disabled
+  in
   Patch_agent.restore ~patch_id ~branch
     ~pr_status:(Patch_pr_status.Present (Pr_number.of_int 42))
-    ~has_session:busy ~busy ~merged ~queue ~satisfies:false ~changed:false
+    ~session ~activity ~merged ~queue ~satisfies:false ~changed:false
     ~has_conflict:false ~base_branch ~notified_base_branch:base_branch
-    ~ci_failure_count:0 ~session_fallback:Patch_agent.Fresh_available
-    ~human_messages:[] ~inflight_human_messages:[] ~ci_checks:[] ~merge_ready
-    ~mergeability_unknown ~merge_queue_required ~merge_queue_entry ~is_draft
-    ~pr_body_delivered:true ~pr_body_artifact_miss_count:0
-    ~start_attempts_without_pr:0 ~conflict_noop_count:0 ~no_commits_push_count:0
-    ~context_exhaustion_count:0 ~push_failure_count:0 ~rebase_failure_count:0
-    ~branch_rebased_onto:None ~branch_rebased_onto_sha:None
-    ~merge_commit_sha:None ~base_contains_merged_siblings:true
+    ~ci_failure_count:0 ~human_messages:[] ~inflight_human_messages:[]
+    ~ci_checks:[] ~merge_ready ~mergeability_unknown ~merge_queue_required
+    ~merge_queue_entry ~is_draft ~pr_body_delivered:true
+    ~pr_body_artifact_miss_count:0 ~start_attempts_without_pr:0
+    ~conflict_noop_count:0 ~no_commits_push_count:0 ~context_exhaustion_count:0
+    ~push_failure_count:0 ~rebase_failure_count:0 ~branch_rebased_onto:None
+    ~branch_rebased_onto_sha:None ~merge_commit_sha:None
+    ~base_contains_merged_siblings:true
     ~anchor_history:Onton_core.Anchor_history.empty ~checks_passing
-    ~current_op:None
-    ~current_op_state:(if busy then Patch_agent.Running else Patch_agent.Queued)
-    ~current_message_id:None ~generation:0 ~worktree_path:None ~branch_blocked
-    ~llm_session_id:None ~automerge_enabled ~automerge_deadline
-    ~automerge_inflight ~automerge_failure_count ~delivered_ci_run_ids:[] ()
+    ~generation:0 ~worktree_path:None ~branch_blocked ~automerge
+    ~delivered_ci_run_ids:[] ()
 
 let make_orch agents_alist =
   let patches =
@@ -97,11 +106,11 @@ let make_orch agents_alist =
     ~main_branch:main ()
 
 let deadline_of orch pid =
-  (Orchestrator.agent orch pid).Patch_agent.automerge_deadline
+  Patch_agent.automerge_deadline (Orchestrator.agent orch pid)
 
 let fired_for decisions pid =
-  List.exists decisions ~f:(fun (d : Patch_controller.automerge_decision) ->
-      Patch_id.equal d.merge_patch_id pid)
+  List.exists decisions ~f:(fun (command : Github_effect.t) ->
+      Patch_id.equal command.patch_id pid)
 
 (* -- Generators -- *)
 
@@ -150,7 +159,6 @@ let gen_direct_agent ~now =
     let* branch_blocked = bool in
     let* base_is_main = bool in
     let* automerge_enabled = bool in
-    let* automerge_inflight = bool in
     let* automerge_failure_count = int_range 0 (max_failures + 1) in
     let* automerge_deadline = gen_deadline ~now in
     let pid = Patch_id.of_string "p" in
@@ -163,7 +171,7 @@ let gen_direct_agent ~now =
          ~is_draft ~busy ~merged:false ~branch_blocked
          ~base_branch:(Some (if base_is_main then main else other_branch))
          ~merge_queue_required:false ~merge_queue_entry:None ~automerge_enabled
-         ~automerge_deadline ~automerge_inflight ~automerge_failure_count))
+         ~automerge_deadline ~automerge_failure_count))
 
 let pid = Patch_id.of_string "p"
 
@@ -205,11 +213,11 @@ let () =
       (fun (now, agent) ->
         assume
           (Patch_controller.automerge_transient_hold agent ~main_branch:main
-          && Option.is_some agent.Patch_agent.automerge_deadline);
+          && Option.is_some (Patch_agent.automerge_deadline agent));
         let orch = make_orch [ (pid, agent) ] in
         let orch', decisions = Patch_controller.reconcile_automerge orch ~now in
         Option.equal Float.equal (deadline_of orch' pid)
-          agent.Patch_agent.automerge_deadline
+          (Patch_agent.automerge_deadline agent)
         && not (fired_for decisions pid))
   in
 
@@ -228,7 +236,7 @@ let () =
       (fun (now, agent) ->
         assume
           ((not agent.Patch_agent.merge_ready)
-          && Option.is_none agent.Patch_agent.automerge_deadline
+          && Option.is_none (Patch_agent.automerge_deadline agent)
           && not agent.Patch_agent.merged);
         let orch = make_orch [ (pid, agent) ] in
         let orch', _ = Patch_controller.reconcile_automerge orch ~now in
@@ -254,9 +262,8 @@ let () =
           && (not
                 (Patch_controller.automerge_transient_hold agent
                    ~main_branch:main))
-          && (not agent.Patch_agent.automerge_inflight)
           && (not agent.Patch_agent.merged)
-          && Option.is_some agent.Patch_agent.automerge_deadline);
+          && Option.is_some (Patch_agent.automerge_deadline agent));
         let orch = make_orch [ (pid, agent) ] in
         let orch', decisions = Patch_controller.reconcile_automerge orch ~now in
         Option.is_none (deadline_of orch' pid) && not (fired_for decisions pid))
@@ -278,7 +285,7 @@ let () =
         assume (Patch_controller.is_automerge_candidate agent ~main_branch:main);
         let orch = make_orch [ (pid, agent) ] in
         let orch', decisions = Patch_controller.reconcile_automerge orch ~now in
-        match agent.Patch_agent.automerge_deadline with
+        match Patch_agent.automerge_deadline agent with
         | None ->
             (* armed at now + timeout, no decision *)
             Option.equal Float.equal (deadline_of orch' pid)
@@ -286,9 +293,10 @@ let () =
             && not (fired_for decisions pid)
         | Some d ->
             if Float.( >= ) now d then
-              (* elapsed → a Direct_merge decision and inflight set *)
+              (* elapsed → a Direct_merge command persisted in the outbox *)
               fired_for decisions pid
-              && (Orchestrator.agent orch' pid).Patch_agent.automerge_inflight
+              && List.length (Orchestrator.github_effects_for_patch orch' pid)
+                 = 1
             else
               (* not yet elapsed → unchanged, no decision *)
               Option.equal Float.equal (deadline_of orch' pid) (Some d)
@@ -317,12 +325,12 @@ let () =
             ~merge_queue_required:false ~merge_queue_entry:None
             ~automerge_enabled:true
             ~automerge_deadline:(Some (now -. 1.0))
-            ~automerge_inflight:false ~automerge_failure_count:0
+            ~automerge_failure_count:0
         in
         let orch = make_orch [ (pid, agent) ] in
         let orch', decisions = Patch_controller.reconcile_automerge orch ~now in
         fired_for decisions pid
-        && (Orchestrator.agent orch' pid).Patch_agent.automerge_inflight)
+        && List.length (Orchestrator.github_effects_for_patch orch' pid) = 1)
   in
 
   (* -- Single-patch flap interleaving -- *)
@@ -359,8 +367,7 @@ let () =
         ~is_draft:false ~busy:false ~merged:false ~branch_blocked:false
         ~base_branch:(Some main) ~merge_queue_required:false
         ~merge_queue_entry:None ~automerge_enabled:true
-        ~automerge_deadline:deadline ~automerge_inflight:false
-        ~automerge_failure_count:0
+        ~automerge_deadline:deadline ~automerge_failure_count:0
     in
     (* Drive the ticks, threading the current deadline. Returns the list of
        (now, is_clean, deadline_after, fired?). *)
@@ -453,8 +460,7 @@ let () =
         ~is_draft:false ~busy:false ~merged:false ~branch_blocked:false
         ~base_branch:(Some main) ~merge_queue_required:false
         ~merge_queue_entry:None ~automerge_enabled:true
-        ~automerge_deadline:deadline ~automerge_inflight:false
-        ~automerge_failure_count:0
+        ~automerge_deadline:deadline ~automerge_failure_count:0
     in
     (* Build an initial orchestrator: all mergeable, no deadline. One reconcile
        to arm them all. *)
@@ -469,7 +475,7 @@ let () =
       List.iter ps ~f:(fun p ->
           let a = Orchestrator.agent orch p in
           if not a.Patch_agent.merged then
-            match a.Patch_agent.automerge_deadline with
+            match Patch_agent.automerge_deadline a with
             | Some d ->
                 Hashtbl.update observed p ~f:(function
                   | None -> [ d ]

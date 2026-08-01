@@ -7,20 +7,11 @@ let () =
       Onton_core.Types.Patch.
         {
           id = Onton_core.Types.Patch_id.of_string "1";
-          title = "Test patch";
-          description = "";
+          goal = "Test patch completes";
           branch = Onton_core.Types.Branch.of_string "test-1";
           dependencies = [];
-          spec = "";
-          acceptance_criteria = [];
           files = [];
-          classification = "";
-          changes = [];
-          test_stubs_introduced = [];
-          test_stubs_implemented = [];
-          complexity = None;
-          precedents = [];
-          required_context = [];
+          checks = [];
         };
     ]
   in
@@ -32,20 +23,10 @@ let () =
         project_name = "test-project";
         repo_owner = "";
         repo_name = "";
-        problem_statement = "";
-        solution_summary = "";
-        final_state_spec = "";
         patches;
-        current_state_analysis = "";
-        explicit_opinions = "";
-        acceptance_criteria = [];
-        open_questions = [];
-        functional_changes = [];
-        context_resources = [];
-        reachability_traces = [];
       }
   in
-  let _orch, _effects, actions =
+  let _orch, actions =
     Onton.Patch_controller.tick orch ~project_name:"test-project" ~gameplan
   in
   (match actions with

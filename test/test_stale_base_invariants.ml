@@ -156,7 +156,7 @@ let apply_command m cmd =
         in
         if
           (not (Patch_agent.has_pr agent))
-          || agent.Patch_agent.merged || agent.Patch_agent.busy
+          || agent.Patch_agent.merged || Patch_agent.is_busy agent
           || not rebase_in_queue
         then m
         else
@@ -186,7 +186,7 @@ let apply_command m cmd =
         in
         if
           (not (Patch_agent.has_pr agent))
-          || agent.Patch_agent.merged || agent.Patch_agent.busy
+          || agent.Patch_agent.merged || Patch_agent.is_busy agent
           || not rebase_in_queue
         then m
         else
@@ -235,7 +235,7 @@ let apply_command m cmd =
         in
         if
           (not agent.Patch_agent.has_conflict)
-          || agent.Patch_agent.merged || agent.Patch_agent.busy
+          || agent.Patch_agent.merged || Patch_agent.is_busy agent
           || not merge_conflict_is_next
         then m
         else
@@ -376,7 +376,7 @@ let sbi_defer_implies_progress m =
                   let base_ag = Orchestrator.agent m.orch bpid in
                   List.mem base_ag.Patch_agent.queue
                     Operation_kind.Merge_conflict ~equal:Operation_kind.equal
-                  || base_ag.Patch_agent.busy)
+                  || Patch_agent.is_busy base_ag)
           | Start_eligibility.Defer
               (Start_eligibility.Base_missing_merged_sibling _) ->
               (* Unreachable: this invariant evaluates the gate with
@@ -441,7 +441,7 @@ let rebase_complete_applies m i =
   let agent = Orchestrator.agent m.orch pid in
   Patch_agent.has_pr agent
   && (not agent.Patch_agent.merged)
-  && (not agent.Patch_agent.busy)
+  && (not (Patch_agent.is_busy agent))
   && List.mem agent.Patch_agent.queue Operation_kind.Rebase
        ~equal:Operation_kind.equal
   && List.length
