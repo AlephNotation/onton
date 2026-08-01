@@ -151,6 +151,9 @@ let () =
            (Stdlib.Filename.quote context)
            (Stdlib.Filename.quote declared))
       |> require_run;
+      run process_mgr ~cwd ~env:environment ~profile
+        "/usr/bin/curl -fsS https://example.com >/dev/null"
+      |> require_run;
       assert (
         Result.is_error
           (run process_mgr ~cwd ~env:environment ~profile

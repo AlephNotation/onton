@@ -35,6 +35,11 @@ let () =
   assert (String.is_substring profile ~substring:"/worktree/lib/new");
   assert (String.is_substring profile ~substring:"/runtime/backend");
   assert (String.is_substring profile ~substring:"/context/plan.md");
+  assert (
+    String.is_substring profile
+      ~substring:"(literal \"/private/var/run/mDNSResponder\")");
+  assert (String.is_substring profile ~substring:"/etc/ssl/openssl.cnf");
+  assert (not (String.is_substring profile ~substring:"*:53"));
   assert (not (String.is_substring profile ~substring:"GITHUB_TOKEN"));
   let environment =
     Worker_sandbox_policy.environment
