@@ -22,8 +22,8 @@ let kill_group ~pid ~signal =
   try Unix.kill (-pid) signal
   with Unix.Unix_error ((ESRCH | EPERM), _, _) -> ()
 
-let spawn_and_stream ~process_mgr ~clock ~timeout ~cwd ~env ~setsid_exec ~args
-    ~session_uuid ~patch_id
+let spawn_and_stream_raw ~process_mgr ~clock ~timeout ~cwd ~env ~setsid_exec
+    ~process_group ~args ~session_uuid ~patch_id
     ~(process_line : string -> Types.Stream_event.t list) ~on_event =
   let args =
     match setsid_exec with Some path -> path :: args | None -> args
@@ -71,7 +71,7 @@ let spawn_and_stream ~process_mgr ~clock ~timeout ~cwd ~env ~setsid_exec ~args
           ~stderr:stderr_w ~env args
       in
       let pid = Eio.Process.pid child in
-      let have_group = Option.is_some setsid_exec in
+      let have_group = process_group || Option.is_some setsid_exec in
       let signal_tree signal =
         if have_group then kill_group ~pid ~signal
         else try Eio.Process.signal child signal with _ -> ()
@@ -222,9 +222,21 @@ let spawn_and_stream ~process_mgr ~clock ~timeout ~cwd ~env ~setsid_exec ~args
         timed_out = true;
       }
 
+let spawn_and_stream ~process_mgr ~clock ~timeout ~cwd
+    ~(spawn : Worker_sandbox.spawn) ~session_uuid ~patch_id ~process_line
+    ~on_event =
+  spawn_and_stream_raw ~process_mgr ~clock ~timeout ~cwd ~env:spawn.environment
+    ~setsid_exec:None ~process_group:spawn.process_group ~args:spawn.argv
+    ~session_uuid ~patch_id ~process_line ~on_event
+
+module For_test = struct
+  let spawn_and_stream_raw = spawn_and_stream_raw
+end
+
 type t = {
   name : string;
   run_streaming :
+    sandbox:Worker_sandbox.t ->
     project_name:string ->
     cwd:Eio.Fs.dir_ty Eio.Path.t ->
     patch_id:Types.Patch_id.t ->
@@ -234,6 +246,17 @@ type t = {
     on_event:(Types.Stream_event.t -> unit) ->
     result;
 }
+
+let sandbox_failure ~on_event message =
+  on_event (Types.Stream_event.Error message);
+  {
+    exit_code = 1;
+    stdout = "";
+    stderr = message;
+    got_events = true;
+    saw_final_result = false;
+    timed_out = false;
+  }
 
 let redact_env env = Array.map env ~f:Token_scrub.redact_env_entry
 

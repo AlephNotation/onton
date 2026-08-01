@@ -769,20 +769,23 @@ let construct_capabilities ~net (setup : runtime_setup) =
       | Some "" -> None
       | Some p -> Some p
       | None ->
-          Some
-            (Filename.concat
-               (Filename.dirname Sys.executable_name)
-               "onton-setsid-exec")
+          let executable_dir = Filename.dirname Sys.executable_name in
+          let installed = Filename.concat executable_dir "onton-setsid-exec" in
+          if Sys.file_exists installed then Some installed
+          else Some (Filename.concat executable_dir "setsid_exec/main.exe")
     in
     match candidate with
     | Some p when Sys.file_exists p -> Some p
     | Some p ->
-        Eio.traceln
-          "onton-setsid-exec not found at %s; grandchildren will reparent to \
-           PID 1 on teardown"
+        Printf.eprintf
+          "Error: worker isolation unavailable: onton-setsid-exec not found at \
+           %s\n"
           p;
-        None
-    | None -> None
+        Stdlib.exit 1
+    | None ->
+        Printf.eprintf
+          "Error: worker isolation unavailable: ONTON_SETSID_EXEC disabled\n";
+        Stdlib.exit 1
   in
   let effective_model_opt =
     if Base.String.is_empty model then None else Some model

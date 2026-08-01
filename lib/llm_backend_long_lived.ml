@@ -14,6 +14,7 @@ type result = Llm_backend.result = {
 [@@deriving show, eq, sexp_of, compare]
 
 type start_config = {
+  sandbox : Worker_sandbox.t;
   project_name : string;
   worktree : Eio.Fs.dir_ty Eio.Path.t;
   patch_id : Types.Patch_id.t;

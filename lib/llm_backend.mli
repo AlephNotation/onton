@@ -37,9 +37,7 @@ val spawn_and_stream :
   clock:_ Eio.Time.clock ->
   timeout:float ->
   cwd:Eio.Fs.dir_ty Eio.Path.t ->
-  env:string array ->
-  setsid_exec:string option ->
-  args:string list ->
+  spawn:Worker_sandbox.spawn ->
   session_uuid:string option ->
   patch_id:Types.Patch_id.t ->
   process_line:(string -> Types.Stream_event.t list) ->
@@ -52,15 +50,33 @@ val spawn_and_stream :
     Codex; stderr is capped and truncated. The process is killed after [timeout]
     seconds.
 
-    When [setsid_exec] is supplied, [args] is prefixed with that path (a tiny
-    OCaml shim that calls [setsid(2)] before exec'ing). The child then leads its
-    own process group, and teardown sends [kill(2)] to the whole group so
-    tool-call grandchildren (e.g. Bash-spawned shells) are reaped rather than
-    reparented to PID 1. *)
+    [spawn] can only be produced by {!Worker_sandbox.prepare_spawn}; this is the
+    single production process-launch boundary. Teardown signals the isolated
+    process group so tool-call grandchildren are reaped. *)
+
+module For_test : sig
+  val spawn_and_stream_raw :
+    process_mgr:_ Eio.Process.mgr ->
+    clock:_ Eio.Time.clock ->
+    timeout:float ->
+    cwd:Eio.Fs.dir_ty Eio.Path.t ->
+    env:string array ->
+    setsid_exec:string option ->
+    process_group:bool ->
+    args:string list ->
+    session_uuid:string option ->
+    patch_id:Types.Patch_id.t ->
+    process_line:(string -> Types.Stream_event.t list) ->
+    on_event:(Types.Stream_event.t -> unit) ->
+    result
+  (** Unsandboxed subprocess primitive exposed only for parser and teardown
+      smoke tests. *)
+end
 
 type t = {
   name : string;
   run_streaming :
+    sandbox:Worker_sandbox.t ->
     project_name:string ->
     cwd:Eio.Fs.dir_ty Eio.Path.t ->
     patch_id:Types.Patch_id.t ->
@@ -70,3 +86,6 @@ type t = {
     on_event:(Types.Stream_event.t -> unit) ->
     result;
 }
+
+val sandbox_failure :
+  on_event:(Types.Stream_event.t -> unit) -> string -> result

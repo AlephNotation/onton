@@ -234,26 +234,15 @@ let render_patch_layer ~(project_name : string) (patch : Patch.t) ?pr_number
          dependency's.\n\n"
         base_branch base_branch
   in
-  let pr_instructions =
-    (* Commit subjects are not rewritten or rejected downstream. The rebase
-       subject filter in [Worktree.rebase_onto] treats this prompt convention as
-       a best-effort agent contract: malformed subjects simply will not match
-       [Worktree.is_ancestor_patch_subject], so rebase falls back to the other
-       ancestry / patch-id paths. *)
-    let commit_block =
-      Printf.sprintf
-        {|
-**Commit your work with `git commit` before ending the session.** Every code change you make must land in a commit — uncommitted changes are discarded by the supervisor's push, and no PR can be opened from an empty branch. Multiple commits are fine; commit whenever it makes sense.
-
-**Prefix every commit subject with `[%s] Patch %s: `** (the same project name and patch number used by this branch and its PR title), e.g. `[%s] Patch %s: <short summary>`. This lets the supervisor recognize your commits as belonging to this patch when rebasing onto dependency branches later.
-
-**Do NOT run `git push` or `gh pr create` yourself.** The supervisor pushes your commits and opens/updates the PR.|}
-        project_name patch_id project_name patch_id
+  let controller_instructions =
+    let publication_block =
+      {|
+Do not run `git`, `gh`, or any forge command. Git metadata, credentials, validation, commits, rebases, pushes, and PR mutations belong to the controller. Make only the requested file edits; when you finish, the controller runs every declared check, rejects out-of-scope changes, and records accepted changes in a deterministic patch commit.|}
     in
     match pr_number with
-    | Some _ -> commit_block
+    | Some _ -> publication_block
     | None ->
-        commit_block
+        publication_block
         ^ {|
 
 The supervisor opens the draft PR after your first commit lands on the remote, with a gameplan-derived title and body.|}
@@ -276,7 +265,7 @@ The supervisor opens the draft PR after your first commit lands on the remote, w
       ( "dependency_notes_section",
         dependency_notes_section ~project_name ancestors );
       ("base_branch_note", base_branch_note);
-      ("pr_instructions", pr_instructions);
+      ("controller_instructions", controller_instructions);
     ]
   in
   render_with_override ~project_name ~name:"patch" ~vars ~default:(fun () ->
@@ -298,13 +287,14 @@ Do not edit outside this scope. If the goal cannot be completed within it, stop 
 ## Required Checks
 {{checks}}
 
-Run every command and do not report completion unless each exits successfully.
+The controller runs these commands after your turn. They are evidence gates,
+not worker capabilities.
 
-## Git Instructions
+## Controller Boundary
 - Branch: {{branch}}
 - Base branch: {{base_branch}}
 - PR: {{pr_str}}
-{{pr_instructions}}
+{{controller_instructions}}
 
 |}
         vars)
@@ -588,12 +578,12 @@ let render_turn_layer_review ~(project_name : string) ?pr_number
             \   Use the Write tool with that absolute path — the directory is \
              outside the worktree on purpose; do not commit it.\n\n\
              Write a response file for EVERY comment listed above.%s After \
-             this session the supervisor pushes your commits, then posts each \
-             response as a reply on its comment thread and resolves that \
-             thread. A comment without a response file stays unresolved and \
-             will be re-delivered to you.\n\n\
-             After addressing all comments, commit your changes. The \
-             supervisor will push them for you — do not run `git push`."
+             this session the supervisor validates and records your changes, \
+             then posts each response as a reply on its comment thread and \
+             resolves that thread. A comment without a response file stays \
+             unresolved and will be re-delivered to you.\n\n\
+             After addressing all comments, stop. The controller owns all Git \
+             and publication operations."
             pr_ctx sha_anchor formatted artifact_dir retry_note)
 
 let render_review_prompt ~(project_name : string) ?agents_md ?pr_number
@@ -681,8 +671,8 @@ let render_turn_layer_findings ~(project_name : string) ?pr_number
          - Use the Write tool with the absolute path (the directory is outside \
          the worktree on purpose — do not commit it). One file per finding, \
          reason text only.\n\n\
-         After addressing the in-scope findings, commit your changes. The \
-         supervisor will push them for you — do not run `git push`."
+         After addressing the in-scope findings, stop. The controller owns all \
+         Git and publication operations."
         pr_num_str sha_anchor formatted artifact_dir)
 
 let render_findings_prompt ~(project_name : string) ?agents_md ?pr_number
@@ -747,8 +737,8 @@ let render_turn_layer_ci ~(project_name : string) ?pr_number
             "# CI Failures%s\n\n\
              The following CI checks failed:\n\n\
              %s\n\n\
-             After making your changes, commit them. The supervisor will push \
-             them for you — do not run `git push`."
+             After making your changes, stop. The controller validates, \
+             commits, and publishes them."
             pr_ctx formatted)
 
 let ci_detailed_footer =
@@ -876,8 +866,8 @@ let render_turn_layer_ci_detailed ~(project_name : string) ?pr_number
          The following CI checks failed:\n\n\
          %s\n\n\
          %s\n\n\
-         After making your changes, commit them. The supervisor will push them \
-         for you — do not run `git push`."
+         After making your changes, stop. The controller validates, commits, \
+         and publishes them."
         pr_ctx formatted_checks ci_detailed_footer)
 
 let render_ci_failure_prompt ~(project_name : string) ?agents_md ?pr_number
@@ -914,9 +904,10 @@ let render_turn_layer_ci_unknown ~(project_name : string) ?pr_number () =
         "# CI Failures%s\n\n\
          One or more CI checks failed. Please investigate the failures and fix \
          them.\n\n\
-         Run the CI checks locally or check the PR status for details.\n\n\
-         After making your changes, commit them. The supervisor will push them \
-         for you — do not run `git push`."
+         Use the supplied diagnostics to identify the failure; the controller \
+         runs the declared checks after your turn.\n\n\
+         After making your changes, stop. The controller validates, commits, \
+         and publishes them."
         pr_ctx)
 
 let render_ci_failure_unknown_prompt ~(project_name : string) ?agents_md
@@ -926,72 +917,16 @@ let render_ci_failure_unknown_prompt ~(project_name : string) ?agents_md
   ^ render_turn_layer_ci_unknown ~project_name ?pr_number ()
 
 let render_recovery_section (ci : Worktree.conflict_info) =
-  let bullet (c : Worktree.unique_commit) =
-    let short =
-      if String.length c.sha >= 7 then String.sub c.sha ~pos:0 ~len:7 else c.sha
-    in
-    Printf.sprintf "  %s %s" short c.subject
-  in
-  (* unique_commits is git-log order (newest-first); the bullet list reads
-     oldest-first so an agent reapplying with cherry-pick can scan top-to-bottom
-     in commit-order. *)
-  let commits_section =
-    if List.is_empty ci.Worktree.unique_commits then ""
-    else
-      let commits_lines =
-        List.rev ci.Worktree.unique_commits
-        |> List.map ~f:bullet |> String.concat ~sep:"\n"
-      in
-      Printf.sprintf "\n\nCommits unique to this patch (oldest first):\n%s"
-        commits_lines
-  in
-  let orig_head_block =
-    if String.is_empty ci.Worktree.orig_head then ""
-    else
-      Printf.sprintf
-        {|
+  Printf.sprintf
+    {|
 
-If you need to discard your in-progress conflict resolution and start over
-from your pre-rebase state, the supervisor captured your HEAD before the
-rebase began:
+## Controller recovery context
 
-    git reset --hard %s|}
-        ci.Worktree.orig_head
-  in
-  match ci.Worktree.strategy with
-  | Worktree.Onto ->
-      Printf.sprintf
-        {|
-
-## Recovery (if rebase state is lost)
-
-If `git status` no longer shows a rebase in progress (e.g. you ran
-`git rebase --abort` or the worktree was reset), do NOT run
-`git rebase %s` against your local tracking ref — it may be stale
-and would re-pick already-merged dependency commits.
-
-First refresh remote tracking refs, then restart with the same `--onto`
-range the supervisor used:
-
-    git fetch origin
-    git rebase --onto %s %s%s%s|}
-        ci.target ci.target ci.old_base commits_section orig_head_block
-  | Worktree.Plain ->
-      Printf.sprintf
-        {|
-
-## Recovery (if rebase state is lost)
-
-If `git status` no longer shows a rebase in progress, refresh remote
-tracking refs and restart with:
-
-    git fetch origin
-    git rebase %s
-
-(No per-patch commit list could be isolated — the supervisor fell back
-to a plain rebase against `%s` because no unique commits were
-identified.)%s|}
-        ci.target ci.target orig_head_block
+The controller owns this rebase and its recovery state (target `%s`, original
+HEAD `%s`). Do not run Git commands or attempt to restart, abort, stage, or
+continue the rebase. Resolve only the conflict markers in declared patch files
+and end the turn; the controller will stage and continue safely.|}
+    ci.target ci.orig_head
 
 let render_turn_layer_merge_conflict ~(project_name : string) ?pr_number
     ~(base_branch : string) ?(git_status = "") ?(git_diff = "") ?conflict_info
@@ -1058,22 +993,11 @@ let render_turn_layer_merge_conflict ~(project_name : string) ?pr_number
 
 A rebase onto `%s` is already in progress but hit conflicts.
 
-Resolve each conflicted file, then stage and continue:
-
-```
-git add <resolved files>
-git rebase --continue
-```
-
-If the rebase continues and hits further conflicts, repeat the process.
-
-Do NOT run `git rebase origin/%s` — the rebase is already set up with the
-correct --onto range. Starting a new rebase would re-introduce dependency
-commits that have already been stripped.
-
-After resolving all conflicts and completing the rebase, the supervisor will push the rebased commits for you — do not run `git push`.%s%s%s|}
-        pr_ctx base_branch base_branch status_section diff_section
-        recovery_section)
+Resolve every conflict marker in the declared patch files, then end the turn.
+Do not stage files or run any Git command. The controller will validate the
+resolved files, stage only the declared scope, continue the rebase, and either
+publish it or deliver the next conflict in a fresh turn.%s%s%s|}
+        pr_ctx base_branch status_section diff_section recovery_section)
 
 let render_merge_conflict_prompt ~(project_name : string) ?agents_md ?pr_number
     ?patch ?gameplan ~(base_branch : string) ?(git_status = "") ?(git_diff = "")
@@ -1708,10 +1632,8 @@ let%test "review prompt formats comments" =
   && String.is_substring result ~substring:"General feedback."
   && String.is_substring result
        ~substring:"/data/artifacts/p1/comment_responses/<comment_id>.md"
-  (* The response procedure must not point the agent at the forge CLI —
-     reply/resolve is supervisor-owned, keyed off the response files. (The
-     agent remains free to use gh for its own investigation; the prompt just
-     never asks it to reply or resolve.) *)
+  (* The response procedure must not point the worker at the forge CLI —
+     reply/resolve is controller-owned, keyed off the response files. *)
   && (not (String.is_substring result ~substring:"resolveReviewThread"))
   && (not (String.is_substring result ~substring:"gh api"))
   (* Back-compat: no SHAs → no preamble, no [at=…], no [outdated]. *)
@@ -1762,9 +1684,9 @@ let%expect_test "review prompt includes SHA preamble and per-bullet anchor" =
     2. Write your response to `/data/artifacts/p1/comment_responses/<comment_id>.md` (the [comment_id=...] shown above), containing just the response text.
        Use the Write tool with that absolute path — the directory is outside the worktree on purpose; do not commit it.
 
-    Write a response file for EVERY comment listed above. After this session the supervisor pushes your commits, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
+    Write a response file for EVERY comment listed above. After this session the supervisor validates and records your changes, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
 
-    After addressing all comments, commit your changes. The supervisor will push them for you — do not run `git push`.
+    After addressing all comments, stop. The controller owns all Git and publication operations.
     |}]
 
 let%expect_test "review prompt marks outdated comments" =
@@ -1809,9 +1731,9 @@ let%expect_test "review prompt marks outdated comments" =
     2. Write your response to `/data/artifacts/p1/comment_responses/<comment_id>.md` (the [comment_id=...] shown above), containing just the response text.
        Use the Write tool with that absolute path — the directory is outside the worktree on purpose; do not commit it.
 
-    Write a response file for EVERY comment listed above. After this session the supervisor pushes your commits, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
+    Write a response file for EVERY comment listed above. After this session the supervisor validates and records your changes, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
 
-    After addressing all comments, commit your changes. The supervisor will push them for you — do not run `git push`.
+    After addressing all comments, stop. The controller owns all Git and publication operations.
     |}]
 
 let%expect_test
@@ -1859,9 +1781,9 @@ let%expect_test
     2. Write your response to `/data/artifacts/p1/comment_responses/<comment_id>.md` (the [comment_id=...] shown above), containing just the response text.
        Use the Write tool with that absolute path — the directory is outside the worktree on purpose; do not commit it.
 
-    Write a response file for EVERY comment listed above. After this session the supervisor pushes your commits, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
+    Write a response file for EVERY comment listed above. After this session the supervisor validates and records your changes, then posts each response as a reply on its comment thread and resolves that thread. A comment without a response file stays unresolved and will be re-delivered to you.
 
-    After addressing all comments, commit your changes. The supervisor will push them for you — do not run `git push`.
+    After addressing all comments, stop. The controller owns all Git and publication operations.
     |}]
 
 let%test "review prompt marks resolve-retry comments only with viewer known" =

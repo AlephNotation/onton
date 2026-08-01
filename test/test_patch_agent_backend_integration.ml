@@ -97,8 +97,18 @@ let smoke_test =
               let clock = Eio.Stdenv.clock env in
               let fs = Eio.Stdenv.fs env in
               let backend =
+                let setsid_exec =
+                  let candidate =
+                    Stdlib.Filename.concat
+                      (Stdlib.Filename.dirname Stdlib.Sys.executable_name)
+                      "../bin/setsid_exec/main.exe"
+                  in
+                  if Stdlib.Sys.file_exists candidate then
+                    Some (Unix.realpath candidate)
+                  else None
+                in
                 Patch_agent_backend.create ~process_mgr ~clock ~timeout:60.0
-                  ~binary_path:"patch-agent" ~setsid_exec:None
+                  ~binary_path:"patch-agent" ~setsid_exec
               in
               let events = ref [] in
               let passed = ref false in
@@ -108,12 +118,41 @@ let smoke_test =
                     backend
                   in
                   let worktree = Eio.Path.(fs / tmp) in
+                  let patch_id = Types.Patch_id.of_string "patch-6-smoke" in
+                  let patch : Types.Patch.t =
+                    {
+                      id = patch_id;
+                      goal = "exercise the patch-agent transport";
+                      branch = Types.Branch.of_string "test/patch-agent";
+                      dependencies = [];
+                      files = [];
+                      checks = [];
+                    }
+                  in
+                  let gameplan : Types.Gameplan.t =
+                    {
+                      project_name = "onton";
+                      repo_owner = "test";
+                      repo_name = "test";
+                      patches = [ patch ];
+                    }
+                  in
+                  let sandbox =
+                    match
+                      Worker_sandbox.create ~backend:"patch-agent"
+                        ~provider:"anthropic" ~project_name:"onton"
+                        ~worktree:tmp ~patch ~gameplan ~operation:None
+                    with
+                    | Ok sandbox -> sandbox
+                    | Error message -> failwith message
+                  in
                   let handle =
                     start ~sw
                       {
                         Llm_backend_long_lived.project_name = "onton";
                         worktree;
-                        patch_id = Types.Patch_id.of_string "patch-6-smoke";
+                        patch_id;
+                        sandbox;
                         provider = "anthropic";
                         model = "claude-sonnet-4-5";
                         effort = "medium";

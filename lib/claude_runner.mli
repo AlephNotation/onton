@@ -17,33 +17,13 @@ open Base
     Design decision: one fiber per Claude process for natural backpressure —
     busy patches don't get new work. *)
 
-val run :
-  model:string option ->
-  process_mgr:_ Eio.Process.mgr ->
-  cwd:Eio.Fs.dir_ty Eio.Path.t ->
-  patch_id:Types.Patch_id.t ->
-  prompt:string ->
-  resume_session:string option ->
-  Llm_backend.result
-(** Spawn a Claude CLI process for [patch_id] in directory [cwd].
-
-    If [resume_session] is [Some id], the session is resumed with
-    [--resume <id>]. Otherwise a new session is created.
-
-    Returns a {!Llm_backend.result} with exit code and captured stdout/stderr.
-
-    {b Warning: no timeout.} This function blocks until the child exits or its
-    enclosing switch is cancelled. There is no internal deadline, so callers
-    must impose their own bound (e.g. wrap in {!Eio.Time.with_timeout} or run
-    inside a switch they will release on a timer). The streaming counterpart
-    {!run_streaming} carries [~clock] and [~timeout] for this purpose. *)
-
 val run_streaming :
   model:string option ->
   process_mgr:_ Eio.Process.mgr ->
   clock:_ Eio.Time.clock ->
   timeout:float ->
   setsid_exec:string option ->
+  sandbox:Worker_sandbox.t ->
   project_name:string ->
   cwd:Eio.Fs.dir_ty Eio.Path.t ->
   patch_id:Types.Patch_id.t ->

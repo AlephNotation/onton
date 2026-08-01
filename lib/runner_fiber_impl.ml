@@ -287,40 +287,57 @@ struct
     in
     Printf.sprintf "%s (%s)\n%s" failure.command exit output
 
-  let run_patch_validation ~runtime ~patch_id ~worktree ~base_branch patch =
-    match
-      Patch_validator.run ~process_mgr:Env.process_mgr ~clock:Env.clock
-        ~fs:Env.fs ~cwd:worktree ~base_branch patch
-    with
-    | Ok () ->
-        log_event runtime ~patch_id
-          (Printf.sprintf "Scope and required checks passed (%d checks)"
-             (List.length patch.Patch.checks));
-        Ok ()
-    | Error (Patch_validator.Outside_scope paths) ->
-        log_event runtime ~patch_id
-          (Printf.sprintf "Patch changed files outside its declared scope: %s"
-             (Base.String.concat ~sep:", " paths));
-        Error "changed files fall outside the patch scope"
-    | Error (Scope_read_failed failure) ->
-        log_event runtime ~patch_id
-          ("Could not verify patch scope: " ^ command_failure_text failure);
-        Error "could not read the patch diff"
-    | Error (Check_failed (check, failure)) ->
-        log_event runtime ~patch_id
-          (Printf.sprintf "Required check failed: %s\n%s" check.Check.run
-             (command_failure_text failure));
-        Error (Printf.sprintf "required check failed: %s" check.Check.run)
-
-  let validate_patch_contract ~runtime ~patch_id ~worktree ~base_branch =
+  let prepare_patch_contract ~runtime ~patch_id ~worktree ~base_branch =
     let patch =
       Runtime.read runtime (fun snap ->
           Base.List.find snap.Runtime.gameplan.Gameplan.patches
             ~f:(fun (patch : Patch.t) -> Patch_id.equal patch.Patch.id patch_id))
     in
     match patch with
-    | Some patch ->
-        run_patch_validation ~runtime ~patch_id ~worktree ~base_branch patch
+    | Some patch -> (
+        match
+          Patch_validator.prepare ~process_mgr:Env.process_mgr ~clock:Env.clock
+            ~fs:Env.fs ~cwd:worktree ~base_branch ~project_name:Env.project_name
+            ~rebase_in_progress:(W.rebase_in_progress ~path:worktree)
+            patch
+        with
+        | Ok Patch_validator.No_changes ->
+            log_event runtime ~patch_id
+              "Controller found no worker changes to commit";
+            Ok ()
+        | Ok Patch_validator.Committed ->
+            log_event runtime ~patch_id
+              "Controller validated and committed worker changes";
+            Ok ()
+        | Ok Patch_validator.Rebase_continued ->
+            log_event runtime ~patch_id
+              "Controller staged conflict resolutions and continued the rebase";
+            Ok ()
+        | Error (Patch_validator.Validation_failed failure) -> (
+            match failure with
+            | Patch_validator.Outside_scope paths ->
+                log_event runtime ~patch_id
+                  (Printf.sprintf
+                     "Patch changed files outside its declared scope: %s"
+                     (Base.String.concat ~sep:", " paths));
+                Error "changed files fall outside the patch scope"
+            | Patch_validator.Scope_read_failed failure ->
+                log_event runtime ~patch_id
+                  ("Could not verify patch scope: "
+                  ^ command_failure_text failure);
+                Error "could not read the patch diff"
+            | Patch_validator.Check_failed (check, failure) ->
+                log_event runtime ~patch_id
+                  (Printf.sprintf "Required check failed: %s\n%s"
+                     check.Check.run
+                     (command_failure_text failure));
+                Error
+                  (Printf.sprintf "required check failed: %s" check.Check.run))
+        | Error (Patch_validator.Git_failed failure) ->
+            log_event runtime ~patch_id
+              ("Controller could not record worker changes: "
+              ^ command_failure_text failure);
+            Error "controller could not record worker changes")
     | None ->
         log_event runtime ~patch_id
           "Publication rejected: patch has no declared contract";
@@ -508,12 +525,41 @@ struct
     let run_llm_session ~sw ~gameplan_prompt ~patch_prompt ~kind ~patch_id
         ~prompt ~agent ~on_pr_detected =
       let validate_before_push ~worktree ~base_branch =
-        validate_patch_contract ~runtime ~patch_id ~worktree ~base_branch
+        prepare_patch_contract ~runtime ~patch_id ~worktree ~base_branch
+      in
+      let sandbox_for_worktree ~worktree =
+        let gameplan =
+          Runtime.read runtime (fun snapshot -> snapshot.Runtime.gameplan)
+        in
+        match
+          Base.List.find gameplan.Gameplan.patches ~f:(fun (patch : Patch.t) ->
+              Patch_id.equal patch.id patch_id)
+        with
+        | None -> Error "worker has no declared patch contract"
+        | Some patch ->
+            let provider =
+              match Env.backend with
+              | Backend_registry.Ephemeral _ -> (
+                  let backend = Env.backend_decision.Backend_routing.backend in
+                  match
+                    ( Base.String.lowercase backend,
+                      Env.backend_decision.Backend_routing.model )
+                  with
+                  | ("opencode" | "pi"), Some model ->
+                      Base.String.lsplit2 (Base.String.lowercase model) ~on:'/'
+                      |> Base.Option.map ~f:fst
+                      |> Base.Option.value ~default:backend
+                  | _ -> backend)
+              | Backend_registry.Long_lived _ -> patch_agent_provider
+            in
+            Worker_sandbox.create
+              ~backend:Env.backend_decision.Backend_routing.backend ~provider
+              ~project_name ~worktree ~patch ~gameplan ~operation:kind
       in
       match Env.backend with
       | Backend_registry.Ephemeral backend ->
-          Session_driver.run ~kind ~patch_id ~prompt ~agent ~on_pr_detected
-            ~validate_before_push ~backend
+          Session_driver.run ~sandbox_for_worktree ~kind ~patch_id ~prompt
+            ~agent ~on_pr_detected ~validate_before_push ~backend
       | Backend_registry.Long_lived backend -> (
           let patch_agent_model_result =
             match Env.backend_decision.Backend_routing.model with
@@ -546,8 +592,9 @@ struct
                       session;
                     session
               in
-              Session_driver.run_long_lived ~sw ~kind ~patch_id ~prompt ~agent
-                ~on_pr_detected ~validate_before_push ~session)
+              Session_driver.run_long_lived ~sw ~sandbox_for_worktree ~kind
+                ~patch_id ~prompt ~agent ~on_pr_detected ~validate_before_push
+                ~session)
     in
     let shutdown_finished_long_lived_sessions ~sw () =
       let finished =
@@ -1049,7 +1096,7 @@ struct
                                   ~ref_name:("refs/heads/" ^ base_str)
                               in
                               match
-                                validate_patch_contract ~runtime ~patch_id
+                                prepare_patch_contract ~runtime ~patch_id
                                   ~worktree:wt_path ~base_branch:new_base
                               with
                               | Error _ -> Some `Rejected
@@ -1665,7 +1712,7 @@ struct
                                                 Types.Branch.of_string base
                                               in
                                               match
-                                                validate_patch_contract ~runtime
+                                                prepare_patch_contract ~runtime
                                                   ~patch_id ~worktree:wt_path
                                                   ~base_branch
                                               with

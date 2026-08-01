@@ -104,26 +104,23 @@ let is_final = function
   | Types.Stream_event.Session_init _ ->
       false
 
-let spawn_args ~binary_path ~setsid_exec ~gameplan_path ~patch_path
-    ~worktree_path ~provider ~model ~effort =
-  let args =
-    [
-      binary_path;
-      "--gameplan-prompt-file";
-      gameplan_path;
-      "--patch-prompt-file";
-      patch_path;
-      "--worktree";
-      worktree_path;
-      "--provider";
-      provider;
-      "--model";
-      model;
-      "--effort";
-      effort;
-    ]
-  in
-  match setsid_exec with Some path -> path :: args | None -> args
+let spawn_args ~binary_path ~gameplan_path ~patch_path ~worktree_path ~provider
+    ~model ~effort =
+  [
+    binary_path;
+    "--gameplan-prompt-file";
+    gameplan_path;
+    "--patch-prompt-file";
+    patch_path;
+    "--worktree";
+    worktree_path;
+    "--provider";
+    provider;
+    "--model";
+    model;
+    "--effort";
+    effort;
+  ]
 
 let native_absolute_exn path ~what =
   let native = Eio.Path.native_exn path in
@@ -133,33 +130,59 @@ let native_absolute_exn path ~what =
          "patch-agent %s must be a native absolute path for subprocess use" what);
   native
 
-let write_prompt_files worktree ~gameplan_prompt ~patch_prompt =
-  let dir = Eio.Path.(worktree / ".patch-agent") in
-  Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 dir;
-  let gameplan_path = Eio.Path.(dir / "gameplan.md") in
-  let patch_path = Eio.Path.(dir / "patch.md") in
-  Eio.Path.save ~create:(`Or_truncate 0o644) gameplan_path gameplan_prompt;
-  Eio.Path.save ~create:(`Or_truncate 0o644) patch_path patch_prompt;
-  (Eio.Path.native_exn gameplan_path, Eio.Path.native_exn patch_path)
+let save_file path contents =
+  let channel = Stdlib.Out_channel.open_text path in
+  Stdlib.Fun.protect
+    ~finally:(fun () -> Stdlib.Out_channel.close channel)
+    (fun () -> Stdlib.Out_channel.output_string channel contents)
+
+let write_prompt_files sandbox ~gameplan_prompt ~patch_prompt =
+  let dir =
+    Stdlib.Filename.concat (Worker_sandbox.state_dir sandbox) "patch-agent"
+  in
+  Project_store.ensure_dir dir;
+  let gameplan_path = Stdlib.Filename.concat dir "gameplan.md" in
+  let patch_path = Stdlib.Filename.concat dir "patch.md" in
+  save_file gameplan_path gameplan_prompt;
+  save_file patch_path patch_prompt;
+  (gameplan_path, patch_path)
 
 let start ~(process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t) ~binary_path
     ~setsid_exec ~sw
-    ({ worktree; provider; model; effort; gameplan_prompt; patch_prompt; _ } :
+    ({
+       sandbox;
+       project_name;
+       worktree;
+       patch_id;
+       provider;
+       model;
+       effort;
+       gameplan_prompt;
+       patch_prompt;
+     } :
       Long_lived.start_config) =
   let worktree_path = native_absolute_exn worktree ~what:"worktree" in
   let gameplan_path, patch_path =
-    write_prompt_files worktree ~gameplan_prompt ~patch_prompt
+    write_prompt_files sandbox ~gameplan_prompt ~patch_prompt
   in
   let args =
-    spawn_args ~binary_path ~setsid_exec ~gameplan_path ~patch_path
-      ~worktree_path ~provider ~model ~effort
+    spawn_args ~binary_path ~gameplan_path ~patch_path ~worktree_path ~provider
+      ~model ~effort
+  in
+  let overrides =
+    Spawn_env.per_patch_env ~backend:provider ~project_name ~patch_id
+  in
+  let { Worker_sandbox.argv = args; environment = env; process_group } =
+    match Worker_sandbox.prepare_spawn sandbox ~overrides ~setsid_exec args with
+    | Ok prepared -> prepared
+    | Error message -> raise (Failure message)
   in
   let stdin_r, stdin_w = Eio.Process.pipe ~sw process_mgr in
   let stdout_r, stdout_w = Eio.Process.pipe ~sw process_mgr in
   let stderr_r, stderr_w = Eio.Process.pipe ~sw process_mgr in
   let child =
     Eio.Process.spawn ~sw process_mgr ~cwd:worktree ~stdin:stdin_r
-      ~stdout:stdout_w ~stderr:stderr_w ~env:(Unix.environment ()) args
+      ~stdout:stdout_w ~stderr:stderr_w ~env args
   in
   Eio.Flow.close stdin_r;
   Eio.Flow.close stdout_w;
@@ -174,7 +197,7 @@ let start ~(process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t) ~binary_path
       stderr_capture = Buffer.create 4096;
       stderr_truncated = ref false;
       pid = Eio.Process.pid child;
-      have_group = Option.is_some setsid_exec;
+      have_group = process_group;
       await_promise =
         Eio.Fiber.fork_promise ~sw (fun () -> Eio.Process.await child);
       shutdown_requested = false;

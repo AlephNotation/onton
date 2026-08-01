@@ -26,6 +26,7 @@ end
 
 module Make (_ : Worktree.S) (_ : ENV) : sig
   val run :
+    sandbox_for_worktree:(worktree:string -> (Worker_sandbox.t, string) result) ->
     kind:Types.Operation_kind.t option ->
     patch_id:Types.Patch_id.t ->
     prompt:string ->
@@ -63,6 +64,7 @@ module Make (_ : Worktree.S) (_ : ENV) : sig
 
   val run_long_lived :
     sw:Eio.Switch.t ->
+    sandbox_for_worktree:(worktree:string -> (Worker_sandbox.t, string) result) ->
     kind:Types.Operation_kind.t option ->
     patch_id:Types.Patch_id.t ->
     prompt:string ->

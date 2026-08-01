@@ -65,7 +65,8 @@ unattended supervisor session. There are two supported transports:
   that touches a workflow file under a token without the `workflow` scope is
   rejected with `! [remote rejected] (refusing to allow an OAuth App to
   create or update workflow …)` — that surfaces in the activity log as
-  `workflow_scope_missing` and the agent flips to `needs_intervention`
+  `workflow_scope_missing` and the controller marks the patch as
+  `needs_intervention`
   immediately (no retry loop). Fix:
   `gh auth refresh -h github.com -s workflow`.
 - **SSH** — onton auto-detects whether the user already maintains a clone of

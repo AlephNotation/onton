@@ -2,13 +2,14 @@
    @archlint.domain spawn-env *)
 
 val per_patch_env :
-  project_name:string -> patch_id:Types.Patch_id.t -> (string * string) list
+  backend:string ->
+  project_name:string ->
+  patch_id:Types.Patch_id.t ->
+  (string * string) list
 (** Per-patch config-dir overrides for headless agent CLIs. Creates the backing
     directories under the project store before returning:
-    [spawn-envs/<patch_id>/{claude,codex,opencode}]. Also seeds each per-patch
-    dir with a symlink to the user's real auth file (a no-op when the user's
-    file does not exist — e.g. macOS Claude, where credentials live in the
-    Keychain rather than [~/.claude/.credentials.json]).
+    [spawn-envs/<patch_id>/sandbox/{claude,codex,opencode}]. It never copies or
+    links ambient CLI credential stores into the worker boundary.
 
     On macOS, scoping [CLAUDE_CONFIG_DIR] makes Claude unable to find the
     Keychain-stored OAuth credential, so [per_patch_env] also injects
@@ -17,12 +18,6 @@ val per_patch_env :
     [$XDG_CONFIG_HOME/onton/claude-oauth-token] (or
     [~/.config/onton/claude-oauth-token]). Generate the token once via
     [claude setup-token] and write it to that file (mode 0600). *)
-
-val per_patch_env_without_codex_home :
-  project_name:string -> patch_id:Types.Patch_id.t -> (string * string) list
-(** Like {!per_patch_env}, but omits [CODEX_HOME] so Codex sessions use the
-    user's normal Codex home. Codex refresh tokens rotate and are not safe to
-    fan out across independent homes. *)
 
 val merge_env :
   base_env:string array -> overrides:(string * string) list -> string array

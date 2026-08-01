@@ -97,26 +97,25 @@ of these must be installed and configured before onton can run.
 | Tool | Purpose | Install |
 |------|---------|---------|
 | `git` | Worktree CRUD, branch detection, rebase | `brew install git` (or system package manager) |
-| `gh` (GitHub CLI) | Token resolution, PR discovery (`gh pr list`), and the main vehicle agents use to interact with GitHub (`gh pr create`, `gh pr edit`, `gh pr view`, `gh api`, `gh api graphql`) | `brew install gh`, then `gh auth login` |
+| `gh` (GitHub CLI) | Controller token resolution fallback (`gh auth token`) | `brew install gh`, then `gh auth login` |
 | Coding-agent CLI | Drives the actual patches. One of: `claude` ([Claude Code](https://docs.anthropic.com/en/docs/claude-code)), `codex` ([OpenAI Codex CLI](https://github.com/openai/codex)), `opencode` ([OpenCode](https://opencode.ai)), `pi`, `gemini` ([Gemini CLI](https://github.com/google-gemini/gemini-cli)). Selected via `--backend` (default `claude`) and `--model` (see [Backend & model](#backend--model) below). Must be on `PATH` | See each tool's docs |
 
-Onton is built and tested on macOS (ARM64 and x86_64). Linux should work but is
-not part of the release pipeline.
+Worker execution is currently supported only on macOS, where Onton can enforce
+its Seatbelt profile. Other platforms fail closed before launching a worker.
 
 ### GitHub authentication
 
-Onton talks to GitHub two ways and both need credentials:
-
-1. **The OCaml binary** opens its own HTTPS connection to `api.github.com`
+Only the controller talks to GitHub. It opens its own HTTPS connection to `api.github.com`
    (REST + GraphQL) for everything it does itself: polling, PR discovery at
-   startup, merge-state lookups, draft toggles, base updates, etc. It needs a
+   startup, merge-state lookups, PR creation, draft toggles, base updates,
+   review requests, comments, and merges. It needs a
    token in `Authorization: bearer …`. The only `gh` invocation from the
    binary itself is `gh auth token` during startup, used solely as a fallback
    to source that token.
-2. **The agent processes** shell out to `gh` for higher-level operations like
-   creating PRs (`gh pr create`), editing PR bodies (`gh pr edit`), and
-   calling `gh api` / `gh api graphql`. `gh` uses its own credential store
-   seeded by `gh auth login`.
+
+Workers do not receive `GITHUB_TOKEN`, `GH_TOKEN`, the `gh` credential store,
+SSH agent access, or Git metadata write access. They cannot create or mutate
+PRs, commit, rebase, fetch, or push; the controller owns those effects.
 
 #### Token resolution order
 
@@ -213,15 +212,12 @@ token.
 
 ### Coding-agent authentication
 
-Onton spawns each patch in an isolated config dir (`spawn-envs/<patch_id>/{claude,codex,opencode}`)
-so that concurrent agents don't fight over a single auth file during token
-refresh. It then seeds those dirs with symlinks to the user's real auth files.
-This works transparently on Linux (file-based credentials) and on macOS for
-codex / opencode, but not for **Claude Code on macOS**: Claude stores its
-OAuth credential in the macOS Keychain, and a per-patch `CLAUDE_CONFIG_DIR`
-prevents the spawned Claude from finding that Keychain entry. The result is
-`Not logged in · Please run /login` even though `claude` works fine in your
-own shell.
+Onton gives each worker fresh CLI state under
+`spawn-envs/<patch_id>/sandbox/{claude,codex,opencode}`. It never copies or
+symlinks the user's normal CLI credential stores into that directory. Use a
+provider API-key environment variable supported by the selected backend. For
+Claude Code, a long-lived OAuth token is also supported because scoping
+`CLAUDE_CONFIG_DIR` prevents macOS Keychain discovery.
 
 The fix is to give onton a long-lived OAuth token to inject as
 `CLAUDE_CODE_OAUTH_TOKEN` (precedence #5 in [Claude Code's credential
@@ -243,8 +239,46 @@ Paste the token at the `cat` prompt, then press `Ctrl-D`.
 Onton checks `CLAUDE_CODE_OAUTH_TOKEN` in the parent env first (for users who
 prefer to export it from their shell rc), falling back to
 `$XDG_CONFIG_HOME/onton/claude-oauth-token` (or `~/.config/onton/claude-oauth-token`).
-Linux users don't need this — the symlinked `.credentials.json` handles auth —
-but the token file works there too if you'd rather use it.
+The selected provider credential is an unavoidable exception to environment
+scrubbing: a direct provider CLI must authenticate its own API calls. It is
+available to that worker process and its descendants. Controller, GitHub,
+cloud, and unrelated provider credentials remain excluded.
+
+### Worker sandbox boundary
+
+Coding-agent workers are untrusted executors. Every launch goes through one
+capability contract and is refused if the host cannot establish it. On the
+supported macOS path, a deny-by-default Seatbelt profile grants:
+
+- read access to the assigned worktree, the published plan, ancestor handoff
+  notes, current CI diagnostics, the selected CLI runtime, and system runtime
+  files;
+- write access only to the patch's exact declared files, private per-patch CLI
+  state, and operation-specific artifact destinations;
+- child-process creation inside the same inherited profile; and
+- outbound TCP/UDP port 443 when the provider backend needs it, with localhost
+  explicitly denied.
+
+The environment is rebuilt from an allowlist. GitHub tokens, SSH agent sockets,
+cloud credentials, controller state, sibling worktrees, the managed repository,
+and host process signalling are unavailable. After a turn, the controller
+checks committed, staged, unstaged, and untracked paths; runs only the checks
+declared by the patch; stages only declared paths; creates the deterministic
+patch commit; and performs any rebase, push, or GitHub mutation itself.
+
+The limitations matter. `/usr/bin/sandbox-exec` and Apple's bundled
+`system.sb` are deprecated/private macOS facilities, so Onton verifies their
+presence and fails closed elsewhere rather than claiming portable isolation.
+Worker launch also requires Onton's `setsid` shim so the controller can reap
+the complete descendant process group; a missing shim is a hard failure.
+Seatbelt is process sandboxing, not a VM or container. Readable runtime roots
+include system paths and the installed backend's package prefix. HTTPS is
+restricted by port, not destination hostname. Filesystem metadata needed for
+path traversal may reveal that an undeclared path exists even though contents
+remain unreadable. Finally, as noted above, a direct backend necessarily sees
+its selected provider credential; use a narrowly scoped key and do not treat
+this boundary as a defense against provider-key exfiltration by a malicious
+backend binary.
 
 ### Optional: per-repo and project state directories
 
@@ -431,6 +465,9 @@ outcome.
 | `patch_controller` | Pure evergreen controller: poll ingestion, lifecycle reconciliation, GitHub effects, and durable patch-agent message planning |
 | `patch_decision` | Pure decision logic: disposition, CI cap, review comment filtering, merge conflict handling. Extracted from main.ml for testability |
 | `llm_backend` | Backend interface: process spawning, stream event parsing, session management |
+| `worker_sandbox` | Fail-closed worker capability resolution, environment scrubbing, and Seatbelt launch contract |
+| `worker_sandbox_policy` | Pure validation and rendering of sandbox filesystem, process, network, and environment policy |
+| `patch_validator` | Controller-owned scope checks, declared validation commands, staging, rebase continuation, and deterministic commits |
 | `claude_backend` | Claude Code backend implementation |
 | `codex_backend` | OpenAI Codex backend implementation |
 | `opencode_backend` | OpenCode backend implementation |

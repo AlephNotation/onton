@@ -123,6 +123,7 @@ module SD = Session_driver.Make (Fake_worktree) (Fake_sd_env)
    Runtime, clock, fs, project_name, owner, repo, transcripts, user_config,
    and mutexes are gone from the call surface — they live in Fake_sd_env now. *)
 let _check_narrowed_run :
+    sandbox_for_worktree:(worktree:string -> (Worker_sandbox.t, string) result) ->
     kind:Operation_kind.t option ->
     patch_id:Patch_id.t ->
     prompt:string ->
@@ -137,6 +138,7 @@ let _check_narrowed_run :
 (* Compile-time assertion: run_long_lived accepts only per-session inputs. *)
 let _check_narrowed_run_long_lived :
     sw:Eio.Switch.t ->
+    sandbox_for_worktree:(worktree:string -> (Worker_sandbox.t, string) result) ->
     kind:Operation_kind.t option ->
     patch_id:Patch_id.t ->
     prompt:string ->
@@ -215,6 +217,8 @@ let () =
      Runtime, clock, fs, project_name, owner, repo, transcripts, user_config,
      and mutexes are gone from the call surface — they live in SD_Env now. *)
   let check_narrowed_run :
+      sandbox_for_worktree:
+        (worktree:string -> (Worker_sandbox.t, string) result) ->
       kind:Operation_kind.t option ->
       patch_id:Patch_id.t ->
       prompt:string ->
@@ -281,7 +285,8 @@ let () =
       : patch_id:_ -> agent:_ -> ?branch:_ -> ?base_ref:_ -> unit -> _);
   ignore
     (SD3.run
-      : kind:_ ->
+      : sandbox_for_worktree:_ ->
+        kind:_ ->
         patch_id:_ ->
         prompt:_ ->
         agent:_ ->
@@ -292,6 +297,7 @@ let () =
   ignore
     (SD3.run_long_lived
       : sw:_ ->
+        sandbox_for_worktree:_ ->
         kind:_ ->
         patch_id:_ ->
         prompt:_ ->

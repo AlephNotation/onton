@@ -1,0 +1,88 @@
+(* @archlint.module test
+   @archlint.domain worker-sandbox *)
+
+open Base
+open Onton_core
+module Gen = QCheck2.Gen
+module Test = QCheck2.Test
+
+let create_is_total =
+  Test.make ~name:"worker sandbox policy construction is total" ~count:500
+    Gen.(tup4 string_small string_small string_small string_small)
+    (fun (worktree, context, writable, state) ->
+      try
+        ignore
+          (Worker_sandbox_policy.create ~worktree ~read_only_paths:[ context ]
+             ~read_only_dirs:[] ~writable_files:[ writable ] ~writable_dirs:[]
+             ~runtime_roots:[] ~state_dir:state
+             ~network:Worker_sandbox_policy.Denied);
+        true
+      with _ -> false)
+
+let environment_is_total =
+  let entry = Gen.pair Gen.string_small Gen.string_small in
+  Test.make ~name:"worker environment construction is total" ~count:500
+    Gen.(pair (list entry) (list entry))
+    (fun (base, overrides) ->
+      try
+        ignore
+          (Worker_sandbox_policy.environment
+             ~allowed_provider_names:[ "OPENAI_API_KEY" ]
+             ~base:
+               (base
+               |> List.map ~f:(fun (name, value) -> name ^ "=" ^ value)
+               |> Array.of_list)
+             ~overrides);
+        true
+      with _ -> false)
+
+let profile_is_deterministic =
+  Test.make ~name:"worker sandbox profile rendering is deterministic" ~count:300
+    Gen.(list nat_small)
+    (fun suffixes ->
+      let paths =
+        List.map suffixes ~f:(fun suffix -> Printf.sprintf "/context/%d" suffix)
+      in
+      match
+        Worker_sandbox_policy.create ~worktree:"/worktree"
+          ~read_only_paths:paths ~read_only_dirs:[] ~writable_files:[]
+          ~writable_dirs:[] ~runtime_roots:[ "/runtime" ] ~state_dir:"/state"
+          ~network:Worker_sandbox_policy.Https_only
+      with
+      | Error _ -> false
+      | Ok policy ->
+          String.equal
+            (Worker_sandbox_policy.macos_profile policy)
+            (Worker_sandbox_policy.macos_profile policy))
+
+let denied_credentials_never_survive =
+  Test.make ~name:"unselected credentials never survive environment scrubbing"
+    ~count:300 Gen.string_small (fun value ->
+      match
+        Worker_sandbox_policy.environment
+          ~allowed_provider_names:[ "OPENAI_API_KEY" ]
+          ~base:
+            [|
+              "OPENAI_API_KEY=selected";
+              "ANTHROPIC_API_KEY=" ^ value;
+              "GITHUB_TOKEN=" ^ value;
+              "SSH_AUTH_SOCK=" ^ value;
+            |]
+          ~overrides:[]
+      with
+      | Error _ -> false
+      | Ok environment ->
+          Array.for_all environment ~f:(fun entry ->
+              not
+                (String.is_prefix entry ~prefix:"ANTHROPIC_API_KEY="
+                || String.is_prefix entry ~prefix:"GITHUB_TOKEN="
+                || String.is_prefix entry ~prefix:"SSH_AUTH_SOCK=")))
+
+let () =
+  List.iter
+    [
+      create_is_total;
+      environment_is_total;
+      profile_is_deterministic;
+      denied_credentials_never_survive;
+    ] ~f:(fun test -> Test.check_exn test)
