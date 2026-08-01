@@ -164,7 +164,8 @@ let executable_for_backend = function
 let provider_environment_names provider =
   match String.lowercase (String.strip provider) with
   | "anthropic" | "claude" -> [ "ANTHROPIC_API_KEY"; "CLAUDE_CODE_OAUTH_TOKEN" ]
-  | "openai" | "codex" -> [ "OPENAI_API_KEY" ]
+  | "codex" -> [ "CODEX_API_KEY" ]
+  | "openai" -> [ "OPENAI_API_KEY" ]
   | "google" | "gemini" -> [ "GEMINI_API_KEY"; "GOOGLE_API_KEY" ]
   | "openrouter" -> [ "OPENROUTER_API_KEY" ]
   | "xai" -> [ "XAI_API_KEY" ]
@@ -576,6 +577,7 @@ let environment t ~overrides =
           ("TMPDIR", t.temp_dir);
           ("XDG_CONFIG_HOME", t.xdg_config_dir);
           ("OPENSSL_CONF", "/dev/null");
+          ("SSL_CERT_FILE", "/etc/ssl/cert.pem");
         ])
 
 let profile t = Worker_sandbox_policy.macos_profile t.policy

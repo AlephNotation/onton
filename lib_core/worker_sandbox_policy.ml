@@ -223,6 +223,7 @@ let override_environment_names =
       "OPENCODE_CONFIG_DIR";
       "XDG_CONFIG_HOME";
       "OPENSSL_CONF";
+      "SSL_CERT_FILE";
     ]
 
 let allowed_environment_name ~allowed_provider_names name =

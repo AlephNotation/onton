@@ -219,6 +219,9 @@ never copies or symlinks the user's normal CLI credential stores into that
 directory. Use a provider API-key environment variable supported by the
 selected backend. For Claude Code, a long-lived OAuth token is also supported
 because scoping `CLAUDE_CONFIG_DIR` prevents macOS Keychain discovery.
+For noninteractive Codex workers, use `CODEX_API_KEY`; Onton intentionally does
+not pass `OPENAI_API_KEY` to Codex because Codex may include generic environment
+variables in its private shell snapshots.
 
 The fix is to give onton a long-lived OAuth token to inject as
 `CLAUDE_CODE_OAUTH_TOKEN` (precedence #5 in [Claude Code's credential

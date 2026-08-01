@@ -208,7 +208,7 @@ let () =
       in
       assert (
         Result.is_error
-          (Worker_sandbox.create ~backend:"codex" ~provider:"openai"
+          (Worker_sandbox.create ~backend:"codex" ~provider:"codex"
              ~project_name:"sandbox-test" ~worktree ~patch ~gameplan
              ~operation:None));
       Unix.unlink escape;
@@ -254,47 +254,57 @@ esac
         [
           ("PATH", runtime_dir ^ ":/usr/bin:/bin:/usr/sbin:/sbin");
           ("ONTON_DATA_DIR", data_dir);
+          ("CODEX_API_KEY", "selected-codex");
           ("OPENAI_API_KEY", "selected-openai");
           ("ANTHROPIC_API_KEY", "selected-anthropic");
           ("CLAUDE_CONFIG_DIR", "/ambient/claude");
         ]
         (fun () ->
-          let openai_sandbox =
-            Worker_sandbox.create ~backend:"codex" ~provider:"openai"
+          let codex_sandbox =
+            Worker_sandbox.create ~backend:"codex" ~provider:"codex"
               ~project_name:"sandbox-test" ~worktree ~patch:new_patch
               ~gameplan:new_gameplan ~operation:None
             |> Result.ok_or_failwith
           in
           assert (
             Result.is_error
-              (Worker_sandbox.prepare_spawn openai_sandbox ~overrides:[]
+              (Worker_sandbox.prepare_spawn codex_sandbox ~overrides:[]
                  ~setsid_exec:None [ "codex" ]));
           assert (
             Result.is_error
-              (Worker_sandbox.prepare_spawn openai_sandbox ~overrides:[]
+              (Worker_sandbox.prepare_spawn codex_sandbox ~overrides:[]
                  ~setsid_exec:(Some setsid_exec) [ "claude" ]));
-          let openai_spawn =
-            Worker_sandbox.prepare_spawn openai_sandbox ~overrides:[]
+          let codex_spawn =
+            Worker_sandbox.prepare_spawn codex_sandbox ~overrides:[]
               ~setsid_exec:(Some setsid_exec)
               [ "codex"; "write"; runtime_secret ]
             |> Result.ok_or_failwith
           in
           assert (
             Option.equal String.equal
+              (environment_value "CODEX_API_KEY"
+                 codex_spawn.Worker_sandbox.environment)
+              (Some "selected-codex"));
+          assert (
+            Option.is_none
               (environment_value "OPENAI_API_KEY"
-                 openai_spawn.Worker_sandbox.environment)
-              (Some "selected-openai"));
+                 codex_spawn.Worker_sandbox.environment));
           assert (
             Option.is_none
               (environment_value "ANTHROPIC_API_KEY"
-                 openai_spawn.Worker_sandbox.environment));
+                 codex_spawn.Worker_sandbox.environment));
           assert (
             Option.is_none
               (environment_value "CLAUDE_CONFIG_DIR"
-                 openai_spawn.Worker_sandbox.environment));
+                 codex_spawn.Worker_sandbox.environment));
+          assert (
+            Option.equal String.equal
+              (environment_value "SSL_CERT_FILE"
+                 codex_spawn.Worker_sandbox.environment)
+              (Some "/etc/ssl/cert.pem"));
           Eio.Process.run process_mgr ~cwd
-            ~env:openai_spawn.Worker_sandbox.environment
-            openai_spawn.Worker_sandbox.argv;
+            ~env:codex_spawn.Worker_sandbox.environment
+            codex_spawn.Worker_sandbox.argv;
           assert (
             String.equal
               (read_file (Stdlib.Filename.concat worktree "new.txt"))
@@ -306,10 +316,10 @@ esac
               "nested");
           let provider_state_secret =
             Stdlib.Filename.concat
-              (Worker_sandbox.state_dir openai_sandbox)
+              (Worker_sandbox.state_dir codex_sandbox)
               "provider-secret.txt"
           in
-          write provider_state_secret "openai-state-secret";
+          write provider_state_secret "codex-state-secret";
           let anthropic_sandbox =
             Worker_sandbox.create ~backend:"codex" ~provider:"anthropic"
               ~project_name:"sandbox-test" ~worktree ~patch:new_patch
@@ -319,7 +329,7 @@ esac
           assert (
             not
               (String.equal
-                 (Worker_sandbox.state_dir openai_sandbox)
+                 (Worker_sandbox.state_dir codex_sandbox)
                  (Worker_sandbox.state_dir anthropic_sandbox)));
           let anthropic_spawn =
             Worker_sandbox.prepare_spawn anthropic_sandbox ~overrides:[]
@@ -345,7 +355,7 @@ esac
           List.iter
             [
               ("claude", "claude");
-              ("codex", "openai");
+              ("codex", "codex");
               ("gemini", "google");
               ("opencode", "openai");
               ("pi", "anthropic");
