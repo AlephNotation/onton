@@ -48,7 +48,12 @@ val run :
     first failure. *)
 
 val commit_subject : project_name:string -> Patch.t -> string
-(** Deterministic controller-authored subject for one patch turn. *)
+(** Concise controller-owned commit subject retaining the project and patch
+    markers used by stacked-rebase ancestry classification. *)
+
+val pr_title : Patch.t -> string
+(** Concise human-facing pull-request title. The full goal belongs in the body.
+*)
 
 val prepare :
   process_mgr:Eio_unix.Process.mgr_ty Eio.Resource.t ->

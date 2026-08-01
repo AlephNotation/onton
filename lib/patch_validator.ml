@@ -97,14 +97,10 @@ let run ~process_mgr ~clock ~fs ~cwd ~base_branch patch =
       | [] -> run_checks ~process_mgr ~clock ~fs ~cwd patch.Patch.checks)
 
 let commit_subject ~project_name (patch : Patch.t) =
-  let goal =
-    patch.goal |> String.split_lines |> List.hd
-    |> Option.value ~default:"work"
-    |> String.strip
-  in
-  Printf.sprintf "[%s] Patch %s: %s" project_name
-    (Patch_id.to_string patch.id)
-    (if String.is_empty goal then "work" else goal)
+  Printf.sprintf "[%s] Patch %s" project_name (Patch_id.to_string patch.id)
+
+let pr_title (patch : Patch.t) =
+  Printf.sprintf "Patch %s" (Patch_id.to_string patch.id)
 
 let prepare ~process_mgr ~clock ~fs ~cwd ~base_branch ~project_name
     ~rebase_in_progress patch =

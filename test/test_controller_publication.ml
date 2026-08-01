@@ -86,8 +86,7 @@ let () =
       (Printf.sprintf "git -C %s log -1 --format=%%s"
          (Stdlib.Filename.quote repo))
   in
-  assert (
-    String.equal subject "[test-project] Patch 7: record accepted worker output");
+  assert (String.equal subject "[test-project] Patch 7");
   assert (
     String.is_empty
       (read_command
