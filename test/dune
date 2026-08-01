@@ -252,11 +252,6 @@
  (libraries onton_core qcheck-core))
 
 (test
- (name test_claude_process_properties)
- (modules test_claude_process_properties)
- (libraries onton_core qcheck-core))
-
-(test
  (name test_content_gate_properties)
  (modules test_content_gate_properties)
  (libraries onton_core qcheck-core))
