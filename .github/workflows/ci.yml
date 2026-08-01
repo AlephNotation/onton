@@ -14,6 +14,8 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-24.04
+    env:
+      DUNE_CACHE: enabled
     # Pin to bash so `${PIPESTATUS[0]}` (a bash-only array) in the Build and
     # Run tests steps is guaranteed — GitHub Actions defaults to bash on Linux
     # in practice, but making it explicit avoids silent breakage if the
@@ -27,7 +29,17 @@ jobs:
       - uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
         with:
           ocaml-compiler: '5.4.1'
-          dune-cache: true
+
+      # Cache only Dune's relocatable build artifacts: opam switches contain
+      # absolute paths and are unsafe to restore across ephemeral runners.
+      # The run ID makes saves immutable; the prefix restores only a prior run
+      # with the same platform, compiler, dependencies, and job semantics.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/dune
+          key: dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-${{ github.run_id }}
+          restore-keys: |
+            dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-
 
       - name: Use opam.ocaml.org archive cache
         # erratique.ch (upstream for cmdliner, mtime, fpath, logs, uutf, ...)
@@ -84,32 +96,58 @@ jobs:
               print(f'::error file={f},line={line}::Test failed: {name}')
           "
 
+      - name: Bound Dune cache size
+        if: always()
+        run: opam exec -- dune cache trim --size=5GB
+
   format:
     name: Format Check
     runs-on: ubuntu-24.04
+    env:
+      DUNE_CACHE: enabled
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
         with:
           ocaml-compiler: '5.4.1'
-          dune-cache: true
+
+      # Do not cache _opam or ~/.opam: switches embed runner-specific paths.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/dune
+          key: dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-${{ github.run_id }}
+          restore-keys: |
+            dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-
 
       - name: Use opam.ocaml.org archive cache
         run: opam option 'archive-mirrors=["https://opam.ocaml.org/cache"]'
 
       - uses: ocaml/setup-ocaml/lint-fmt@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
 
+      - name: Bound Dune cache size
+        if: always()
+        run: opam exec -- dune cache trim --size=5GB
+
   worker-sandbox:
     name: Worker Sandbox (macOS)
     runs-on: macos-14
+    env:
+      DUNE_CACHE: enabled
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
         with:
           ocaml-compiler: '5.4.1'
-          dune-cache: true
+
+      # Do not cache _opam or ~/.opam: switches embed runner-specific paths.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/dune
+          key: dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-${{ github.run_id }}
+          restore-keys: |
+            dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-
 
       - name: Use opam.ocaml.org archive cache
         run: opam option 'archive-mirrors=["https://opam.ocaml.org/cache"]'
@@ -145,6 +183,10 @@ jobs:
           tar czf /tmp/onton-package-test.tar.gz -C _dist/bin onton onton-setsid-exec
           test "$(tar tzf /tmp/onton-package-test.tar.gz | sort | tr '\n' ' ')" = "onton onton-setsid-exec "
           _dist/bin/onton --version
+
+      - name: Bound Dune cache size
+        if: always()
+        run: opam exec -- dune cache trim --size=5GB
 
   shell-lint:
     name: Shell Lint & Format
