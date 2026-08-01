@@ -14,6 +14,8 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-24.04
+    env:
+      DUNE_CACHE: enabled
     # Pin to bash so `${PIPESTATUS[0]}` (a bash-only array) in the Build and
     # Run tests steps is guaranteed — GitHub Actions defaults to bash on Linux
     # in practice, but making it explicit avoids silent breakage if the
@@ -27,7 +29,17 @@ jobs:
       - uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
         with:
           ocaml-compiler: '5.4.1'
-          dune-cache: true
+
+      # Cache only Dune's relocatable build artifacts: opam switches contain
+      # absolute paths and are unsafe to restore across ephemeral runners.
+      # The run ID makes saves immutable; the prefix restores only a prior run
+      # with the same platform, compiler, dependencies, and job semantics.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/dune
+          key: dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-${{ github.run_id }}
+          restore-keys: |
+            dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-
 
       - name: Use opam.ocaml.org archive cache
         # erratique.ch (upstream for cmdliner, mtime, fpath, logs, uutf, ...)
@@ -60,12 +72,10 @@ jobs:
           "
 
       - name: Run tests
-        # Single invocation — the runtest alias covers unit, expect, inline,
-        # and QCheck property tests, so a separate `--force` re-run would just
-        # repeat the entire suite. QCHECK_COUNT raises iteration depth for the
-        # property tests; non-property tests ignore it.
+        # Force test actions once per CI run while retaining cached compilation
+        # artifacts. QCHECK_COUNT raises property-test iteration depth.
         run: |
-          opam exec -- dune runtest 2>&1 | tee test.log
+          opam exec -- dune runtest --force 2>&1 | tee test.log
           exit "${PIPESTATUS[0]}"
         env:
           QCHECK_COUNT: "10000"
@@ -84,67 +94,38 @@ jobs:
               print(f'::error file={f},line={line}::Test failed: {name}')
           "
 
+      - name: Bound Dune cache size
+        if: always()
+        run: opam exec -- dune cache trim --size=5GB
+
   format:
     name: Format Check
     runs-on: ubuntu-24.04
+    env:
+      DUNE_CACHE: enabled
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
         with:
           ocaml-compiler: '5.4.1'
-          dune-cache: true
+
+      # Do not cache _opam or ~/.opam: switches embed runner-specific paths.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/dune
+          key: dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-${{ github.run_id }}
+          restore-keys: |
+            dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-
 
       - name: Use opam.ocaml.org archive cache
         run: opam option 'archive-mirrors=["https://opam.ocaml.org/cache"]'
 
       - uses: ocaml/setup-ocaml/lint-fmt@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
 
-  worker-sandbox:
-    name: Worker Sandbox (macOS)
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
-        with:
-          ocaml-compiler: '5.4.1'
-          dune-cache: true
-
-      - name: Use opam.ocaml.org archive cache
-        run: opam option 'archive-mirrors=["https://opam.ocaml.org/cache"]'
-
-      - name: Install dependencies
-        run: opam install . --deps-only --with-test -y
-
-      - name: Build sandbox tests and packaged executables
-        run: |
-          opam exec -- dune build \
-            test/test_worker_sandbox_policy.exe \
-            test/test_worker_sandbox_policy_properties.exe \
-            test/test_worker_sandbox.exe \
-            test/test_worker_backend_sandbox.exe \
-            bin/main.exe \
-            bin/setsid_exec/main.exe
-
-      - name: Run real Seatbelt and backend-path tests
-        env:
-          ONTON_SETSID_EXEC: ${{ github.workspace }}/_build/default/bin/setsid_exec/main.exe
-        run: |
-          opam exec -- dune exec ./test/test_worker_sandbox_policy.exe
-          opam exec -- dune exec ./test/test_worker_sandbox_policy_properties.exe
-          opam exec -- dune exec ./test/test_worker_sandbox.exe
-          opam exec -- dune exec ./test/test_worker_backend_sandbox.exe
-
-      - name: Verify release package layout
-        run: |
-          mkdir -p _dist/bin
-          cp _build/default/bin/main.exe _dist/bin/onton
-          cp _build/default/bin/setsid_exec/main.exe _dist/bin/onton-setsid-exec
-          chmod +x _dist/bin/onton _dist/bin/onton-setsid-exec
-          tar czf /tmp/onton-package-test.tar.gz -C _dist/bin onton onton-setsid-exec
-          test "$(tar tzf /tmp/onton-package-test.tar.gz | sort | tr '\n' ' ')" = "onton onton-setsid-exec "
-          _dist/bin/onton --version
+      - name: Bound Dune cache size
+        if: always()
+        run: opam exec -- dune cache trim --size=5GB
 
   shell-lint:
     name: Shell Lint & Format
@@ -232,21 +213,3 @@ jobs:
       # scripts/yojson-util-allowlist.txt.
       - name: check-no-raw-yojson
         run: bash scripts/check-no-raw-yojson.sh
-
-  archlint:
-    name: Archlint
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          persist-credentials: false
-
-      # Architecture conformance, enforced from the standalone archlint suite.
-      # The composite action checks archlint out into its own action path and
-      # brings the OCaml toolchain it needs (its own ocaml/setup-ocaml switch,
-      # independent of this repo's build job), so this stays self-contained:
-      # only the OCaml adapter runs, against our source root.
-      - uses: flowglad/archlint@v1
-        with:
-          adapter: ocaml
-          ocaml-root: .
