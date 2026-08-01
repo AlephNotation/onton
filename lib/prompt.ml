@@ -345,7 +345,7 @@ let render_patch_prompt ~(project_name : string) ?agents_md ?pr_number
   ^ render_turn_layer_start ~project_name
 
 let render_check_suffix (patch : Patch.t) : string =
-  "\n## Required Checks\n\n" ^ format_checks patch.checks ^ "\n"
+  "\n\n## Required Checks\n\n" ^ format_checks patch.checks ^ "\n"
 
 let render_pr_description ~(project_name : string) (patch : Patch.t) =
   let patch_id = Patch_id.to_string patch.Patch.id in

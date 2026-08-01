@@ -55,8 +55,10 @@ let () =
   git repo [ "config"; "user.name"; "Onton Test" ];
   git repo [ "config"; "user.email"; "onton@example.invalid" ];
   let owned = Stdlib.Filename.concat repo "owned.txt" in
+  let removed = Stdlib.Filename.concat repo "removed.txt" in
   write owned "base\n";
-  git repo [ "add"; "owned.txt" ];
+  write removed "delete me\n";
+  git repo [ "add"; "owned.txt"; "removed.txt" ];
   git repo [ "commit"; "-m"; "base" ];
   git repo [ "checkout"; "-b"; "patch/test" ];
   let patch : Patch.t =
@@ -65,11 +67,12 @@ let () =
       goal = "record accepted worker output";
       branch = Branch.of_string "patch/test";
       dependencies = [];
-      files = [ "owned.txt" ];
+      files = [ "owned.txt"; "removed.txt" ];
       checks = [ { Check.run = "test -s owned.txt"; proves = "file exists" } ];
     }
   in
   write owned "worker change\n";
+  Unix.unlink removed;
   let prepared =
     Patch_validator.prepare ~process_mgr ~clock ~fs ~cwd:repo
       ~base_branch:(Branch.of_string "main") ~project_name:"test-project"
@@ -87,6 +90,16 @@ let () =
          (Stdlib.Filename.quote repo))
   in
   assert (String.equal subject "[test-project] Patch 7");
+  (match
+     Patch_validator.prepare ~process_mgr ~clock ~fs ~cwd:repo
+       ~base_branch:(Branch.of_string "main") ~project_name:"test-project"
+       ~rebase_in_progress:false patch
+   with
+  | Ok Patch_validator.No_changes -> ()
+  | Ok (Patch_validator.Committed | Patch_validator.Rebase_continued)
+  | Error (Patch_validator.Validation_failed _ | Patch_validator.Git_failed _)
+    ->
+      assert false);
   assert (
     String.is_empty
       (read_command
