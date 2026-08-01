@@ -127,9 +127,11 @@ let system_read_files =
     "/private/etc/hosts";
     "/private/etc/resolv.conf";
     "/private/etc/ssl/cert.pem";
+    "/private/etc/ssl/openssl.cnf";
     "/etc/hosts";
     "/etc/resolv.conf";
     "/etc/ssl/cert.pem";
+    "/etc/ssl/openssl.cnf";
   ]
 
 let macos_profile t =
@@ -151,7 +153,8 @@ let macos_profile t =
         {|
   (allow network-outbound
     (remote tcp "*:443")
-    (remote udp "*:443"))
+    (remote udp "*:443")
+    (literal "/private/var/run/mDNSResponder"))
   (deny network-outbound
     (remote ip "localhost:*"))|}
   in
