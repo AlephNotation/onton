@@ -72,12 +72,10 @@ jobs:
           "
 
       - name: Run tests
-        # Single invocation — the runtest alias covers unit, expect, inline,
-        # and QCheck property tests, so a separate `--force` re-run would just
-        # repeat the entire suite. QCHECK_COUNT raises iteration depth for the
-        # property tests; non-property tests ignore it.
+        # Force test actions once per CI run while retaining cached compilation
+        # artifacts. QCHECK_COUNT raises property-test iteration depth.
         run: |
-          opam exec -- dune runtest 2>&1 | tee test.log
+          opam exec -- dune runtest --force 2>&1 | tee test.log
           exit "${PIPESTATUS[0]}"
         env:
           QCHECK_COUNT: "10000"
@@ -278,10 +276,23 @@ jobs:
   archlint:
     name: Archlint
     runs-on: ubuntu-24.04
+    env:
+      DUNE_CACHE: enabled
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+
+      # Cache only relocatable Dune artifacts, never _opam or ~/.opam. The
+      # broader second prefix lets this Linux consumer reuse a compatible
+      # prior-run cache produced by another job before saving its own key.
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cache/dune
+          key: dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-${{ github.run_id }}
+          restore-keys: |
+            dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-${{ github.job }}-
+            dune-${{ runner.os }}-${{ runner.arch }}-ocaml-5.4.1-${{ hashFiles('onton.opam') }}-
 
       # Architecture conformance, enforced from the standalone archlint suite.
       # The composite action checks archlint out into its own action path and
@@ -292,3 +303,7 @@ jobs:
         with:
           adapter: ocaml
           ocaml-root: .
+
+      - name: Bound Dune cache size
+        if: always()
+        run: opam exec -- dune cache trim --size=5GB
