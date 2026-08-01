@@ -907,12 +907,7 @@ struct
                                         ~has_merged ~branch_of
                                         ~main:(Orchestrator.main_branch orch))
                                 in
-                                let pr_title =
-                                  Printf.sprintf "[%s] Patch %s: %s"
-                                    project_name
-                                    (Patch_id.to_string patch.Patch.id)
-                                    patch.Patch.goal
-                                in
+                                let pr_title = Patch_validator.pr_title patch in
                                 let pr_body =
                                   Prompt.render_pr_description ~project_name
                                     patch

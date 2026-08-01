@@ -7,7 +7,25 @@ open Onton_core.Types
 
 let check run proves = Check.{ run; proves }
 
+let patch : Patch.t =
+  Patch.
+    {
+      id = Patch_id.of_string "remove-claude-process";
+      goal =
+        "A deliberately long goal that belongs in body content, not titles.";
+      branch = Branch.of_string "patch/remove-claude-process";
+      dependencies = [];
+      files = [];
+      checks = [];
+    }
+
 let () =
+  assert (
+    String.equal
+      (Patch_validator.commit_subject ~project_name:"project" patch)
+      "[project] Patch remove-claude-process");
+  assert (
+    String.equal (Patch_validator.pr_title patch) "Patch remove-claude-process");
   QCheck2.Test.check_exn
     (QCheck2.Test.make ~name:"scope reports exactly undeclared paths" ~count:300
        QCheck2.Gen.(pair (list string_small) (list string_small))

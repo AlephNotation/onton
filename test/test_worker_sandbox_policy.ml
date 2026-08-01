@@ -61,6 +61,7 @@ let () =
           ("PATH", "/usr/bin:/bin");
           ("HOME", "/state/home");
           ("TMPDIR", "/state/tmp");
+          ("SSL_CERT_FILE", "/etc/ssl/cert.pem");
         ]
     |> require_ok
   in
@@ -72,6 +73,10 @@ let () =
     Option.equal String.equal
       (env_value "OPENAI_API_KEY" environment)
       (Some "provider-secret"));
+  assert (
+    Option.equal String.equal
+      (env_value "SSL_CERT_FILE" environment)
+      (Some "/etc/ssl/cert.pem"));
   List.iter
     [
       "GITHUB_TOKEN";

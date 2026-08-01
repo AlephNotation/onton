@@ -345,7 +345,7 @@ let render_patch_prompt ~(project_name : string) ?agents_md ?pr_number
   ^ render_turn_layer_start ~project_name
 
 let render_check_suffix (patch : Patch.t) : string =
-  "\n## Required Checks\n\n" ^ format_checks patch.checks ^ "\n"
+  "\n\n## Required Checks\n\n" ^ format_checks patch.checks ^ "\n"
 
 let render_pr_description ~(project_name : string) (patch : Patch.t) =
   let patch_id = Patch_id.to_string patch.Patch.id in
@@ -364,7 +364,6 @@ let render_pr_description ~(project_name : string) (patch : Patch.t) =
       ("goal", patch.Patch.goal);
       ("dependencies", deps);
       ("files", format_list patch.files);
-      ("checks", format_checks patch.checks);
     ]
   in
   render_with_override ~project_name ~name:"pr_description" ~vars
@@ -379,11 +378,30 @@ let render_pr_description ~(project_name : string) (patch : Patch.t) =
 {{dependencies}}
 
 ## Write Scope
-{{files}}
-
-## Required Checks
-{{checks}}|}
+{{files}}|}
         vars)
+
+let%test "plan-derived PR body contains required checks exactly once" =
+  let patch : Patch.t =
+    Patch.
+      {
+        id = Patch_id.of_string "small-cut";
+        goal = "Delete one unused module.";
+        branch = Branch.of_string "patch/small-cut";
+        dependencies = [];
+        files = [ "lib/unused.ml" ];
+        checks =
+          [ { Check.run = "dune build"; proves = "the retained code builds" } ];
+      }
+  in
+  let body =
+    render_pr_description ~project_name:"project" patch
+    ^ render_check_suffix patch
+  in
+  List.length
+    (String.substr_index_all body ~pattern:"## Required Checks"
+       ~may_overlap:false)
+  = 1
 
 let render_pr_body_prompt ~(project_name : string) ~(pr_number : Pr_number.t)
     ~(pr_body : string) ~(check_suffix : string) ~(artifact_path : string) =

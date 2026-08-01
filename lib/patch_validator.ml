@@ -59,25 +59,35 @@ let run_command ~process_mgr ~clock ~fs ~cwd args =
   | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
   | exception exn -> failure None (Exn.to_string exn)
 
-let changed_files ~process_mgr ~clock ~fs ~cwd ~base_branch =
-  let range = Branch.to_string base_branch ^ "...HEAD" in
-  let commands =
-    [
-      [ "git"; "diff"; "--name-only"; "--no-renames"; range ];
-      [ "git"; "diff"; "--name-only"; "--no-renames" ];
-      [ "git"; "diff"; "--cached"; "--name-only"; "--no-renames" ];
-      [ "git"; "ls-files"; "--others"; "--exclude-standard" ];
-    ]
-  in
+let read_changed_files ~process_mgr ~clock ~fs ~cwd commands =
   List.fold_result commands ~init:[] ~f:(fun changed command ->
       match run_command ~process_mgr ~clock ~fs ~cwd command with
-      | Error failure -> Error (Scope_read_failed failure)
+      | Error failure -> Error failure
       | Ok output ->
           Ok
             (String.split_lines output
             |> List.filter ~f:(fun path -> not (String.is_empty path))
             |> List.append changed))
   |> Result.map ~f:(List.dedup_and_sort ~compare:String.compare)
+
+let pending_files ~process_mgr ~clock ~fs ~cwd =
+  read_changed_files ~process_mgr ~clock ~fs ~cwd
+    [
+      [ "git"; "diff"; "--name-only"; "--no-renames" ];
+      [ "git"; "diff"; "--cached"; "--name-only"; "--no-renames" ];
+      [ "git"; "ls-files"; "--others"; "--exclude-standard" ];
+    ]
+
+let changed_files ~process_mgr ~clock ~fs ~cwd ~base_branch =
+  let range = Branch.to_string base_branch ^ "...HEAD" in
+  read_changed_files ~process_mgr ~clock ~fs ~cwd
+    [
+      [ "git"; "diff"; "--name-only"; "--no-renames"; range ];
+      [ "git"; "diff"; "--name-only"; "--no-renames" ];
+      [ "git"; "diff"; "--cached"; "--name-only"; "--no-renames" ];
+      [ "git"; "ls-files"; "--others"; "--exclude-standard" ];
+    ]
+  |> Result.map_error ~f:(fun failure -> Scope_read_failed failure)
 
 let run_checks ~process_mgr ~clock ~fs ~cwd checks =
   List.fold_result checks ~init:() ~f:(fun () check ->
@@ -97,14 +107,10 @@ let run ~process_mgr ~clock ~fs ~cwd ~base_branch patch =
       | [] -> run_checks ~process_mgr ~clock ~fs ~cwd patch.Patch.checks)
 
 let commit_subject ~project_name (patch : Patch.t) =
-  let goal =
-    patch.goal |> String.split_lines |> List.hd
-    |> Option.value ~default:"work"
-    |> String.strip
-  in
-  Printf.sprintf "[%s] Patch %s: %s" project_name
-    (Patch_id.to_string patch.id)
-    (if String.is_empty goal then "work" else goal)
+  Printf.sprintf "[%s] Patch %s" project_name (Patch_id.to_string patch.id)
+
+let pr_title (patch : Patch.t) =
+  Printf.sprintf "Patch %s" (Patch_id.to_string patch.id)
 
 let prepare ~process_mgr ~clock ~fs ~cwd ~base_branch ~project_name
     ~rebase_in_progress patch =
@@ -118,29 +124,40 @@ let prepare ~process_mgr ~clock ~fs ~cwd ~base_branch ~project_name
   in
   Result.bind (validate ()) ~f:(fun () ->
       Result.bind
-        (match patch.Patch.files with
-        | [] -> Ok ""
-        | files -> git ([ "git"; "add"; "--" ] @ files))
-        ~f:(fun _ ->
-          Result.bind (validate ()) ~f:(fun () ->
-              if rebase_in_progress then
-                Result.map
-                  (git
-                     [ "git"; "-c"; "core.editor=true"; "rebase"; "--continue" ])
-                  ~f:(fun _ -> Rebase_continued)
-              else
-                Result.bind
-                  (git [ "git"; "diff"; "--cached"; "--name-only" ])
-                  ~f:(fun staged ->
-                    if String.is_empty (String.strip staged) then Ok No_changes
-                    else
-                      Result.map
-                        (git
-                           [
-                             "git";
-                             "commit";
-                             "--no-verify";
-                             "-m";
-                             commit_subject ~project_name patch;
-                           ])
-                        ~f:(fun _ -> Committed)))))
+        (pending_files ~process_mgr ~clock ~fs ~cwd
+        |> Result.map_error ~f:(fun failure -> Git_failed failure))
+        ~f:(fun pending ->
+          Result.bind
+            (match pending with
+            | [] -> Ok ""
+            | files -> git ([ "git"; "add"; "-A"; "--" ] @ files))
+            ~f:(fun _ ->
+              Result.bind (validate ()) ~f:(fun () ->
+                  if rebase_in_progress then
+                    Result.map
+                      (git
+                         [
+                           "git";
+                           "-c";
+                           "core.editor=true";
+                           "rebase";
+                           "--continue";
+                         ])
+                      ~f:(fun _ -> Rebase_continued)
+                  else
+                    Result.bind
+                      (git [ "git"; "diff"; "--cached"; "--name-only" ])
+                      ~f:(fun staged ->
+                        if String.is_empty (String.strip staged) then
+                          Ok No_changes
+                        else
+                          Result.map
+                            (git
+                               [
+                                 "git";
+                                 "commit";
+                                 "--no-verify";
+                                 "-m";
+                                 commit_subject ~project_name patch;
+                               ])
+                            ~f:(fun _ -> Committed))))))
