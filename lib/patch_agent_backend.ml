@@ -151,14 +151,13 @@ let start ~(process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t) ~binary_path
     ~setsid_exec ~sw
     ({
        sandbox;
-       project_name;
        worktree;
-       patch_id;
        provider;
        model;
        effort;
        gameplan_prompt;
        patch_prompt;
+       _;
      } :
       Long_lived.start_config) =
   let worktree_path = native_absolute_exn worktree ~what:"worktree" in
@@ -170,7 +169,8 @@ let start ~(process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t) ~binary_path
       ~model ~effort
   in
   let overrides =
-    Spawn_env.per_patch_env ~backend:provider ~project_name ~patch_id
+    Spawn_env.per_patch_env ~backend:provider
+      ~state_dir:(Worker_sandbox.state_dir sandbox)
   in
   let { Worker_sandbox.argv = args; environment = env; process_group } =
     match Worker_sandbox.prepare_spawn sandbox ~overrides ~setsid_exec args with

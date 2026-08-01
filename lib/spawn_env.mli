@@ -1,15 +1,11 @@
 (* @archlint.module interface
    @archlint.domain spawn-env *)
 
-val per_patch_env :
-  backend:string ->
-  project_name:string ->
-  patch_id:Types.Patch_id.t ->
-  (string * string) list
-(** Per-patch config-dir overrides for headless agent CLIs. Creates the backing
-    directories under the project store before returning:
-    [spawn-envs/<patch_id>/sandbox/{claude,codex,opencode}]. It never copies or
-    links ambient CLI credential stores into the worker boundary.
+val per_patch_env : backend:string -> state_dir:string -> (string * string) list
+(** Backend config-dir overrides for a resolved worker sandbox. The backing
+    directory is [<state_dir>/config], inside the selected
+    patch/backend/provider capability root. This function never copies or links
+    ambient CLI credential stores into the worker boundary.
 
     On macOS, scoping [CLAUDE_CONFIG_DIR] makes Claude unable to find the
     Keychain-stored OAuth credential, so [per_patch_env] also injects

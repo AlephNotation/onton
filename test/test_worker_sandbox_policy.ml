@@ -12,7 +12,9 @@ let make_policy () =
   Worker_sandbox_policy.create ~worktree:"/worktree"
     ~read_only_paths:[ "/context/plan.md" ] ~read_only_dirs:[ "/context/ci" ]
     ~writable_files:[ "/worktree/lib/owned.ml" ]
-    ~writable_dirs:[ "/outputs/comments" ] ~runtime_roots:[ "/runtime" ]
+    ~writable_dirs:[ "/outputs/comments" ]
+    ~creatable_dirs:[ "/worktree/lib/new" ]
+    ~runtime_files:[ "/runtime/backend" ] ~runtime_roots:[ "/runtime/package" ]
     ~state_dir:"/state" ~network:Worker_sandbox_policy.Https_only
   |> require_ok
 
@@ -30,6 +32,8 @@ let () =
     String.is_substring profile ~substring:"(allow process-exec process-fork)");
   assert (not (String.is_substring profile ~substring:"process-signal"));
   assert (String.is_substring profile ~substring:"/worktree/lib/owned.ml");
+  assert (String.is_substring profile ~substring:"/worktree/lib/new");
+  assert (String.is_substring profile ~substring:"/runtime/backend");
   assert (String.is_substring profile ~substring:"/context/plan.md");
   assert (not (String.is_substring profile ~substring:"GITHUB_TOKEN"));
   let environment =
@@ -45,8 +49,14 @@ let () =
           "SSH_AUTH_SOCK=/private/tmp/agent.sock";
           "AWS_SECRET_ACCESS_KEY=cloud-secret";
           "ONTON_CONTROLLER_STATE=/controller";
+          "CLAUDE_CONFIG_DIR=/ambient/claude";
         |]
-      ~overrides:[ ("HOME", "/state/home"); ("TMPDIR", "/state/tmp") ]
+      ~overrides:
+        [
+          ("PATH", "/usr/bin:/bin");
+          ("HOME", "/state/home");
+          ("TMPDIR", "/state/tmp");
+        ]
     |> require_ok
   in
   assert (
@@ -64,6 +74,7 @@ let () =
       "SSH_AUTH_SOCK";
       "AWS_SECRET_ACCESS_KEY";
       "ONTON_CONTROLLER_STATE";
+      "CLAUDE_CONFIG_DIR";
     ] ~f:(fun name -> assert (Option.is_none (env_value name environment)));
   assert (Option.is_none (env_value "ANTHROPIC_API_KEY" environment));
   assert (
@@ -74,5 +85,6 @@ let () =
     Result.is_error
       (Worker_sandbox_policy.create ~worktree:"/safe/../escape"
          ~read_only_paths:[] ~read_only_dirs:[] ~writable_files:[]
-         ~writable_dirs:[] ~runtime_roots:[] ~state_dir:"/state"
+         ~writable_dirs:[] ~creatable_dirs:[] ~runtime_files:[]
+         ~runtime_roots:[] ~state_dir:"/state"
          ~network:Worker_sandbox_policy.Denied))

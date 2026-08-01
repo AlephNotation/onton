@@ -42,8 +42,8 @@ let prepare_minted_session_id =
   prepare_minted_session_id_with_env ~getenv_opt:Stdlib.Sys.getenv_opt
 
 let run_streaming ~model ~process_mgr ~clock ~timeout ~setsid_exec ~sandbox
-    ~project_name ~cwd ~patch_id ~prompt ~resume_session ~session_uuid ~on_event
-    =
+    ~project_name:_ ~cwd ~patch_id ~prompt ~resume_session ~session_uuid
+    ~on_event =
   match prepare_minted_session_id ~patch_id ~resume_session with
   | Error msg ->
       {
@@ -64,7 +64,8 @@ let run_streaming ~model ~process_mgr ~clock ~timeout ~setsid_exec ~sandbox
         if String.is_empty trimmed then [] else parse_stream_events trimmed
       in
       let overrides =
-        Spawn_env.per_patch_env ~backend:"claude" ~project_name ~patch_id
+        Spawn_env.per_patch_env ~backend:"claude"
+          ~state_dir:(Worker_sandbox.state_dir sandbox)
       in
       match
         Worker_sandbox.prepare_spawn sandbox ~overrides ~setsid_exec args

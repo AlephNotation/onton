@@ -10,11 +10,12 @@ let build_args = Gemini_event_parser.build_args
 let parse_event = Gemini_event_parser.parse_event
 
 let run_streaming ~model ~process_mgr ~clock ~timeout ~setsid_exec ~sandbox
-    ~project_name ~cwd ~patch_id ~prompt ~resume_session ~session_uuid ~on_event
-    =
+    ~project_name:_ ~cwd ~patch_id ~prompt ~resume_session ~session_uuid
+    ~on_event =
   let args = build_args ~model ~prompt ~resume_session in
   let overrides =
-    Spawn_env.per_patch_env ~backend:"gemini" ~project_name ~patch_id
+    Spawn_env.per_patch_env ~backend:"gemini"
+      ~state_dir:(Worker_sandbox.state_dir sandbox)
   in
   let process_line line =
     let trimmed = String.strip line in

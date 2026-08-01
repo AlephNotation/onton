@@ -23,7 +23,22 @@
 (test
  (name test_worker_sandbox)
  (modules test_worker_sandbox)
- (libraries onton onton_core base eio eio_main eio.unix unix))
+ (libraries onton onton_core base eio eio_main eio.unix unix)
+ (deps (package onton))
+ (action
+  (setenv ONTON_SETSID_EXEC
+   %{bin:onton-setsid-exec}
+   (run %{test}))))
+
+(test
+ (name test_worker_backend_sandbox)
+ (modules test_worker_backend_sandbox)
+ (libraries onton onton_core base eio eio_main eio.unix unix)
+ (deps (package onton))
+ (action
+  (setenv ONTON_SETSID_EXEC
+   %{bin:onton-setsid-exec}
+   (run %{test}))))
 
 (test
  (name test_controller_publication)

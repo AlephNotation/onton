@@ -174,6 +174,52 @@ jobs:
 
       - uses: ocaml/setup-ocaml/lint-fmt@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
 
+  worker-sandbox:
+    name: Worker Sandbox (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: ocaml/setup-ocaml@e32b06a3e831ff2fbc6f08cf35be2085e3918014 # v3.6.1
+        with:
+          ocaml-compiler: '5.4.1'
+          dune-cache: true
+
+      - name: Use opam.ocaml.org archive cache
+        run: opam option 'archive-mirrors=["https://opam.ocaml.org/cache"]'
+
+      - name: Install dependencies
+        run: opam install . --deps-only --with-test -y
+
+      - name: Build sandbox tests and packaged executables
+        run: |
+          opam exec -- dune build \
+            test/test_worker_sandbox_policy.exe \
+            test/test_worker_sandbox_policy_properties.exe \
+            test/test_worker_sandbox.exe \
+            test/test_worker_backend_sandbox.exe \
+            bin/main.exe \
+            bin/setsid_exec/main.exe
+
+      - name: Run real Seatbelt and backend-path tests
+        env:
+          ONTON_SETSID_EXEC: ${{ github.workspace }}/_build/default/bin/setsid_exec/main.exe
+        run: |
+          opam exec -- dune exec ./test/test_worker_sandbox_policy.exe
+          opam exec -- dune exec ./test/test_worker_sandbox_policy_properties.exe
+          opam exec -- dune exec ./test/test_worker_sandbox.exe
+          opam exec -- dune exec ./test/test_worker_backend_sandbox.exe
+
+      - name: Verify release package layout
+        run: |
+          mkdir -p _dist/bin
+          cp _build/default/bin/main.exe _dist/bin/onton
+          cp _build/default/bin/setsid_exec/main.exe _dist/bin/onton-setsid-exec
+          chmod +x _dist/bin/onton _dist/bin/onton-setsid-exec
+          tar czf /tmp/onton-package-test.tar.gz -C _dist/bin onton onton-setsid-exec
+          test "$(tar tzf /tmp/onton-package-test.tar.gz | sort | tr '\n' ' ')" = "onton onton-setsid-exec "
+          _dist/bin/onton --version
+
   shell-lint:
     name: Shell Lint & Format
     runs-on: blacksmith-4vcpu-ubuntu-2404

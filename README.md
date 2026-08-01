@@ -213,11 +213,12 @@ token.
 ### Coding-agent authentication
 
 Onton gives each worker fresh CLI state under
-`spawn-envs/<patch_id>/sandbox/{claude,codex,opencode}`. It never copies or
-symlinks the user's normal CLI credential stores into that directory. Use a
-provider API-key environment variable supported by the selected backend. For
-Claude Code, a long-lived OAuth token is also supported because scoping
-`CLAUDE_CONFIG_DIR` prevents macOS Keychain discovery.
+`spawn-envs/<patch_id>/sandbox/<backend>/<provider>/`. Backend and provider
+changes therefore cannot expose a previous provider's cached state. Onton
+never copies or symlinks the user's normal CLI credential stores into that
+directory. Use a provider API-key environment variable supported by the
+selected backend. For Claude Code, a long-lived OAuth token is also supported
+because scoping `CLAUDE_CONFIG_DIR` prevents macOS Keychain discovery.
 
 The fix is to give onton a long-lived OAuth token to inject as
 `CLAUDE_CODE_OAUTH_TOKEN` (precedence #5 in [Claude Code's credential
@@ -251,10 +252,11 @@ capability contract and is refused if the host cannot establish it. On the
 supported macOS path, a deny-by-default Seatbelt profile grants:
 
 - read access to the assigned worktree, the published plan, ancestor handoff
-  notes, current CI diagnostics, the selected CLI runtime, and system runtime
-  files;
-- write access only to the patch's exact declared files, private per-patch CLI
-  state, and operation-specific artifact destinations;
+  notes, current CI diagnostics, the selected CLI executable and package,
+  its exact non-system dynamic libraries, and standard system runtime files;
+- write access only to the patch's exact declared files, exact missing parent
+  directories needed to create those files, private per-patch/backend/provider
+  CLI state, and operation-specific artifact destinations;
 - child-process creation inside the same inherited profile; and
 - outbound TCP/UDP port 443 when the provider backend needs it, with localhost
   explicitly denied.
@@ -271,14 +273,15 @@ The limitations matter. `/usr/bin/sandbox-exec` and Apple's bundled
 presence and fails closed elsewhere rather than claiming portable isolation.
 Worker launch also requires Onton's `setsid` shim so the controller can reap
 the complete descendant process group; a missing shim is a hard failure.
-Seatbelt is process sandboxing, not a VM or container. Readable runtime roots
-include system paths and the installed backend's package prefix. HTTPS is
-restricted by port, not destination hostname. Filesystem metadata needed for
-path traversal may reveal that an undeclared path exists even though contents
-remain unreadable. Finally, as noted above, a direct backend necessarily sees
-its selected provider credential; use a narrowly scoped key and do not treat
-this boundary as a defense against provider-key exfiltration by a malicious
-backend binary.
+Seatbelt is process sandboxing, not a VM or container. It does not impose CPU,
+memory, process-count, or output-size quotas. HTTPS is restricted by port, not
+destination hostname. Filesystem metadata needed for path traversal may reveal
+that an undeclared path exists even though contents remain unreadable. The plan
+and per-repository hooks are trusted controller inputs: declared validation
+commands and configured hooks execute outside the worker sandbox. Finally, as
+noted above, a direct backend necessarily sees its selected provider credential;
+use a narrowly scoped key and do not treat this boundary as a defense against
+provider-key exfiltration by a malicious backend binary.
 
 ### Optional: per-repo and project state directories
 
@@ -524,6 +527,8 @@ GitHub Actions runs on every push and PR:
 - **Build & Test** — `dune build` + `dune runtest` with compiler error annotations on PR diffs
 - **Property tests** — QCheck2 with 10,000 iterations
 - **Format check** — `ocamlformat` via `ocaml/setup-ocaml/lint-fmt`
+- **Worker sandbox** — real Seatbelt escape and backend-launch tests on macOS,
+  plus release-package layout verification
 
 ## Backend & model
 

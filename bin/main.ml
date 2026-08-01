@@ -764,27 +764,13 @@ let construct_capabilities ~net (setup : runtime_setup) =
   let branch_of = build_branch_map setup.gameplan ~default:main_branch in
   let session_timeout = 1800.0 in
   let setsid_exec =
-    let candidate =
-      match Sys.getenv_opt "ONTON_SETSID_EXEC" with
-      | Some "" -> None
-      | Some p -> Some p
-      | None ->
-          let executable_dir = Filename.dirname Sys.executable_name in
-          let installed = Filename.concat executable_dir "onton-setsid-exec" in
-          if Sys.file_exists installed then Some installed
-          else Some (Filename.concat executable_dir "setsid_exec/main.exe")
-    in
-    match candidate with
-    | Some p when Sys.file_exists p -> Some p
-    | Some p ->
-        Printf.eprintf
-          "Error: worker isolation unavailable: onton-setsid-exec not found at \
-           %s\n"
-          p;
-        Stdlib.exit 1
-    | None ->
-        Printf.eprintf
-          "Error: worker isolation unavailable: ONTON_SETSID_EXEC disabled\n";
+    match
+      Worker_sandbox.resolve_setsid_exec ~executable_name:Sys.executable_name
+        ~override:(Sys.getenv_opt "ONTON_SETSID_EXEC")
+    with
+    | Ok path -> Some path
+    | Error message ->
+        Printf.eprintf "Error: %s\n" message;
         Stdlib.exit 1
   in
   let effective_model_opt =

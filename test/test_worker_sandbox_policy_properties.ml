@@ -14,8 +14,8 @@ let create_is_total =
         ignore
           (Worker_sandbox_policy.create ~worktree ~read_only_paths:[ context ]
              ~read_only_dirs:[] ~writable_files:[ writable ] ~writable_dirs:[]
-             ~runtime_roots:[] ~state_dir:state
-             ~network:Worker_sandbox_policy.Denied);
+             ~creatable_dirs:[] ~runtime_files:[] ~runtime_roots:[]
+             ~state_dir:state ~network:Worker_sandbox_policy.Denied);
         true
       with _ -> false)
 
@@ -46,7 +46,8 @@ let profile_is_deterministic =
       match
         Worker_sandbox_policy.create ~worktree:"/worktree"
           ~read_only_paths:paths ~read_only_dirs:[] ~writable_files:[]
-          ~writable_dirs:[] ~runtime_roots:[ "/runtime" ] ~state_dir:"/state"
+          ~writable_dirs:[] ~creatable_dirs:[] ~runtime_files:[]
+          ~runtime_roots:[ "/runtime" ] ~state_dir:"/state"
           ~network:Worker_sandbox_policy.Https_only
       with
       | Error _ -> false
@@ -54,6 +55,22 @@ let profile_is_deterministic =
           String.equal
             (Worker_sandbox_policy.macos_profile policy)
             (Worker_sandbox_policy.macos_profile policy))
+
+let empty_create_capability_is_fail_closed =
+  Test.make ~name:"empty directory-create capability emits no allow rule"
+    ~count:100 Gen.unit (fun () ->
+      match
+        Worker_sandbox_policy.create ~worktree:"/worktree" ~read_only_paths:[]
+          ~read_only_dirs:[] ~writable_files:[] ~writable_dirs:[]
+          ~creatable_dirs:[] ~runtime_files:[] ~runtime_roots:[]
+          ~state_dir:"/state" ~network:Worker_sandbox_policy.Denied
+      with
+      | Error _ -> false
+      | Ok policy ->
+          not
+            (String.is_substring
+               (Worker_sandbox_policy.macos_profile policy)
+               ~substring:"(allow file-write-create"))
 
 let denied_credentials_never_survive =
   Test.make ~name:"unselected credentials never survive environment scrubbing"
@@ -84,5 +101,6 @@ let () =
       create_is_total;
       environment_is_total;
       profile_is_deterministic;
+      empty_create_capability_is_fail_closed;
       denied_credentials_never_survive;
     ] ~f:(fun test -> Test.check_exn test)

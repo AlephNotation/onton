@@ -43,12 +43,13 @@ let budget_cap_nano_usd_from_env () =
       | Some _ | None -> None)
 
 let run_streaming ~model ~process_mgr ~clock ~timeout ~setsid_exec ~sandbox
-    ~project_name ~cwd ~patch_id ~prompt ~resume_session ~session_uuid ~on_event
-    =
+    ~project_name:_ ~cwd ~patch_id ~prompt ~resume_session ~session_uuid
+    ~on_event =
   let cwd_path = snd cwd in
   let args = build_args ~model ~cwd_path ~prompt ~resume_session in
   let overrides =
-    Spawn_env.per_patch_env ~backend:"codex" ~project_name ~patch_id
+    Spawn_env.per_patch_env ~backend:"codex"
+      ~state_dir:(Worker_sandbox.state_dir sandbox)
   in
   let budget_cap_nano_usd = budget_cap_nano_usd_from_env () in
   let cost_state = ref initial_cost_state in

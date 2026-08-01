@@ -10,8 +10,6 @@ let patch_root ~project_dir ~patch_id =
 let sandbox_root ~project_dir ~patch_id =
   Stdlib.Filename.concat (patch_root ~project_dir ~patch_id) "sandbox"
 
-let backend_dir ~root ~backend = Stdlib.Filename.concat root backend
-
 (* On macOS, Claude Code stores its OAuth token in the macOS Keychain rather
    than in [.credentials.json]. The Keychain lookup is scoped such that
    pointing Claude at a per-patch [CLAUDE_CONFIG_DIR] makes it report
@@ -62,25 +60,18 @@ let claude_oauth_token_overrides () =
   | None -> []
   | Some token -> [ ("CLAUDE_CODE_OAUTH_TOKEN", token) ]
 
-let per_patch_env_in_project_dir ~backend ~project_dir ~patch_id =
-  let root = sandbox_root ~project_dir ~patch_id in
-  let config_dir backend =
-    let dir = backend_dir ~root ~backend in
-    Project_store.ensure_dir dir;
-    dir
-  in
+let per_patch_env_in_state_dir ~backend ~state_dir =
+  let config_dir = Stdlib.Filename.concat state_dir "config" in
+  Project_store.ensure_dir config_dir;
   match String.lowercase (String.strip backend) with
   | "anthropic" | "claude" ->
-      let claude_dir = config_dir "claude" in
-      ("CLAUDE_CONFIG_DIR", claude_dir) :: claude_oauth_token_overrides ()
-  | "openai" | "codex" -> [ ("CODEX_HOME", config_dir "codex") ]
-  | "opencode" -> [ ("OPENCODE_CONFIG_DIR", config_dir "opencode") ]
+      ("CLAUDE_CONFIG_DIR", config_dir) :: claude_oauth_token_overrides ()
+  | "openai" | "codex" -> [ ("CODEX_HOME", config_dir) ]
+  | "opencode" -> [ ("OPENCODE_CONFIG_DIR", config_dir) ]
   | _ -> []
 
-let per_patch_env ~backend ~project_name ~patch_id =
-  per_patch_env_in_project_dir ~backend
-    ~project_dir:(Project_store.project_dir project_name)
-    ~patch_id
+let per_patch_env ~backend ~state_dir =
+  per_patch_env_in_state_dir ~backend ~state_dir
 
 (* Claude Code stores each conversation at
    [<CLAUDE_CONFIG_DIR>/projects/<cwd-key>/<session-id>.jsonl], where
@@ -95,7 +86,11 @@ let claude_project_dir_key ~worktree_path =
 let claude_session_jsonl_path_in_project_dir ~project_dir ~patch_id
     ~worktree_path ~session_id =
   let root = sandbox_root ~project_dir ~patch_id in
-  let claude_dir = backend_dir ~root ~backend:"claude" in
+  let claude_dir =
+    Stdlib.Filename.concat
+      (Stdlib.Filename.concat (Stdlib.Filename.concat root "claude") "claude")
+      "config"
+  in
   let key = claude_project_dir_key ~worktree_path in
   Stdlib.Filename.concat
     (Stdlib.Filename.concat (Stdlib.Filename.concat claude_dir "projects") key)
@@ -146,13 +141,16 @@ let%test "distinct patch_ids yield distinct config dirs" =
   with_temp_project_dir @@ fun project_dir ->
   let patch_a = Types.Patch_id.of_string "patch-1" in
   let patch_b = Types.Patch_id.of_string "patch-2" in
+  let state_dir patch_id =
+    Stdlib.Filename.concat
+      (Stdlib.Filename.concat (sandbox_root ~project_dir ~patch_id) "claude")
+      "claude"
+  in
   let env_a =
-    per_patch_env_in_project_dir ~backend:"claude" ~project_dir
-      ~patch_id:patch_a
+    per_patch_env_in_state_dir ~backend:"claude" ~state_dir:(state_dir patch_a)
   in
   let env_b =
-    per_patch_env_in_project_dir ~backend:"claude" ~project_dir
-      ~patch_id:patch_b
+    per_patch_env_in_state_dir ~backend:"claude" ~state_dir:(state_dir patch_b)
   in
   let find key env = List.Assoc.find env ~equal:String.equal key in
   not
@@ -174,14 +172,24 @@ let%test "merged env contains per-patch overrides" =
   let env_a =
     merge_env ~base_env
       ~overrides:
-        (per_patch_env_in_project_dir ~backend:"opencode" ~project_dir
-           ~patch_id:patch_a)
+        (per_patch_env_in_state_dir ~backend:"opencode"
+           ~state_dir:
+             (Stdlib.Filename.concat
+                (Stdlib.Filename.concat
+                   (sandbox_root ~project_dir ~patch_id:patch_a)
+                   "opencode")
+                "openai"))
   in
   let env_b =
     merge_env ~base_env
       ~overrides:
-        (per_patch_env_in_project_dir ~backend:"opencode" ~project_dir
-           ~patch_id:patch_b)
+        (per_patch_env_in_state_dir ~backend:"opencode"
+           ~state_dir:
+             (Stdlib.Filename.concat
+                (Stdlib.Filename.concat
+                   (sandbox_root ~project_dir ~patch_id:patch_b)
+                   "opencode")
+                "openai"))
   in
   let find key env =
     Array.find_map env ~f:(fun entry ->
@@ -195,7 +203,7 @@ let%test "merged env contains per-patch overrides" =
   let opencode_a = Option.value_exn (find "OPENCODE_CONFIG_DIR" env_a) in
   let opencode_b = Option.value_exn (find "OPENCODE_CONFIG_DIR" env_b) in
   String.is_substring opencode_a
-    ~substring:"spawn-envs/patch-1/sandbox/opencode"
+    ~substring:"spawn-envs/patch-1/sandbox/opencode/openai/config"
   && Option.equal String.equal
        (find "CLAUDE_CONFIG_DIR" env_a)
        (Some "/shared/claude")
@@ -212,7 +220,7 @@ let%test
       ~session_id:"c9f311bc-7e1a-4b36-bc1f-940513fb75f9"
   in
   String.equal path
-    "/proj/spawn-envs/42/sandbox/claude/projects/-Users-x-worktrees-foo-patch-42/c9f311bc-7e1a-4b36-bc1f-940513fb75f9.jsonl"
+    "/proj/spawn-envs/42/sandbox/claude/claude/config/projects/-Users-x-worktrees-foo-patch-42/c9f311bc-7e1a-4b36-bc1f-940513fb75f9.jsonl"
 
 let%test "claude_project_dir_key: replaces every slash with a dash" =
   String.equal (claude_project_dir_key ~worktree_path:"/a/b/c") "-a-b-c"

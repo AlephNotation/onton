@@ -11,6 +11,8 @@ type t = private {
   read_only_dirs : string list;
   writable_files : string list;
   writable_dirs : string list;
+  creatable_dirs : string list;
+  runtime_files : string list;
   runtime_roots : string list;
   state_dir : string;
   network : network;
@@ -23,12 +25,19 @@ val create :
   read_only_dirs:string list ->
   writable_files:string list ->
   writable_dirs:string list ->
+  creatable_dirs:string list ->
+  runtime_files:string list ->
   runtime_roots:string list ->
   state_dir:string ->
   network:network ->
   (t, string) Result.t
 (** Construct a closed worker capability set. Every path must be absolute and
     free of control characters and lexical parent traversal. *)
+
+val add_runtime_files : t -> string list -> (t, string) Result.t
+(** Add exact runtime files after validating them. Used at the final launch
+    boundary for the process-group shim, whose path is not known when the patch
+    capability set is constructed. *)
 
 val macos_profile : t -> string
 (** Render the deny-by-default Seatbelt profile used by [sandbox-exec]. The

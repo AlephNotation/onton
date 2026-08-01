@@ -11,6 +11,8 @@ type t = {
   read_only_dirs : string list;
   writable_files : string list;
   writable_dirs : string list;
+  creatable_dirs : string list;
+  runtime_files : string list;
   runtime_roots : string list;
   state_dir : string;
   network : network;
@@ -42,7 +44,8 @@ let validate_paths label paths =
 let sorted_unique paths = List.dedup_and_sort paths ~compare:String.compare
 
 let create ~worktree ~read_only_paths ~read_only_dirs ~writable_files
-    ~writable_dirs ~runtime_roots ~state_dir ~network =
+    ~writable_dirs ~creatable_dirs ~runtime_files ~runtime_roots ~state_dir
+    ~network =
   Result.bind (validate_path "worktree" worktree) ~f:(fun worktree ->
       Result.bind (validate_paths "read_only_paths" read_only_paths)
         ~f:(fun read_only_paths ->
@@ -52,20 +55,42 @@ let create ~worktree ~read_only_paths ~read_only_dirs ~writable_files
                 ~f:(fun writable_files ->
                   Result.bind (validate_paths "writable_dirs" writable_dirs)
                     ~f:(fun writable_dirs ->
-                      Result.bind (validate_paths "runtime_roots" runtime_roots)
-                        ~f:(fun runtime_roots ->
-                          Result.map (validate_path "state_dir" state_dir)
-                            ~f:(fun state_dir ->
-                              {
-                                worktree;
-                                read_only_paths = sorted_unique read_only_paths;
-                                read_only_dirs = sorted_unique read_only_dirs;
-                                writable_files = sorted_unique writable_files;
-                                writable_dirs = sorted_unique writable_dirs;
-                                runtime_roots = sorted_unique runtime_roots;
-                                state_dir;
-                                network;
-                              })))))))
+                      Result.bind
+                        (validate_paths "creatable_dirs" creatable_dirs)
+                        ~f:(fun creatable_dirs ->
+                          Result.bind
+                            (validate_paths "runtime_files" runtime_files)
+                            ~f:(fun runtime_files ->
+                              Result.bind
+                                (validate_paths "runtime_roots" runtime_roots)
+                                ~f:(fun runtime_roots ->
+                                  Result.map
+                                    (validate_path "state_dir" state_dir)
+                                    ~f:(fun state_dir ->
+                                      {
+                                        worktree;
+                                        read_only_paths =
+                                          sorted_unique read_only_paths;
+                                        read_only_dirs =
+                                          sorted_unique read_only_dirs;
+                                        writable_files =
+                                          sorted_unique writable_files;
+                                        writable_dirs =
+                                          sorted_unique writable_dirs;
+                                        creatable_dirs =
+                                          sorted_unique creatable_dirs;
+                                        runtime_files =
+                                          sorted_unique runtime_files;
+                                        runtime_roots =
+                                          sorted_unique runtime_roots;
+                                        state_dir;
+                                        network;
+                                      })))))))))
+
+let add_runtime_files t runtime_files =
+  Result.map (validate_paths "runtime_files" runtime_files)
+    ~f:(fun runtime_files ->
+      { t with runtime_files = sorted_unique (t.runtime_files @ runtime_files) })
 
 let sbpl_string value =
   let buffer = Buffer.create (String.length value + 2) in
@@ -85,13 +110,26 @@ let rules filter paths =
 let system_read_roots =
   [
     "/System";
-    "/usr";
+    "/usr/bin";
+    "/usr/lib";
+    "/usr/libexec";
+    "/usr/sbin";
+    "/usr/share";
     "/bin";
     "/sbin";
     "/Library/Apple";
-    "/private/etc";
     "/private/var/db/timezone";
-    "/dev";
+    "/dev/fd";
+  ]
+
+let system_read_files =
+  [
+    "/private/etc/hosts";
+    "/private/etc/resolv.conf";
+    "/private/etc/ssl/cert.pem";
+    "/etc/hosts";
+    "/etc/resolv.conf";
+    "/etc/ssl/cert.pem";
   ]
 
 let macos_profile t =
@@ -101,7 +139,11 @@ let macos_profile t =
       @ [ t.worktree; t.state_dir ]
       @ t.read_only_dirs @ t.runtime_roots @ t.writable_dirs)
   in
-  let readable_files = sorted_unique (t.read_only_paths @ t.writable_files) in
+  let readable_files =
+    sorted_unique
+      (system_read_files @ t.read_only_paths @ t.writable_files
+     @ t.runtime_files)
+  in
   let network_rules =
     match t.network with
     | Denied -> ""
@@ -112,6 +154,16 @@ let macos_profile t =
     (remote udp "*:443"))
   (deny network-outbound
     (remote ip "localhost:*"))|}
+  in
+  let creation_rules =
+    match t.creatable_dirs with
+    | [] -> ""
+    | directories ->
+        Printf.sprintf
+          {|
+  (allow file-write-create
+    %s)|}
+          (rules "literal" directories)
   in
   Printf.sprintf
     {|(version 1)
@@ -134,18 +186,18 @@ let macos_profile t =
     %s
     %s)
 %s
+%s
 |}
     (rules "subpath" readable_dirs)
     (rules "literal" readable_files)
     (rules "subpath" (sorted_unique (t.state_dir :: t.writable_dirs)))
     (rules "literal" t.writable_files)
-    network_rules
+    creation_rules network_rules
 
-let fixed_environment_names =
+let inherited_environment_names =
   Set.of_list
     (module String)
     [
-      "PATH";
       "LANG";
       "LC_ALL";
       "LC_CTYPE";
@@ -154,20 +206,30 @@ let fixed_environment_names =
       "USER";
       "LOGNAME";
       "SHELL";
+    ]
+
+let override_environment_names =
+  Set.of_list
+    (module String)
+    [
+      "PATH";
       "HOME";
       "TMPDIR";
-      "SSL_CERT_FILE";
-      "SSL_CERT_DIR";
-      "NODE_EXTRA_CA_CERTS";
       "CLAUDE_CONFIG_DIR";
       "CODEX_HOME";
       "OPENCODE_CONFIG_DIR";
       "XDG_CONFIG_HOME";
-      "ONTON_BUDGET_CAP_USD";
+      "OPENSSL_CONF";
     ]
 
 let allowed_environment_name ~allowed_provider_names name =
-  Set.mem fixed_environment_names name
+  Set.mem inherited_environment_names name
+  || Set.mem override_environment_names name
+  || List.mem allowed_provider_names name ~equal:String.equal
+  || String.is_prefix name ~prefix:"LC_"
+
+let inherited_environment_name ~allowed_provider_names name =
+  Set.mem inherited_environment_names name
   || List.mem allowed_provider_names name ~equal:String.equal
   || String.is_prefix name ~prefix:"LC_"
 
@@ -188,7 +250,7 @@ let environment ~allowed_provider_names ~base ~overrides =
       let values = Hashtbl.create (module String) in
       Array.iter base ~f:(fun entry ->
           let name, value = split_environment_entry entry in
-          if allowed_environment_name ~allowed_provider_names name then
+          if inherited_environment_name ~allowed_provider_names name then
             Hashtbl.set values ~key:name ~data:value);
       List.iter overrides ~f:(fun (name, value) ->
           Hashtbl.set values ~key:name ~data:value);
