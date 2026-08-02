@@ -144,6 +144,11 @@ module Check = struct
 end
 
 module Patch = struct
+  module Agent = struct
+    type t = { backend : string; model : string }
+    [@@deriving show, eq, sexp_of, compare, yojson]
+  end
+
   type t = {
     id : Patch_id.t;
     goal : string;
@@ -151,6 +156,7 @@ module Patch = struct
     dependencies : Patch_id.t list;
     files : string list;
     checks : Check.t list;
+    agent : Agent.t option; [@yojson.default None]
   }
   [@@deriving show, eq, sexp_of, compare, yojson]
 end

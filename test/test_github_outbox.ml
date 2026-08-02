@@ -18,6 +18,7 @@ let patch =
       dependencies = [];
       files = [];
       checks = [];
+      agent = None;
     }
 
 let gameplan =

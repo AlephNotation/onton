@@ -75,7 +75,16 @@ let gen_patch =
     let gen_goal = string_size ~gen:printable (int_range 5 50) in
     map4
       (fun id goal branch dependencies ->
-        Patch.{ id; goal; branch; dependencies; files = []; checks = [] })
+        Patch.
+          {
+            id;
+            goal;
+            branch;
+            dependencies;
+            files = [];
+            checks = [];
+            agent = None;
+          })
       gen_patch_id gen_goal gen_branch gen_deps)
 
 let gen_ci_check =
@@ -140,6 +149,7 @@ let gen_patch_list_linear =
                 dependencies;
                 files = [];
                 checks = [];
+                agent = None;
               }))
       (int_range 1 8))
 
@@ -181,6 +191,7 @@ let gen_patch_dag =
               dependencies = deps;
               files = [];
               checks = [];
+              agent = None;
             }
         in
         gen_patches (i + 1) (patch :: acc)
@@ -194,6 +205,7 @@ let gen_patch_dag =
           dependencies = [];
           files = [];
           checks = [];
+          agent = None;
         }
     in
     gen_patches 1 [ root ])
@@ -669,6 +681,7 @@ let mk_linear_patches n =
           dependencies;
           files = [];
           checks = [];
+          agent = None;
         })
 
 let make_test_gameplan patches =

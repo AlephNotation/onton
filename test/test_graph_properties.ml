@@ -17,6 +17,7 @@ let patches_of_edges count edges =
         dependencies;
         files = [ Printf.sprintf "lib/p%d.ml" index ];
         checks = [ { Types.Check.run = "dune build"; proves = "build passes" } ];
+        agent = None;
       })
 
 let graph_case =

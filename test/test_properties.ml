@@ -138,6 +138,7 @@ let () =
          dependencies = deps;
          files = [];
          checks = [];
+         agent = None;
        }
    in
    let a = Types.Patch_id.of_string "A" in
@@ -371,6 +372,7 @@ let () =
           dependencies = [];
           files = [];
           checks = [];
+          agent = None;
         };
     ]
   in
@@ -429,6 +431,7 @@ let () =
         dependencies = [];
         files = [];
         checks = [];
+        agent = None;
       }
   in
 
@@ -533,6 +536,7 @@ let () =
           dependencies = [];
           files = [];
           checks = [];
+          agent = None;
         };
       Types.Patch.
         {
@@ -542,6 +546,7 @@ let () =
           dependencies = [ p1 ];
           files = [];
           checks = [];
+          agent = None;
         };
     ]
   in
@@ -583,6 +588,7 @@ let () =
             dependencies = [];
             files = [];
             checks = [];
+            agent = None;
           };
       ]
     in
@@ -604,6 +610,7 @@ let () =
                 dependencies = [];
                 files = [];
                 checks = [];
+                agent = None;
               };
           ]
         in
@@ -705,6 +712,7 @@ let () =
             dependencies = [];
             files = [];
             checks = [];
+            agent = None;
           };
       ]
     in
@@ -767,6 +775,7 @@ let () =
                   dependencies = [];
                   files = [];
                   checks = [];
+                  agent = None;
                 };
             ]
           in
@@ -894,6 +903,7 @@ let () =
             dependencies = [];
             files = [];
             checks = [];
+            agent = None;
           };
       ]
     in

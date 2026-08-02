@@ -73,6 +73,43 @@ let four_activity_entries =
           timestamp = Float.of_int i;
         })
 
+let test_patch_detail_uses_effective_agent_selection () =
+  let patch_id = Patch_id.of_string "override" in
+  let patch : Patch.t =
+    {
+      Patch.id = patch_id;
+      goal = "show override";
+      branch = Branch.of_string "override";
+      dependencies = [];
+      files = [];
+      checks = [];
+      agent = Some { Patch.Agent.backend = "codex"; model = "gpt-5.6-sol" };
+    }
+  in
+  let gameplan : Gameplan.t =
+    {
+      Gameplan.project_name = "tui";
+      repo_owner = "owner";
+      repo_name = "repo";
+      patches = [ patch ];
+    }
+  in
+  let orchestrator =
+    Orchestrator.create ~patches:[ patch ]
+      ~main_branch:(Branch.of_string "main")
+    |> fun orch -> Orchestrator.set_branch_blocked orch patch_id
+  in
+  match
+    Tui.views_of_orchestrator ~orchestrator ~gameplan ~activity:[]
+      ~backend_decision:
+        { Onton_core.Backend_routing.backend = "claude"; model = Some "sonnet" }
+      ()
+  with
+  | [ view ] ->
+      assert (String.equal view.Tui.backend "codex");
+      assert (Option.equal String.equal view.Tui.model (Some "gpt-5.6-sol"))
+  | _ -> assert false
+
 (* --- helpers --------------------------------------------------------------- *)
 
 let line_contains lines needle =
@@ -320,6 +357,7 @@ let () =
   test_checks_overlay_lists_all ();
   test_checks_overlay_clamps_offset ();
   test_checks_overlay_zero_visible_range ();
+  test_patch_detail_uses_effective_agent_selection ();
   test_timeline_view_no_summary ();
   test_patches_render_above_activity ();
   QCheck2.Test.check_exn

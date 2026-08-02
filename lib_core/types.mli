@@ -126,6 +126,11 @@ module Check : sig
 end
 
 module Patch : sig
+  module Agent : sig
+    type t = { backend : string; model : string }
+    [@@deriving show, eq, sexp_of, compare, yojson]
+  end
+
   type t = {
     id : Patch_id.t;
     goal : string;  (** Single observable outcome owned by this patch. *)
@@ -135,6 +140,8 @@ module Patch : sig
         (** Expected write surface. Enforcement belongs to the supervisor. *)
     checks : Check.t list;
         (** Commands that must pass before the patch can be considered done. *)
+    agent : Agent.t option; [@yojson.default None]
+        (** Optional complete per-patch backend/model selection. *)
   }
   [@@deriving show, eq, sexp_of, compare, yojson]
 end

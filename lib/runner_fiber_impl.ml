@@ -24,8 +24,8 @@ module Runner_env = struct
     val transcripts : (Patch_id.t, string) Stdlib.Hashtbl.t
     val event_log : Event_log.t
     val process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t
-    val backend : Backend_registry.kind
-    val backend_decision : Backend_routing.decision
+    val backend_registry : Backend_registry.t
+    val default_backend : Backend_routing.decision
     val register_pr : patch_id:Patch_id.t -> pr_number:Pr_number.t -> unit
   end
 end
@@ -552,26 +552,45 @@ struct
     in
     let run_llm_session ~sw ~gameplan_prompt ~patch_prompt ~kind ~patch_id
         ~prompt ~agent ~on_pr_detected =
+      let gameplan =
+        Runtime.read runtime (fun snapshot -> snapshot.Runtime.gameplan)
+      in
+      let patch =
+        Base.List.find gameplan.Gameplan.patches ~f:(fun (patch : Patch.t) ->
+            Patch_id.equal patch.id patch_id)
+      in
+      let selection =
+        match patch with
+        | None -> Env.default_backend
+        | Some patch ->
+            Backend_routing.for_patch ~default:Env.default_backend patch
+      in
+      let selection =
+        {
+          selection with
+          model =
+            Backend_registry.resolve_model ~backend:selection.backend
+              ~model:selection.model;
+        }
+      in
+      let selected_backend =
+        Backend_registry.get Env.backend_registry ~backend:selection.backend
+          ~model:selection.model
+      in
       let validate_before_push ~worktree ~base_branch =
         prepare_patch_contract ~runtime ~patch_id ~worktree ~base_branch
       in
       let sandbox_for_worktree ~worktree =
-        let gameplan =
-          Runtime.read runtime (fun snapshot -> snapshot.Runtime.gameplan)
-        in
-        match
-          Base.List.find gameplan.Gameplan.patches ~f:(fun (patch : Patch.t) ->
-              Patch_id.equal patch.id patch_id)
-        with
+        match patch with
         | None -> Error "worker has no declared patch contract"
         | Some patch ->
             let provider =
-              match Env.backend with
+              match selected_backend with
               | Backend_registry.Ephemeral _ -> (
-                  let backend = Env.backend_decision.Backend_routing.backend in
+                  let backend = selection.Backend_routing.backend in
                   match
                     ( Base.String.lowercase backend,
-                      Env.backend_decision.Backend_routing.model )
+                      selection.Backend_routing.model )
                   with
                   | ("opencode" | "pi"), Some model ->
                       Base.String.lsplit2 (Base.String.lowercase model) ~on:'/'
@@ -580,17 +599,16 @@ struct
                   | _ -> backend)
               | Backend_registry.Long_lived _ -> patch_agent_provider
             in
-            Worker_sandbox.create
-              ~backend:Env.backend_decision.Backend_routing.backend ~provider
-              ~project_name ~worktree ~patch ~gameplan ~operation:kind
+            Worker_sandbox.create ~backend:selection.Backend_routing.backend
+              ~provider ~project_name ~worktree ~patch ~gameplan ~operation:kind
       in
-      match Env.backend with
+      match selected_backend with
       | Backend_registry.Ephemeral backend ->
           Session_driver.run ~sandbox_for_worktree ~kind ~patch_id ~prompt
             ~agent ~on_pr_detected ~validate_before_push ~backend
       | Backend_registry.Long_lived backend -> (
           let patch_agent_model_result =
-            match Env.backend_decision.Backend_routing.model with
+            match selection.Backend_routing.model with
             | Some m when not (Base.String.is_empty (Base.String.strip m)) ->
                 Ok (Base.String.strip m)
             | Some _ | None ->

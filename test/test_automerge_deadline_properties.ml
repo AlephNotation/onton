@@ -45,6 +45,7 @@ let make_patch pid branch =
       dependencies = [];
       files = [];
       checks = [];
+      agent = None;
     }
 
 (* Build an agent with a PR present, parameterized over exactly the fields

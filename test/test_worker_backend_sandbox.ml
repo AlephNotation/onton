@@ -75,6 +75,7 @@ let make_patch () : Types.Patch.t =
     dependencies = [];
     files = [];
     checks = [];
+    agent = None;
   }
 
 let make_gameplan patch : Types.Gameplan.t =
@@ -154,6 +155,14 @@ let run_long_lived ~process_mgr ~clock ~cwd ~setsid_exec ~patch ~gameplan =
   in
   assert_success "patch-agent" result events
 
+let current_worktree_setsid_exec () =
+  let rec ancestor path levels =
+    if levels = 0 then path
+    else ancestor (Stdlib.Filename.dirname path) (levels - 1)
+  in
+  let root = ancestor (Unix.realpath Stdlib.Sys.argv.(0)) 4 in
+  Stdlib.Filename.concat root "_build/default/bin/setsid_exec/main.exe"
+
 let () =
   match Worker_sandbox.preflight () with
   | Error message -> Stdlib.Printf.eprintf "SKIP: %s\n" message
@@ -172,8 +181,9 @@ let () =
         ~f:(install_ephemeral runtime_dir);
       install_patch_agent runtime_dir;
       let setsid_exec =
-        Stdlib.Sys.getenv_opt "ONTON_SETSID_EXEC"
-        |> Option.value_exn |> Unix.realpath
+        match Stdlib.Sys.getenv_opt "ONTON_SETSID_EXEC" with
+        | Some path -> Unix.realpath path
+        | None -> current_worktree_setsid_exec () |> Unix.realpath
       in
       with_environment
         [

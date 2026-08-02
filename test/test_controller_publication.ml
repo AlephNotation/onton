@@ -66,6 +66,7 @@ let () =
       dependencies = [];
       files = [ "owned.txt"; "removed.txt" ];
       checks = [ { Check.run = "test -s owned.txt"; proves = "file exists" } ];
+      agent = None;
     }
   in
   write owned "worker change\n";

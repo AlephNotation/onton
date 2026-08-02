@@ -92,6 +92,7 @@ let () =
           dependencies = [];
           files = [];
           checks = [];
+          agent = None;
         };
     ]
   in

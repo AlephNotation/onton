@@ -2,7 +2,25 @@ open Base
 
 type decision = { backend : string; model : string option }
 
+let supported_backends =
+  [ "claude"; "codex"; "opencode"; "pi"; "gemini"; "patch-agent" ]
+
+let is_supported_backend backend =
+  List.mem supported_backends backend ~equal:String.equal
+
 let decide ~backend ~model = { backend; model }
+
+let for_patch ~default (patch : Types.Patch.t) =
+  match patch.agent with
+  | None -> default
+  | Some { Types.Patch.Agent.backend; model } -> { backend; model = Some model }
+
+let distinct_effective_backends ~default patches =
+  List.fold patches
+    ~init:(Set.singleton (module String) default.backend)
+    ~f:(fun backends patch ->
+      Set.add backends (for_patch ~default patch).backend)
+  |> Set.to_list
 
 let first_nonempty (values : string list) ~default =
   match

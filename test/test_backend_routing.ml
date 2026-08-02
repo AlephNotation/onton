@@ -1,7 +1,7 @@
 open Base
 open Onton_core
 
-let known_backends = [ "claude"; "codex"; "opencode"; "pi"; "gemini" ]
+let known_backends = Backend_routing.supported_backends
 
 let optional_model =
   QCheck2.Gen.oneof
@@ -68,6 +68,83 @@ let () =
         String.equal backend stored_backend
         && String.equal model configured_model)
   in
+  let patch_override_is_atomic =
+    Test.make ~name:"patch agent override wins as one complete pair" ~count:200
+      (Gen.pair
+         (Gen.oneof_list known_backends)
+         (Gen.oneof_list [ "sol"; "luna" ]))
+      (fun (backend, model) ->
+        let patch : Types.Patch.t =
+          {
+            id = Types.Patch_id.of_string "p";
+            goal = "p";
+            branch = Types.Branch.of_string "p";
+            dependencies = [];
+            files = [];
+            checks = [];
+            agent = Some { Types.Patch.Agent.backend; model };
+          }
+        in
+        let selected =
+          Backend_routing.for_patch
+            ~default:
+              (Backend_routing.decide ~backend:"claude" ~model:(Some "default"))
+            patch
+        in
+        String.equal selected.backend backend
+        && Option.equal String.equal selected.model (Some model))
+  in
+  let absent_override_preserves_complete_default =
+    let patch : Types.Patch.t =
+      {
+        id = Types.Patch_id.of_string "p";
+        goal = "p";
+        branch = Types.Branch.of_string "p";
+        dependencies = [];
+        files = [];
+        checks = [];
+        agent = None;
+      }
+    in
+    Test.make ~name:"absent patch agent preserves complete default pair"
+      (Gen.return ()) (fun () ->
+        let default =
+          Backend_routing.decide ~backend:"codex" ~model:(Some "gpt-5.6-luna")
+        in
+        let actual = Backend_routing.for_patch ~default patch in
+        String.equal actual.backend default.backend
+        && Option.equal String.equal actual.model default.model)
+  in
+  let distinct_effective_backends_are_deduplicated =
+    let patch id agent : Types.Patch.t =
+      {
+        id = Types.Patch_id.of_string id;
+        goal = id;
+        branch = Types.Branch.of_string id;
+        dependencies = [];
+        files = [];
+        checks = [];
+        agent;
+      }
+    in
+    Test.make
+      ~name:
+        "effective backend preflight set includes default and overrides once"
+      (Gen.return ()) (fun () ->
+        let default = Backend_routing.decide ~backend:"codex" ~model:None in
+        let actual =
+          Backend_routing.distinct_effective_backends ~default
+            [
+              patch "default" None;
+              patch "claude"
+                (Some { Types.Patch.Agent.backend = "claude"; model = "sonnet" });
+              patch "codex"
+                (Some { Types.Patch.Agent.backend = "codex"; model = "sol" });
+            ]
+          |> Set.of_list (module String)
+        in
+        Set.equal actual (Set.of_list (module String) [ "codex"; "claude" ]))
+  in
   let exit_code =
     QCheck_base_runner.run_tests ~verbose:true
       [
@@ -75,6 +152,9 @@ let () =
         cli_backend_wins;
         built_in_backend_is_total_fallback;
         fields_resolve_independently;
+        patch_override_is_atomic;
+        absent_override_preserves_complete_default;
+        distinct_effective_backends_are_deduplicated;
       ]
   in
   if exit_code <> 0 then Stdlib.exit exit_code

@@ -21,8 +21,8 @@ module Runner_env : sig
     val transcripts : (Patch_id.t, string) Stdlib.Hashtbl.t
     val event_log : Event_log.t
     val process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t
-    val backend : Backend_registry.kind
-    val backend_decision : Backend_routing.decision
+    val backend_registry : Backend_registry.t
+    val default_backend : Backend_routing.decision
     val register_pr : patch_id:Patch_id.t -> pr_number:Pr_number.t -> unit
   end
 end

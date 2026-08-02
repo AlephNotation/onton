@@ -1029,6 +1029,7 @@ let make_orchestrator ~patch_id ~main_branch =
       dependencies = [];
       files = [];
       checks = [];
+      agent = None;
     }
   in
   (patch, Orchestrator.create ~patches:[ patch ] ~main_branch)
@@ -1159,6 +1160,7 @@ let%test
       dependencies = deps;
       files = [];
       checks = [];
+      agent = None;
     }
   in
   let parent_patch = mk_patch parent_id parent_branch [] in
@@ -1207,6 +1209,7 @@ let make_notes_gate_fixture () =
       dependencies = deps;
       files = [];
       checks = [];
+      agent = None;
     }
   in
   let parent_patch = mk_patch parent_id (Branch.of_string "parent-branch") [] in

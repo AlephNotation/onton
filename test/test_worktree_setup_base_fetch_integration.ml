@@ -116,6 +116,7 @@ let mk_patch ~pid ~branch =
       dependencies = [];
       files = [];
       checks = [];
+      agent = None;
     }
 
 let empty_gameplan =

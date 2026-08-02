@@ -35,7 +35,8 @@ before it starts any agent.
           "run": "dune exec test/cache_key_test.exe",
           "proves": "tenants cannot share cache entries"
         }
-      ]
+      ],
+      "agent": { "backend": "codex", "model": "gpt-5.6-sol" }
     }
   ]
 }
@@ -582,8 +583,10 @@ Resolution order, evaluated per field independently:
 3. `default.backend` / `default.model` from `config.json`
 4. Built-in (`claude`; model unset)
 
-One backend/model pair applies to the entire run. Both `default` fields are
-optional; pin just `backend`, just `model`, or both. Run
+CLI and config select the run-wide default. A patch may instead select one
+complete pair with `"agent": { "backend": "codex", "model": "gpt-5.6-sol" }`;
+that selection applies only to that patch and its later follow-up turns. Both
+`default` fields are optional; pin just `backend`, just `model`, or both. Run
 `lo-check-repo-config <owner> <repo>` to verify how a `config.json`
 parses.
 

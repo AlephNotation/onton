@@ -193,6 +193,7 @@ let () =
           dependencies = [];
           files = [ "escape/secret.txt" ];
           checks = [];
+          agent = None;
         }
       in
       let gameplan : Types.Gameplan.t =
@@ -238,6 +239,7 @@ esac
           dependencies = [];
           files = [ "new.txt"; "nested/deep/file.txt" ];
           checks = [];
+          agent = None;
         }
       in
       let new_gameplan =
