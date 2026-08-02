@@ -276,6 +276,7 @@ let apply_command m cmd =
             patch_id = pid;
             generation = agent.Patch_agent.generation;
             action = Orchestrator.Start (pid, base);
+            payload = [];
             payload_hash = "sbi";
             status = Orchestrator.Pending;
           }

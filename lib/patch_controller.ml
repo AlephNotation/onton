@@ -16,8 +16,23 @@ let action_identity = function
         (Branch.to_string base)
 
 let message_of_action (patch_agent : Patch_agent.t) action =
+  let payload =
+    match action with
+    | Orchestrator.Start _ -> List.rev patch_agent.human_messages
+    | Orchestrator.Respond (_, kind) ->
+        if Operation_kind.equal kind Operation_kind.Human then
+          List.rev patch_agent.human_messages
+        else []
+    | Orchestrator.Rebase _ -> []
+  in
+  let payload_identity =
+    List.map payload ~f:(fun message ->
+        Printf.sprintf "%d:%s" (String.length message) message)
+    |> String.concat ~sep:""
+  in
   let identity =
-    Printf.sprintf "%d:%s" patch_agent.generation (action_identity action)
+    Printf.sprintf "%d:%s:%s" patch_agent.generation (action_identity action)
+      payload_identity
   in
   let digest = Stdlib.Digest.to_hex (Stdlib.Digest.string identity) in
   let msg_id =
@@ -30,6 +45,7 @@ let message_of_action (patch_agent : Patch_agent.t) action =
       patch_id = patch_agent.patch_id;
       generation = patch_agent.generation;
       action;
+      payload;
       payload_hash = digest;
       status = Pending;
     }

@@ -37,6 +37,31 @@ let bootstrap_one () =
   let orch = Orchestrator.complete orch pid in
   (orch, patches, gameplan, pid)
 
+let bootstrap_pre_pr () =
+  let patches = mk_patches 1 in
+  let gameplan = make_gameplan patches in
+  let pid = pid_of_idx patches 0 in
+  let orch = Orchestrator.create ~patches ~main_branch:main in
+  (orch, patches, gameplan, pid)
+
+let next_start orch gameplan pid =
+  let orch, messages =
+    Patch_controller.plan_tick_messages orch ~project_name:"test-project"
+      ~gameplan
+  in
+  match messages with
+  | [ message ] -> (
+      match Orchestrator.message_action message with
+      | Orchestrator.Start (message_pid, _) when Patch_id.equal message_pid pid
+        ->
+          (orch, message)
+      | Orchestrator.Start _ | Orchestrator.Respond _ | Orchestrator.Rebase _ ->
+          QCheck2.Test.fail_reportf
+            "expected the sole runnable message to be Start")
+  | messages ->
+      QCheck2.Test.fail_reportf "expected one runnable Start message, got %d"
+        (List.length messages)
+
 (** Make an agent busy via enqueue + tick for the given operation kind. *)
 let make_busy orch _patches gameplan pid kind =
   let orch = Orchestrator.enqueue orch pid kind in
@@ -78,6 +103,152 @@ let () =
   let orch = Orchestrator.complete orch pid in
   assert (not (Patch_agent.is_busy (Orchestrator.agent orch pid)));
   Stdlib.print_endline "AO-1b passed"
+
+(* ========== AO-1c: validation feedback stays in the durable Start lifecycle
+   across acceptance, crash replay, consumption, and publication ========== *)
+
+let () =
+  let orch, _patches, gameplan, pid = bootstrap_pre_pr () in
+  let human = "Please preserve the public API." in
+  let failure =
+    "Controller validation rejected publication. Command: dune build\n\
+     Failure output: unbound module Removed"
+  in
+  let orch = Orchestrator.send_human_message orch pid human in
+  let orch, first = next_start orch gameplan pid in
+  assert (List.equal String.equal (Orchestrator.message_payload first) [ human ]);
+  let orch, accepted =
+    Orchestrator.accept_message orch (Orchestrator.message_id first)
+  in
+  assert (Option.is_some accepted);
+  let started = Orchestrator.agent orch pid in
+  assert (Patch_agent.is_busy started);
+  assert (List.is_empty started.Patch_agent.human_messages);
+  assert (
+    not
+      (List.mem started.Patch_agent.queue Operation_kind.Human
+         ~equal:Operation_kind.equal));
+  assert (
+    List.equal String.equal started.Patch_agent.inflight_human_messages
+      [ human ]);
+  let orch =
+    Orchestrator.set_llm_session_id orch pid (Some "preserved-session")
+  in
+  let orch = Orchestrator.mark_inflight_human_messages_delivered orch pid in
+  let orch =
+    Orchestrator.apply_session_result orch pid
+      (Orchestrator.Session_validation_failed { detail = failure })
+  in
+  let rejected = Orchestrator.agent orch pid in
+  assert (not (Patch_agent.is_busy rejected));
+  assert (rejected.Patch_agent.validation_failure_count = 1);
+  assert (
+    Option.equal String.equal
+      (Patch_agent.llm_session_id rejected)
+      (Some "preserved-session"));
+  assert (
+    List.mem rejected.Patch_agent.queue Operation_kind.Human
+      ~equal:Operation_kind.equal);
+  assert (
+    List.equal String.equal rejected.Patch_agent.human_messages [ failure ]);
+  let orch, retry = next_start orch gameplan pid in
+  assert (
+    List.equal String.equal (Orchestrator.message_payload retry) [ failure ]);
+  let retry_id = Orchestrator.message_id retry in
+  let orch, accepted = Orchestrator.accept_message orch retry_id in
+  assert (Option.is_some accepted);
+  let orch = Orchestrator.reset_busy orch pid in
+  let replay = Orchestrator.runnable_messages orch in
+  assert (
+    List.exists replay ~f:(fun message ->
+        Message_id.equal (Orchestrator.message_id message) retry_id
+        && List.equal String.equal
+             (Orchestrator.message_payload message)
+             [ failure ]));
+  let orch, resumed = Orchestrator.resume_message orch retry_id in
+  assert (Option.is_some resumed);
+  assert (
+    Option.equal Message_id.equal
+      (Patch_agent.current_message_id (Orchestrator.agent orch pid))
+      (Some retry_id));
+  let orch = Orchestrator.mark_inflight_human_messages_delivered orch pid in
+  assert (
+    List.is_empty
+      (Orchestrator.agent orch pid).Patch_agent.inflight_human_messages);
+  let orch = Orchestrator.reset_busy orch pid in
+  let orch, resumed = Orchestrator.resume_message orch retry_id in
+  assert (Option.is_some resumed);
+  assert (
+    List.is_empty
+      (Orchestrator.agent orch pid).Patch_agent.inflight_human_messages);
+  let orch =
+    Orchestrator.apply_session_result orch pid Orchestrator.Session_ok
+  in
+  assert ((Orchestrator.agent orch pid).Patch_agent.validation_failure_count = 0);
+  let orch =
+    Orchestrator.apply_start_outcome orch pid Orchestrator.Start_ok
+    |> fun orch ->
+    Orchestrator.set_pr_number orch pid (Pr_number.of_int 42) |> fun orch ->
+    Orchestrator.complete orch pid
+  in
+  let published = Orchestrator.agent orch pid in
+  assert (Patch_agent.has_pr published);
+  assert (not (Patch_agent.is_busy published));
+  assert (
+    match Orchestrator.find_message orch retry_id with
+    | Some message ->
+        Orchestrator.equal_message_status
+          (Orchestrator.message_status message)
+          Orchestrator.Completed
+    | None -> false);
+  Stdlib.print_endline "AO-1c passed"
+
+(* ========== AO-1d: three validation failures fail closed; a human message
+   explicitly resets the cap and is delivered after the last failure ========== *)
+
+let () =
+  let orch, _patches, gameplan, pid = bootstrap_pre_pr () in
+  let rec reject orch attempt =
+    if attempt > 3 then orch
+    else
+      let orch, message = next_start orch gameplan pid in
+      let orch, accepted =
+        Orchestrator.accept_message orch (Orchestrator.message_id message)
+      in
+      assert (Option.is_some accepted);
+      let orch = Orchestrator.mark_inflight_human_messages_delivered orch pid in
+      let orch =
+        Orchestrator.apply_session_result orch pid
+          (Orchestrator.Session_validation_failed
+             { detail = Printf.sprintf "validation failure %d" attempt })
+      in
+      reject orch (attempt + 1)
+  in
+  let capped = reject orch 1 in
+  let agent = Orchestrator.agent capped pid in
+  assert (agent.Patch_agent.validation_failure_count = 3);
+  assert (Patch_agent.needs_intervention agent);
+  assert (
+    Option.equal String.equal
+      (Patch_agent.intervention_reason agent)
+      (Some "validation_failure_count>=3"));
+  let _, blocked =
+    Patch_controller.plan_tick_messages capped ~project_name:"test-project"
+      ~gameplan
+  in
+  assert (List.is_empty blocked);
+  let reopened =
+    Orchestrator.send_human_message capped pid
+      "Try the narrower implementation."
+  in
+  assert (
+    (Orchestrator.agent reopened pid).Patch_agent.validation_failure_count = 0);
+  let _, start = next_start reopened gameplan pid in
+  assert (
+    List.equal String.equal
+      (Orchestrator.message_payload start)
+      [ "validation failure 3"; "Try the narrower implementation." ]);
+  Stdlib.print_endline "AO-1d passed"
 
 (* ========== AO-2: Non-stale respond outcomes produce busy=false ========== *)
 

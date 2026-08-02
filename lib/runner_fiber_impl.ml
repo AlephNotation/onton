@@ -282,6 +282,15 @@ struct
         [ Base.String.strip failure.stdout; Base.String.strip failure.stderr ]
       |> Base.String.strip
     in
+    let output =
+      let limit = 16_384 in
+      let length = Base.String.length output in
+      if length <= limit then output
+      else
+        Printf.sprintf
+          "[earlier output omitted; showing the final %d bytes]\n%s" limit
+          (Base.String.sub output ~pos:(length - limit) ~len:limit)
+    in
     Printf.sprintf "%s (%s)\n%s" failure.command exit output
 
   let prepare_patch_contract ~runtime ~patch_id ~worktree ~base_branch =
@@ -313,28 +322,50 @@ struct
         | Error (Patch_validator.Validation_failed failure) -> (
             match failure with
             | Patch_validator.Outside_scope paths ->
-                log_event runtime ~patch_id
-                  (Printf.sprintf
-                     "Patch changed files outside its declared scope: %s"
-                     (Base.String.concat ~sep:", " paths));
-                Error "changed files fall outside the patch scope"
+                let detail =
+                  Printf.sprintf
+                    "Controller validation rejected publication because these \
+                     files are outside the patch's declared scope:\n\
+                     %s\n\
+                     Revert those changes or update only files already \
+                     declared by the patch."
+                    (Base.String.concat ~sep:"\n"
+                       (Base.List.map paths ~f:(fun path -> "- " ^ path)))
+                in
+                log_event runtime ~patch_id detail;
+                Error detail
             | Patch_validator.Scope_read_failed failure ->
-                log_event runtime ~patch_id
-                  ("Could not verify patch scope: "
-                  ^ command_failure_text failure);
-                Error "could not read the patch diff"
+                let detail =
+                  "Controller validation could not read the patch diff. Fix \
+                   the underlying repository error, then retry:\n"
+                  ^ command_failure_text failure
+                in
+                log_event runtime ~patch_id detail;
+                Error detail
             | Patch_validator.Check_failed (check, failure) ->
-                log_event runtime ~patch_id
-                  (Printf.sprintf "Required check failed: %s\n%s"
-                     check.Check.run
-                     (command_failure_text failure));
-                Error
-                  (Printf.sprintf "required check failed: %s" check.Check.run))
+                let detail =
+                  Printf.sprintf
+                    "Controller validation rejected publication because a \
+                     required check failed.\n\n\
+                     Command: %s\n\
+                     Proves: %s\n\n\
+                     Failure output:\n\
+                     %s\n\n\
+                     Correct the implementation until this exact check passes. \
+                     Do not weaken or remove the check."
+                    check.Check.run check.Check.proves
+                    (command_failure_text failure)
+                in
+                log_event runtime ~patch_id detail;
+                Error detail)
         | Error (Patch_validator.Git_failed failure) ->
-            log_event runtime ~patch_id
-              ("Controller could not record worker changes: "
-              ^ command_failure_text failure);
-            Error "controller could not record worker changes")
+            let detail =
+              "Controller could not record the validated worker changes. Fix \
+               the repository error, then retry:\n"
+              ^ command_failure_text failure
+            in
+            log_event runtime ~patch_id detail;
+            Error detail)
     | None ->
         log_event runtime ~patch_id
           "Publication rejected: patch has no declared contract";
@@ -807,14 +838,25 @@ struct
                                             (Stdlib.Filename.concat _wt_path
                                                "AGENTS.md")
                                         in
+                                        let direct_messages =
+                                          if
+                                            Base.List.is_empty
+                                              agent
+                                                .Patch_agent
+                                                 .inflight_human_messages
+                                          then []
+                                          else Orchestrator.message_payload msg
+                                        in
                                         let prompt =
-                                          Prompt.render_patch_prompt
-                                            ~project_name ?agents_md
-                                            ?pr_number:
-                                              (Patch_agent.pr_number agent)
-                                            patch gameplan
-                                            ~base_branch:
-                                              (Branch.to_string base_branch)
+                                          Prompt.render_direct_messages_prompt
+                                            direct_messages
+                                          ^ Prompt.render_patch_prompt
+                                              ~project_name ?agents_md
+                                              ?pr_number:
+                                                (Patch_agent.pr_number agent)
+                                              patch gameplan
+                                              ~base_branch:
+                                                (Branch.to_string base_branch)
                                         in
                                         (* PR detection from stream text is a hint
                                      only — always confirmed via the GitHub

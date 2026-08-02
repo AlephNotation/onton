@@ -658,6 +658,7 @@ let () =
             Patch_agent.is_busy a
         | Orchestrator.Session_process_error _ | Orchestrator.Session_no_resume
         | Orchestrator.Session_failed _ | Orchestrator.Session_give_up
+        | Orchestrator.Session_validation_failed _
         | Orchestrator.Session_worktree_missing
         | Orchestrator.Session_context_exhausted ->
             not (Patch_agent.is_busy a))

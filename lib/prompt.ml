@@ -341,6 +341,27 @@ let render_patch_prompt ~(project_name : string) ?agents_md ?pr_number
       ~base_branch
   ^ render_turn_layer_start ~project_name
 
+let render_direct_messages_prompt (messages : string list) =
+  match messages with
+  | [] -> ""
+  | [ message ] ->
+      Printf.sprintf
+        "# Message for this turn\n\n\
+         %s\n\n\
+         Address this message before continuing the patch.\n\n"
+        message
+  | messages ->
+      let messages =
+        List.mapi messages ~f:(fun i message ->
+            Printf.sprintf "%d. %s" (i + 1) message)
+        |> String.concat ~sep:"\n"
+      in
+      Printf.sprintf
+        "# Messages for this turn\n\n\
+         %s\n\n\
+         Address every message before continuing the patch.\n\n"
+        messages
+
 let render_check_suffix (patch : Patch.t) : string =
   "\n\n## Required Checks\n\n" ^ format_checks patch.checks ^ "\n"
 
