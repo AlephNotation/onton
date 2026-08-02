@@ -121,6 +121,10 @@ val render_patch_prompt :
     built-in templates; project-level overrides are user-controlled and may not
     preserve this structure. *)
 
+val render_direct_messages_prompt : string list -> string
+(** Render durable controller or human messages that must be consumed by a
+    pre-PR Start turn. Empty input renders an empty prefix. *)
+
 val render_pr_description : project_name:string -> Patch.t -> string
 
 (** Pure: choose between the agent-authored PR body artifact and a deterministic

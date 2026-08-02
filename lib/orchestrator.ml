@@ -26,6 +26,7 @@ type patch_agent_message = {
   patch_id : Patch_id.t;
   generation : int;
   action : action;
+  payload : string list;
   payload_hash : string;
   status : message_status;
 }
@@ -296,6 +297,7 @@ let all_messages t = Map.data t.outbox
 let message_id (msg : patch_agent_message) = msg.message_id
 let message_patch_id (msg : patch_agent_message) = msg.patch_id
 let message_action (msg : patch_agent_message) = msg.action
+let message_payload (msg : patch_agent_message) = msg.payload
 let message_status (msg : patch_agent_message) = msg.status
 
 (** {2 Durable GitHub command outbox} *)
@@ -974,6 +976,7 @@ type session_result =
   | Session_process_error of { is_fresh : bool; detail : string option }
   | Session_no_resume
   | Session_failed of { is_fresh : bool; detail : string option }
+  | Session_validation_failed of { detail : string }
   | Session_give_up
   | Session_worktree_missing
   | Session_push_failed of Push_reject_classify.rejection option
@@ -1047,6 +1050,9 @@ let apply_session_result t patch_id result =
   match result with
   | Session_ok ->
       let t = clear_session_fallback t patch_id in
+      let t =
+        update_agent t patch_id ~f:Patch_agent.reset_validation_failure_count
+      in
       (* A healthy session that pushed commits clears the no-commits and
          push-failure counters. *)
       let t =
@@ -1075,6 +1081,18 @@ let apply_session_result t patch_id result =
   | Session_failed { is_fresh; _ } ->
       let t = on_session_failure t patch_id ~is_fresh in
       complete_failed t patch_id
+  | Session_validation_failed { detail } ->
+      let t = clear_session_fallback t patch_id in
+      let t =
+        update_agent t patch_id
+          ~f:Patch_agent.increment_validation_failure_count
+      in
+      let t =
+        update_agent t patch_id ~f:(fun agent ->
+            Patch_agent.add_human_message agent detail)
+      in
+      let t = enqueue t patch_id Operation_kind.Human in
+      complete t patch_id
   | Session_give_up ->
       let t = set_session_failed t patch_id in
       let t = set_tried_fresh t patch_id in
@@ -1108,6 +1126,9 @@ let apply_session_result t patch_id result =
          directly, since retrying cannot resolve those under the current
          credentials/branch-protection state. *)
       let t = clear_session_fallback t patch_id in
+      let t =
+        update_agent t patch_id ~f:Patch_agent.reset_validation_failure_count
+      in
       match reason with
       | Some r when Push_reject_classify.is_permanent r ->
           (* Two-step [set_tried_fresh] reaches [Given_up] from any starting
@@ -1125,6 +1146,9 @@ let apply_session_result t patch_id result =
          inflight human messages were delivered.  Completion is handled by
          [apply_respond_outcome] via [Respond_retry_push]. *)
       let t = clear_session_fallback t patch_id in
+      let t =
+        update_agent t patch_id ~f:Patch_agent.reset_validation_failure_count
+      in
       update_agent t patch_id ~f:Patch_agent.increment_no_commits_push_count
   | Session_context_exhausted ->
       (* The session overflowed the model's context window. [on_context_exhausted]
@@ -1161,8 +1185,9 @@ let combine_session_and_push ~branch_changed ~(session : session_result)
               Session_worktree_missing
               (* unreachable — outer match catches this *))
       | Session_process_error _ | Session_no_resume | Session_failed _
-      | Session_give_up | Session_worktree_missing | Session_push_failed _
-      | Session_no_commits | Session_context_exhausted ->
+      | Session_validation_failed _ | Session_give_up | Session_worktree_missing
+      | Session_push_failed _ | Session_no_commits | Session_context_exhausted
+        ->
           session)
 
 type start_outcome = Start_ok | Start_failed | Start_stale

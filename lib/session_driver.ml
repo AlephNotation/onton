@@ -313,20 +313,9 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                     let mark_backend_accepted_turn () =
                       if not !backend_accepted_turn then (
                         backend_accepted_turn := true;
-                        match kind with
-                        | Some Types.Operation_kind.Human ->
-                            Runtime.update_orchestrator runtime (fun orch ->
-                                Orchestrator
-                                .mark_inflight_human_messages_delivered orch
-                                  patch_id)
-                        | Some Types.Operation_kind.Ci
-                        | Some Types.Operation_kind.Review_comments
-                        | Some Types.Operation_kind.Findings
-                        | Some Types.Operation_kind.Pr_body
-                        | Some Types.Operation_kind.Merge_conflict
-                        | Some Types.Operation_kind.Rebase
-                        | None ->
-                            ())
+                        Runtime.update_orchestrator runtime (fun orch ->
+                            Orchestrator.mark_inflight_human_messages_delivered
+                              orch patch_id))
                     in
                     let on_event (event : Types.Stream_event.t) =
                       let () =
@@ -884,9 +873,14 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                     in
                     let final_session_result =
                       match publication with
-                      | `Rejected reason ->
-                          Orchestrator.Session_failed
-                            { is_fresh; detail = Some reason }
+                      | `Rejected reason -> (
+                          match kind with
+                          | None ->
+                              Orchestrator.Session_validation_failed
+                                { detail = reason }
+                          | Some _ ->
+                              Orchestrator.Session_failed
+                                { is_fresh; detail = Some reason })
                       | `Pushed push_outcome -> (
                           let combined =
                             Orchestrator.combine_session_and_push
@@ -902,6 +896,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                           | Orchestrator.Session_process_error _
                           | Orchestrator.Session_no_resume
                           | Orchestrator.Session_failed _
+                          | Orchestrator.Session_validation_failed _
                           | Orchestrator.Session_give_up
                           | Orchestrator.Session_worktree_missing
                           | Orchestrator.Session_push_failed _
@@ -921,6 +916,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                       | Orchestrator.Session_process_error _
                       | Orchestrator.Session_no_resume
                       | Orchestrator.Session_failed _
+                      | Orchestrator.Session_validation_failed _
                       | Orchestrator.Session_give_up
                       | Orchestrator.Session_worktree_missing
                       | Orchestrator.Session_context_exhausted ->

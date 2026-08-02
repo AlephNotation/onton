@@ -69,6 +69,10 @@ type t = private {
           construction (and re-stamped on snapshot restore via
           {!Orchestrator.set_max_ci_failures}) from the [--max-ci-failures] flag
           / stored project config; defaults to {!default_max_ci_failures}. *)
+  validation_failure_count : int;
+      (** Consecutive controller validation failures before PR publication. At
+          three failures the patch fails closed even while its last feedback is
+          still queued. A human message resets the counter. *)
   human_messages : string list;
   inflight_human_messages : string list;
   ci_checks : Types.Ci_check.t list;
@@ -225,6 +229,7 @@ val intervention_reason_of_fields :
   human_in_queue:bool ->
   ci_failure_count:int ->
   max_ci_failures:int ->
+  validation_failure_count:int ->
   start_attempts_without_pr:int ->
   conflict_noop_count:int ->
   no_commits_push_count:int ->
@@ -256,6 +261,7 @@ val needs_intervention_of_fields :
   human_in_queue:bool ->
   ci_failure_count:int ->
   max_ci_failures:int ->
+  validation_failure_count:int ->
   start_attempts_without_pr:int ->
   conflict_noop_count:int ->
   no_commits_push_count:int ->
@@ -273,7 +279,9 @@ val start : t -> base_branch:Types.Branch.t -> t
 (** [PatchCtx ~> Start] — begin work on a patch. Preconditions (checked):
     [~has_pr], [~busy]. Caller must verify [in_gameplan] and [deps_satisfied]
     externally. Postconditions: [has_session], [busy], [satisfies],
-    [base_branch = Some base_branch]. *)
+    [base_branch = Some base_branch]. Pending direct messages move atomically to
+    [inflight_human_messages], and a queued [Human] operation is consumed by the
+    Start turn so pre-PR feedback does not require a parallel operation. *)
 
 val rebase : t -> base_branch:Types.Branch.t -> t
 (** [PatchCtx ~> Rebase] — orchestrator-executed rebase. Preconditions:
@@ -566,9 +574,12 @@ val set_llm_session_id : t -> string option -> t
     and when the session is known dead (no-resume, give-up). *)
 
 val mark_inflight_human_messages_delivered : t -> t
-(** Clear [inflight_human_messages] for an active Human response once the
-    backend has emitted evidence that it accepted the turn. Does not complete
-    the session or change fallback state. No-op for non-Human operations. *)
+(** Clear [inflight_human_messages] once the backend has emitted evidence that
+    it accepted the turn. Start and Human turns can both carry direct messages.
+    Does not complete the session or change fallback state. *)
+
+val increment_validation_failure_count : t -> t
+val reset_validation_failure_count : t -> t
 
 val set_automerge_enabled : t -> bool -> t
 (** Enable or disable automerge for this patch. When the value actually changes,
@@ -649,6 +660,7 @@ val restore :
   notified_base_branch:Types.Branch.t option ->
   ci_failure_count:int ->
   ?max_ci_failures:int ->
+  ?validation_failure_count:int ->
   human_messages:string list ->
   inflight_human_messages:string list ->
   ci_checks:Types.Ci_check.t list ->

@@ -62,6 +62,25 @@ let replace_field name value = function
             not (String.equal field name)))
   | json -> json
 
+let rec remove_outbox_message_field name = function
+  | `Assoc fields ->
+      `Assoc
+        (List.map fields ~f:(fun (field, value) ->
+             if String.equal field "outbox" then
+               let outbox =
+                 match value with
+                 | `Assoc messages ->
+                     `Assoc
+                       (List.map messages ~f:(fun (id, message) ->
+                            (id, remove_field name message)))
+                 | other -> other
+               in
+               (field, outbox)
+             else if String.equal field "orchestrator" then
+               (field, remove_outbox_message_field name value)
+             else (field, value)))
+  | json -> json
+
 let snapshot_roundtrip =
   QCheck2.Test.make ~name:"snapshot JSON round-trip is identity" ~count:300
     gen_snapshot (fun snapshot ->
@@ -189,9 +208,15 @@ let outbox_survives_restart =
         Onton.Orchestrator.create ~patches:[ patch ]
           ~main_branch:(Branch.of_string "main")
       in
+      let direct_message = "Keep the public API stable." in
       let orchestrator =
-        Onton.Patch_controller.reconcile_all orchestrator
+        Onton.Orchestrator.send_human_message orchestrator patch.id
+          direct_message
+      in
+      let orchestrator =
+        Onton.Patch_controller.plan_tick_messages orchestrator
           ~project_name:gameplan.project_name ~gameplan
+        |> fst
       in
       let snapshot =
         {
@@ -206,10 +231,98 @@ let outbox_survives_restart =
         |> Onton.Persistence.snapshot_of_yojson
       with
       | Error _ -> false
-      | Ok restored ->
+      | Ok restored -> (
+          let runnable =
+            Onton.Orchestrator.runnable_messages restored.orchestrator
+          in
           List.equal Onton.Orchestrator.equal_patch_agent_message
             (Onton.Orchestrator.runnable_messages orchestrator)
-            (Onton.Orchestrator.runnable_messages restored.orchestrator))
+            runnable
+          &&
+          match runnable with
+          | [ message ] ->
+              List.equal String.equal
+                (Onton.Orchestrator.message_payload message)
+                [ direct_message ]
+          | _ -> false))
+
+let validation_counter_roundtrip_and_legacy_default =
+  QCheck2.Test.make
+    ~name:"validation failure count persists and defaults to zero for v7 state"
+    QCheck2.Gen.unit (fun () ->
+      let agent =
+        Onton_core.Patch_agent.create
+          ~branch:(Branch.of_string "onton/durable")
+          (Patch_id.of_string "durable")
+        |> Onton_core.Patch_agent.increment_validation_failure_count
+        |> Onton_core.Patch_agent.increment_validation_failure_count
+      in
+      let json = Onton.Persistence.patch_agent_to_yojson agent in
+      let persisted =
+        match Onton.Persistence.patch_agent_of_yojson json with
+        | Ok restored -> restored.validation_failure_count = 2
+        | Error _ -> false
+      in
+      let legacy =
+        match
+          Onton.Persistence.patch_agent_of_yojson
+            (remove_field "validation_failure_count" json)
+        with
+        | Ok restored -> restored.validation_failure_count = 0
+        | Error _ -> false
+      in
+      persisted && legacy)
+
+let legacy_outbox_payload_defaults_empty =
+  QCheck2.Test.make ~name:"v7 outbox messages without payload restore empty"
+    QCheck2.Gen.unit (fun () ->
+      let patch =
+        {
+          Patch.id = Patch_id.of_string "legacy-payload";
+          branch = Branch.of_string "onton/legacy-payload";
+          goal = "restore old outbox";
+          dependencies = [];
+          files = [];
+          checks = [];
+        }
+      in
+      let gameplan =
+        {
+          Gameplan.project_name = "legacy";
+          repo_owner = "owner";
+          repo_name = "repo";
+          patches = [ patch ];
+        }
+      in
+      let orchestrator =
+        Onton.Orchestrator.create ~patches:[ patch ]
+          ~main_branch:(Branch.of_string "main")
+        |> fun orch ->
+        Onton.Orchestrator.send_human_message orch patch.id "new payload"
+        |> fun orch ->
+        Onton.Patch_controller.plan_tick_messages orch
+          ~project_name:gameplan.project_name ~gameplan
+        |> fst
+      in
+      let snapshot =
+        {
+          Onton.Runtime.orchestrator;
+          activity_log = Onton_core.Activity_log.empty;
+          gameplan;
+          transcripts = Hashtbl.create (module Patch_id);
+        }
+      in
+      let legacy_json =
+        Onton.Persistence.snapshot_to_yojson snapshot
+        |> remove_outbox_message_field "payload"
+      in
+      match Onton.Persistence.snapshot_of_yojson legacy_json with
+      | Error _ -> false
+      | Ok restored -> (
+          match Onton.Orchestrator.all_messages restored.orchestrator with
+          | [ message ] ->
+              List.is_empty (Onton.Orchestrator.message_payload message)
+          | _ -> false))
 
 let () =
   let exit_code =
@@ -223,6 +336,8 @@ let () =
         strict_agent_requires_identity_fields;
         current_version_is_required;
         outbox_survives_restart;
+        validation_counter_roundtrip_and_legacy_default;
+        legacy_outbox_payload_defaults_empty;
       ]
   in
   if exit_code <> 0 then Stdlib.exit exit_code

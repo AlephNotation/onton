@@ -31,6 +31,7 @@ type patch_agent_message = {
   patch_id : Patch_id.t;
   generation : int;
   action : action;
+  payload : string list;
   payload_hash : string;
   status : message_status;
 }
@@ -64,6 +65,7 @@ val runnable_messages : t -> patch_agent_message list
 val message_id : patch_agent_message -> Message_id.t
 val message_patch_id : patch_agent_message -> Patch_id.t
 val message_action : patch_agent_message -> action
+val message_payload : patch_agent_message -> string list
 val message_status : patch_agent_message -> message_status
 
 (** {2 Durable GitHub command outbox} *)
@@ -223,6 +225,7 @@ type session_result =
   | Session_process_error of { is_fresh : bool; detail : string option }
   | Session_no_resume
   | Session_failed of { is_fresh : bool; detail : string option }
+  | Session_validation_failed of { detail : string }
   | Session_give_up
   | Session_worktree_missing
   | Session_push_failed of Push_reject_classify.rejection option
@@ -241,6 +244,9 @@ val apply_session_result : t -> Patch_id.t -> session_result -> t
     [Session_ok] -> clear_session_fallback. [Session_process_error] ->
     on_session_failure + on_pre_session_failure + complete_failed.
     [Session_failed] -> on_session_failure + complete_failed.
+    [Session_validation_failed] -> preserve the healthy backend session, queue
+    its actionable detail as a direct message, increment the bounded validation
+    counter, and complete the current Start for ordinary replay.
     [Session_no_resume] -> on_session_failure (not fresh) + clear llm_session_id
     \+ complete_failed. [Session_give_up] -> set_session_failed +
     set_tried_fresh + clear llm_session_id + complete_failed.

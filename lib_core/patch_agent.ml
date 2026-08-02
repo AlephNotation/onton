@@ -55,6 +55,7 @@ type t = {
   notified_base_branch : Branch.t option;
   ci_failure_count : int;
   max_ci_failures : int;
+  validation_failure_count : int;
   human_messages : string list;
   inflight_human_messages : string list;
   ci_checks : Ci_check.t list;
@@ -214,24 +215,23 @@ let default_max_ci_failures = 3
    event log so operators can grep for "why is this patch stuck?" by
    reason. *)
 let intervention_reason_of_fields ~merged ~has_pr ~session_given_up
-    ~human_in_queue ~ci_failure_count ~max_ci_failures
+    ~human_in_queue ~ci_failure_count ~max_ci_failures ~validation_failure_count
     ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
     ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
     ~pr_body_artifact_miss_count ~review_unresolved_cycle_count =
   if merged then None
   else if session_given_up then Some "session_fallback=given_up"
-    (* The Human exemption lets a newly-arrived human message be delivered
+    (* The Human exemption below lets a newly-arrived human message be delivered
        even to an agent with a high ci_failure_count or other failure state.
-       However, the exemption does NOT apply when session_fallback = Given_up:
-       a Given_up agent cannot start any session, so the delivery attempt
-       immediately fails at the Give_up check and complete_failed re-enqueues
-       Human — creating an infinite loop. Override the exemption so the
-       reconciler stops scheduling actions and the agent surfaces for
-       manual intervention.
+       It does not apply to terminal session fallback or the validation cap.
+       A Given_up agent cannot start any session, while more validation retries
+       would repeat a controller-rejected publication. In both cases the
+       reconciler must stop scheduling and surface the patch for intervention.
 
        [merged] is terminal — a merged agent never needs intervention, so
        short-circuit on it to keep the predicate self-consistent even for
        callers that don't pre-filter by [merged]. *)
+  else if validation_failure_count >= 3 then Some "validation_failure_count>=3"
   else if human_in_queue then None
   else if ci_failure_count >= max_ci_failures then
     Some (Printf.sprintf "ci_failure_count>=%d" max_ci_failures)
@@ -255,6 +255,7 @@ let intervention_reason t =
       ~human_in_queue:
         (List.mem t.queue Operation_kind.Human ~equal:Operation_kind.equal)
       ~ci_failure_count:t.ci_failure_count ~max_ci_failures:t.max_ci_failures
+      ~validation_failure_count:t.validation_failure_count
       ~start_attempts_without_pr:t.start_attempts_without_pr
       ~conflict_noop_count:t.conflict_noop_count
       ~no_commits_push_count:t.no_commits_push_count
@@ -280,16 +281,17 @@ let intervention_reason t =
 let needs_intervention t = Option.is_some (intervention_reason t)
 
 let needs_intervention_of_fields ~merged ~has_pr ~session_given_up
-    ~human_in_queue ~ci_failure_count ~max_ci_failures
+    ~human_in_queue ~ci_failure_count ~max_ci_failures ~validation_failure_count
     ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
     ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
     ~pr_body_artifact_miss_count ~review_unresolved_cycle_count =
   Option.is_some
     (intervention_reason_of_fields ~merged ~has_pr ~session_given_up
        ~human_in_queue ~ci_failure_count ~max_ci_failures
-       ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
-       ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
-       ~pr_body_artifact_miss_count ~review_unresolved_cycle_count)
+       ~validation_failure_count ~start_attempts_without_pr ~conflict_noop_count
+       ~no_commits_push_count ~context_exhaustion_count ~push_failure_count
+       ~rebase_failure_count ~pr_body_artifact_miss_count
+       ~review_unresolved_cycle_count)
 
 let create ~branch ?(max_ci_failures = default_max_ci_failures) patch_id =
   {
@@ -307,6 +309,7 @@ let create ~branch ?(max_ci_failures = default_max_ci_failures) patch_id =
     notified_base_branch = None;
     ci_failure_count = 0;
     max_ci_failures;
+    validation_failure_count = 0;
     human_messages = [];
     inflight_human_messages = [];
     ci_checks = [];
@@ -539,6 +542,11 @@ let increment_ci_failure_count t =
 
 let reset_ci_failure_count t = { t with ci_failure_count = 0 }
 
+let increment_validation_failure_count t =
+  { t with validation_failure_count = t.validation_failure_count + 1 }
+
+let reset_validation_failure_count t = { t with validation_failure_count = 0 }
+
 (* Config stamp, not a state transition: deliberately does not bump
    [generation], so restoring a snapshot under a different --max-ci-failures
    does not invalidate in-flight outbox messages. *)
@@ -578,10 +586,7 @@ let set_llm_session_id t resume_id =
       { t with session = Started { session with resume_id } }
 
 let mark_inflight_human_messages_delivered t =
-  if
-    Option.equal Operation_kind.equal (current_op t) (Some Operation_kind.Human)
-  then { t with inflight_human_messages = [] }
-  else t
+  { t with inflight_human_messages = [] }
 
 let set_automerge_enabled t v =
   match (t.automerge, v) with
@@ -625,10 +630,11 @@ let reset_automerge_failure_count t =
       { t with automerge = Enabled { state with failure_count = 0 } }
 
 let resume_current_message t ~op =
+  let message_id = current_message_id t in
   {
     t with
     session = start_session t.session;
-    activity = Active { operation = op; phase = Queued; message_id = None };
+    activity = Active { operation = op; phase = Queued; message_id };
   }
 
 let mark_running t =
@@ -645,6 +651,7 @@ let reset_intervention_state t =
       | Not_started -> Not_started
       | Started session -> Started { session with fallback = Fresh_available });
     ci_failure_count = 0;
+    validation_failure_count = 0;
     start_attempts_without_pr = 0;
     conflict_noop_count = 0;
     no_commits_push_count = 0;
@@ -674,11 +681,11 @@ let reset_busy t =
 let restore ~patch_id ~branch ~pr_status ~session ~activity ~merged ~queue
     ~satisfies ~changed ~has_conflict ~base_branch ~notified_base_branch
     ~ci_failure_count ?(max_ci_failures = default_max_ci_failures)
-    ~human_messages ~inflight_human_messages ~ci_checks ~merge_ready
-    ?(head_oid = None) ?(review_decision = None) ?(unresolved_comment_count = 0)
-    ~mergeability_unknown ~merge_queue_required ~merge_queue_entry
-    ~merge_commit_sha ~base_contains_merged_siblings ~is_draft
-    ~pr_body_delivered ~pr_body_artifact_miss_count
+    ?(validation_failure_count = 0) ~human_messages ~inflight_human_messages
+    ~ci_checks ~merge_ready ?(head_oid = None) ?(review_decision = None)
+    ?(unresolved_comment_count = 0) ~mergeability_unknown ~merge_queue_required
+    ~merge_queue_entry ~merge_commit_sha ~base_contains_merged_siblings
+    ~is_draft ~pr_body_delivered ~pr_body_artifact_miss_count
     ?(review_unresolved_cycle_count = 0) ~start_attempts_without_pr
     ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
     ~push_failure_count ~rebase_failure_count ~branch_rebased_onto
@@ -700,6 +707,7 @@ let restore ~patch_id ~branch ~pr_status ~session ~activity ~merged ~queue
     notified_base_branch;
     ci_failure_count;
     max_ci_failures;
+    validation_failure_count;
     human_messages;
     inflight_human_messages;
     ci_checks;
@@ -789,10 +797,17 @@ let clear_pr t =
 let start t ~base_branch =
   if has_pr t then invalid_arg "Patch_agent.start: patch already has a PR";
   if is_busy t then invalid_arg "Patch_agent.start: patch is already busy";
+  let queue =
+    List.filter t.queue ~f:(fun operation ->
+        not (Operation_kind.equal operation Operation_kind.Human))
+  in
   {
     t with
     session = start_session t.session;
     activity = Active { operation = None; phase = Queued; message_id = None };
+    queue;
+    human_messages = [];
+    inflight_human_messages = t.human_messages;
     satisfies = true;
     base_branch = Some base_branch;
     notified_base_branch = Some base_branch;

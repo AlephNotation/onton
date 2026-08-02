@@ -111,6 +111,12 @@ let int_member key json =
   | Some (`Int n) -> n
   | _ -> raise (Decode_error (Printf.sprintf "%s: expected an int" key))
 
+let int_member_or ~default key json =
+  match Json.field key json with
+  | None -> default
+  | Some (`Int n) -> n
+  | Some _ -> raise (Decode_error (Printf.sprintf "%s: expected an int" key))
+
 let bool_member key json =
   match Json.field key json with
   | Some (`Bool b) -> b
@@ -159,6 +165,15 @@ let string_list_member key json =
   List.map (list_member key json) ~f:(function
     | `String value -> value
     | _ -> raise (Decode_error (Printf.sprintf "%s: expected strings" key)))
+
+let string_list_member_or ~default key json =
+  match Json.field key json with
+  | None -> default
+  | Some (`List values) ->
+      List.map values ~f:(function
+        | `String value -> value
+        | _ -> raise (Decode_error (Printf.sprintf "%s: expected strings" key)))
+  | Some _ -> raise (Decode_error (Printf.sprintf "%s: expected a list" key))
 
 let int_list_member key json =
   List.map (list_member key json) ~f:(function
@@ -349,6 +364,7 @@ let patch_agent_to_yojson (a : Patch_agent.t) =
         | Some b -> Branch.yojson_of_t b );
       ("ci_failure_count", `Int a.ci_failure_count);
       ("max_ci_failures", `Int a.max_ci_failures);
+      ("validation_failure_count", `Int a.validation_failure_count);
       ( "human_messages",
         `List (List.map a.human_messages ~f:(fun s -> `String s)) );
       ( "inflight_human_messages",
@@ -424,6 +440,8 @@ let patch_agent_of_yojson_unsafe json =
     ~notified_base_branch:(nullable_branch "notified_base_branch")
     ~ci_failure_count:(int_member "ci_failure_count" json)
     ~max_ci_failures:(int_member "max_ci_failures" json)
+    ~validation_failure_count:
+      (int_member_or ~default:0 "validation_failure_count" json)
     ~human_messages:(string_list_member "human_messages" json)
     ~inflight_human_messages:(string_list_member "inflight_human_messages" json)
     ~ci_checks:
@@ -634,6 +652,7 @@ let orchestrator_to_yojson (o : Orchestrator.t) =
                         ("base_branch", Branch.yojson_of_t base_branch);
                       ] );
               ("payload_hash", `String msg.payload_hash);
+              ("payload", `List (List.map msg.payload ~f:(fun s -> `String s)));
               ( "status",
                 `String
                   (match msg.status with
@@ -741,6 +760,8 @@ let orchestrator_of_yojson ~gameplan json =
                        patch_id;
                        generation;
                        action;
+                       payload =
+                         string_list_member_or ~default:[] "payload" value;
                        payload_hash = string_member "payload_hash" value;
                        status;
                      }
