@@ -104,7 +104,7 @@ let () =
   assert (not (Patch_agent.is_busy (Orchestrator.agent orch pid)));
   Stdlib.print_endline "AO-1b passed"
 
-(* ========== AO-1c: validation feedback stays in the durable Start lifecycle
+(* ========== AO-1c: validation feedback stays in the durable repair lifecycle
    across acceptance, crash replay, consumption, and publication ========== *)
 
 let () =
