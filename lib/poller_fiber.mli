@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain poller-fiber *)
-
 open Types
 
 (** Minimal construction-time environment for the poller fiber. *)

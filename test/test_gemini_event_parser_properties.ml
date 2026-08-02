@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain gemini-event-parser *)
-
 open Onton_core
 
 let gemini_build_args_preserve_prompt =

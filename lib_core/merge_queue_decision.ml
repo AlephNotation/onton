@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain merge-queue-decision *)
-
 open Base
 open Types
 

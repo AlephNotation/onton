@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain prune-decision *)
-
 open Base
 open Types
 

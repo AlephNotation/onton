@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain types *)
-
 open Base
 
 module Patch_id : sig

@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain poller *)
-
 open Base
 open Onton_core.Types
 

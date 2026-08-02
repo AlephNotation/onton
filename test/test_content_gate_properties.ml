@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain content-gate *)
-
 open Onton_core
 
 let final_result =

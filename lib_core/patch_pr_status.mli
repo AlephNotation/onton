@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain patch-pr-status *)
-
 open Types
 
 (** Whether a planned patch currently has a tracked pull request. A PR that no

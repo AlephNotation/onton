@@ -1,6 +1,3 @@
-(* @archlint.module exempt
-   @archlint.exempt-reason effect-boundary *)
-
 open Base
 module Long_lived = Llm_backend_long_lived
 

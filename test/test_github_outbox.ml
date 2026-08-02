@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain orchestrator *)
-
 open Base
 open Onton_core.Types
 module Github_effect = Onton_core.Github_effect

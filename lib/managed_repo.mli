@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain managed-repo *)
-
 val ensure_managed_repo :
   ?clone_scheme:Onton_core.Github_target.url_scheme option ->
   project_name:string ->

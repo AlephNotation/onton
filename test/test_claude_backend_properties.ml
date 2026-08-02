@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain claude-backend *)
-
 open Onton
 
 (* [create] must preserve the [name] it is given on the resulting backend

@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain start-eligibility *)
-
 open Base
 open Onton_core
 

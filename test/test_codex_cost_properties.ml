@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain codex-cost *)
-
 open Base
 open Onton_core
 

@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain start-eligibility *)
-
 open Base
 
 type defer_reason =

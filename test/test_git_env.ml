@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain priority *)
-
 open Onton
 open Onton_core
 

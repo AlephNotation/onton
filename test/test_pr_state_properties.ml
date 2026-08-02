@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain pr-state *)
-
 open Onton_core
 
 let merge_ready_matches_component_predicates =

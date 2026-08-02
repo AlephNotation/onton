@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain comment-responses *)
-
 open Base
 open Types
 

@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain runner-fiber *)
-
 open Onton_core.Types
 
 module Runner_env : sig

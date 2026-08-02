@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain anchor *)
-
 open Base
 open Onton
 

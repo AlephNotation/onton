@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain opencode-event-parser *)
-
 open Onton_core
 
 let opencode_normalizes_known_tool_names =

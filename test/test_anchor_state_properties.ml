@@ -1,6 +1,3 @@
-(* @archlint.module stateTest
-   @archlint.domain anchor *)
-
 open Onton_core
 
 let valid_sha = String.make 40 'a'

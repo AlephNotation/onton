@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain orchestrator *)
-
 open Onton_core.Types
 
 let log_event runtime ?patch_id msg =

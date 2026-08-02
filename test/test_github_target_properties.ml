@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain github-target *)
-
 open Base
 open Onton_core
 

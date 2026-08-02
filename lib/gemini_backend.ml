@@ -1,6 +1,3 @@
-(* @archlint.module exempt
-   @archlint.exempt-reason effect-facade *)
-
 open Base
 
 (* Pure parser + CLI-arg builder live in [Gemini_event_parser] (lib_core/).

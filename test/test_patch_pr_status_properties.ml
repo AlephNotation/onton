@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain patch-pr-status *)
-
 open Base
 open Onton_core
 open Types

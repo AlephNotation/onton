@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain review-backend *)
-
 open Base
 
 type review_service_auth = { app_id : string; private_key_path : string }

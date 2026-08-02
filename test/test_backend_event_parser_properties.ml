@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain codex-event-parser *)
-
 open Onton_core
 
 let invalid_codex_json_is_ignored =

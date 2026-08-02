@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain worker-sandbox *)
-
 open Base
 
 type t

@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain patch-decision *)
-
 open Types
 
 (** Pure decision functions for patch agents.

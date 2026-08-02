@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain opencode-event-parser *)
-
 open Base
 
 (** Pure NDJSON event parser, tool-name normalization, and CLI-arg builder for

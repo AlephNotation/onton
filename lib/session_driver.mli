@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain session-driver *)
-
 (** Drive one backend session for one patch.
 
     [run] is the layer above [Llm_backend.run_streaming]: it owns the session

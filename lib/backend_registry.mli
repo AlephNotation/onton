@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain backend-registry *)
-
 (** Lazy cache of backend instances keyed by [(backend_name, model)]. *)
 
 type t

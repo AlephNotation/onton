@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain persistence *)
-
 (** JSON state persistence for runtime snapshots.
 
     Saves and loads [Runtime.snapshot] to/from a JSON file on disk. Used for

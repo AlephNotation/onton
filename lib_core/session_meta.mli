@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain session-meta *)
-
 open Base
 
 type t = {

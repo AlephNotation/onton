@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain content-gate *)
-
 (** One-shot gate that signals the LLM has produced resumable conversation
     content. See [content_gate.ml] for the why. *)
 

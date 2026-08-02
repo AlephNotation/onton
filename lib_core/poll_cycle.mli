@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain poll-cycle *)
-
 open Types
 
 (** Pure planning layer between the effectful per-patch poll driver and the

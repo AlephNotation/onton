@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain tui-input *)
-
 (** Pure keyboard input -> TUI command translation.
 
     Maps {!Term_key.t} values to semantic TUI commands. Contains no I/O; the

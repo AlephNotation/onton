@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain session-meta *)
-
 (** Tests for [Onton.Project_lock]: per-project advisory lock using
     [Unix.lockf]. Verifies contention, stale reclamation, release, and
     re-acquire semantics without spinning up Eio. *)

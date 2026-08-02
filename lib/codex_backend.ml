@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain codex-event-parser *)
-
 open Base
 
 (* Pure decoder + cost-tracking decision logic lives in [Codex_event_parser]

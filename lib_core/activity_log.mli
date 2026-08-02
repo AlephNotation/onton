@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain activity-log *)
-
 open Base
 
 (** Activity log for tracking patch state transitions and system events.
@@ -108,11 +105,8 @@ val trim : t -> max:int -> t
     keeping the most recent. Use periodically to bound memory in long-running
     sessions. *)
 
-val stream_kind_of_raw :
-  channel:[ `Stdout | `Stderr ] -> string -> Stream_entry.kind option
+val stream_kind_of_raw : string -> Stream_entry.kind option
 (** Decode a raw telemetry stream line into the activity-log entry kind. Returns
     [None] for lines that are not [activity_log_kind]-tagged envelopes — those
     are the raw child-process stdout/stderr lines emitted by [Llm_backend] for
-    replay diagnostics, and must not leak into the user-facing activity pane.
-    [channel] is currently unused but kept in the signature so the sink can
-    route in the future without another API churn. *)
+    replay diagnostics, and must not leak into the user-facing activity pane. *)

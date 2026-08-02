@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain reconciler *)
-
 open Base
 open Onton_core
 open Onton_test_support.Test_generators

@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain patch-validator *)
-
 open Base
 
 let outside_scope ~allowed ~changed =

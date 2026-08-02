@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain anchor-history *)
-
 open Onton_core
 
 let anchor_of n =

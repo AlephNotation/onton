@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain review-service *)
-
 open Base
 
 type severity = Must_fix | Should_fix | Note

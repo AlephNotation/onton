@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain claude-backend *)
-
 let create ~name ~model ~process_mgr ~clock ~timeout ~setsid_exec :
     Llm_backend.t =
   {
