@@ -1,6 +1,3 @@
-(* @archlint.module exempt
-   @archlint.exempt-reason effect-facade *)
-
 (** Test helpers for spawning [git] without inheriting a poisoned environment.
 
     When [dune runtest] runs inside this project's pre-commit hook, git sets

@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain tui-input *)
-
 include module type of Tui_input_decision
 
 (** Bounded input history with up/down browsing.

@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain worktree-plan *)
-
 open Base
 
 type op =

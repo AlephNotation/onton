@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain worktree-parser *)
-
 open Base
 
 (** Pure parsers for git command output and pure decision functions used by

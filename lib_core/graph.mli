@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain graph *)
-
 open Base
 
 (** Dependency graph over patches.

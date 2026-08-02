@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain merge-queue-decision *)
-
 type application = { poll_result : Poller.t; merge_queue_ejected : bool }
 [@@deriving show, eq]
 

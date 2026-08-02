@@ -1,6 +1,3 @@
-(* @archlint.module state
-   @archlint.domain orchestrator *)
-
 open Onton
 open Onton_core
 open Onton_core.Types
@@ -1132,9 +1129,9 @@ let model_arg =
            [sonnet-4-6] for claude; [gpt-5.6-sol] for codex). The literal \
            selected model applies to every patch in the run. A per-repository \
            [default.{backend,model}] block may be written to \
-           [~/.config/onton/<owner>/<repo>/config.json]. When omitted, onton \
-           does not pass --model to the underlying CLI, so the backend's own \
-           default applies.")
+           [~/.config/onton/<owner>/<repo>/config.json]. When omitted, Liquid \
+           Onton does not pass --model to the underlying CLI, so the backend's \
+           own default applies.")
 
 let repo_arg =
   let open Cmdliner in
@@ -1160,9 +1157,9 @@ let clone_scheme_arg =
     & info [ "clone-scheme" ] ~docv:"SCHEME"
         ~doc:
           "Transport for the managed clone's [origin]: [https] or [ssh]. When \
-           omitted, onton probes SSH reachability (a non-interactive [git \
-           ls-remote git@github.com:owner/repo.git] with a 5s timeout) and \
-           picks [ssh] if the probe succeeds, otherwise [https]. SSH is \
+           omitted, Liquid Onton probes SSH reachability (a non-interactive \
+           [git ls-remote git@github.com:owner/repo.git] with a 5s timeout) \
+           and picks [ssh] if the probe succeeds, otherwise [https]. SSH is \
            preferred when available because it bypasses the per-OAuth-scope \
            restrictions GitHub enforces (e.g. the [workflow] scope for \
            .github/workflows/*). The resolved scheme is persisted to \
@@ -1221,9 +1218,9 @@ let prune_arg =
         ~doc:
           "Remove every stored project whose plan patches are all terminal \
            (merged or closed). Skips projects whose lock is held by a live \
-           onton process. By default, each stored PR for a non-merged agent is \
-           reconciled with the forge first (one PR-state query per eligible \
-           PR) so out-of-band merges and closures are detected; pass \
+           Liquid Onton process. By default, each stored PR for a non-merged \
+           agent is reconciled with the forge first (one PR-state query per \
+           eligible PR) so out-of-band merges and closures are detected; pass \
            --no-refresh to skip the network step.")
 
 let no_refresh_arg =

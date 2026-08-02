@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain github *)
-
 (** GitHub forge implementation.
 
     Queries the GitHub GraphQL API for PR/world state. Satisfies {!Forge.S}.

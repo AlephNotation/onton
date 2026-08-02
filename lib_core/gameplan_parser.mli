@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain plan-parser *)
-
 open Base
 
 type t = {

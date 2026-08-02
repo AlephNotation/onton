@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain anchor-history *)
-
 (** A bounded log of {!Anchor.t} values recorded over a patch agent's lifetime,
     used by the rebase decision to fall back from a force-pushed-or-deleted
     newest anchor to an older one that is still reachable from the upstream.

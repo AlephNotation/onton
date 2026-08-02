@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain ci-log-digest *)
-
 type annotation = {
   path : string option;
   line : int option;

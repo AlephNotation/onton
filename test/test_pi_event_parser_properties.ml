@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain pi-event-parser *)
-
 open Onton_core
 
 let pi_build_args_include_session_dir =

@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain review-service *)
-
 let read_file path =
   try
     let ic = Stdlib.In_channel.open_text path in

@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain state *)
-
 open Base
 open Types
 

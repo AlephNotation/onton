@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain supervisor *)
-
 open Base
 
 exception

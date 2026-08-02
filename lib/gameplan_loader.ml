@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain plan-parser *)
-
 open Base
 
 let read_file path =

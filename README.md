@@ -487,21 +487,18 @@ outcome.
 | `codex_backend` | OpenAI Codex backend implementation |
 | `opencode_backend` | OpenCode backend implementation |
 | `pi_backend` | Pi coding agent backend implementation |
-| `claude_process` | Claude CLI session state machine (No_session -> Has_session) |
 | `claude_runner` | Claude subprocess spawning, NDJSON streaming, defensive control-char stripping, `got_events` resume-failure detection |
-| `spawn_logic` | Pure spawn/scheduling logic: which patches to run next |
 | `orchestrator` | Durable patch state plus primitive transitions, including patch-agent and GitHub command outboxes |
 | `reconciler` | Pure merge detection, rebase cascading, stale base detection, liveness enforcement |
 | `startup_reconciler` | PR discovery, worktree recovery, stale busy reset at startup |
 | `poller` | GitHub polling: comments, CI, merge conflicts, merge/approval state |
-| `state` | Pure context maps (PatchCtx, Comments) for invariant checking |
+| `state` | Pure context maps (PatchCtx, Comments) |
 | `runtime` | Mutex-protected shared snapshot across fibers (orchestrator + activity log + plan + transcripts) |
 | `activity_log` | Per-patch event, transition, and stream entry feed |
 | `event_log` | Structured event log for persistence and replay |
 | `pr_state` | Pull request state tracking and derived status |
 | `run_classification` | Classify agent run outcomes (success, failure, needs intervention) |
 | `forge` | Git forge (GitHub) abstraction |
-| `invariants` | Pure invariant checker over `State.t` — used by property tests and ad-hoc snapshot inspection (no production call site) |
 | `persistence` | JSON snapshot save/load for schema v7, including transcripts and both durable outboxes |
 | `project_store` | Project config and plan storage at `~/.local/share/onton/` |
 | `user_config` | Per-repo user configuration and hook execution from `~/.config/onton/<owner>/<repo>/` |

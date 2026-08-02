@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain orchestrator *)
-
 (* Regression test: Runtime.create with ~snapshot must not touch Eio primitives.
 
    Running this outside Eio_main.run crashes with Effect.Unhandled if anyone

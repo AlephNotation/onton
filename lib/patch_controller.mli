@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain patch-controller *)
-
 open Types
 
 type poll_log_entry = { message : string; patch_id : Patch_id.t }

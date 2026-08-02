@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain base-containment *)
-
 (** Pure decision: does a patch's resolved base branch already contain the
     squash commit of every *merged* dependency of that patch?
 

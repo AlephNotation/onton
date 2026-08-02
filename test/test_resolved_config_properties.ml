@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain resolved-config *)
-
 [@@@warning "-42"]
 
 open Onton

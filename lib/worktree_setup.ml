@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain orchestrator *)
-
 open Base
 
 module type ENV = Run_env.S

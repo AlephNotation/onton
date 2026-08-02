@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain token-scrub *)
-
 open Base
 
 let redacted = "<REDACTED>"

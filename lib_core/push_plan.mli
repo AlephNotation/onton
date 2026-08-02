@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain push-plan *)
-
 (** Pure decision: should a [git push] proceed, given the observed state of the
     worktree, the named branch, and the remote-tracking ref?
 

@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain tui-input *)
-
 open Base
 
 (** Pure keyboard input -> TUI command translation. *)

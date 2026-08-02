@@ -1,6 +1,3 @@
-(* @archlint.module state
-   @archlint.domain orchestrator *)
-
 open Types
 
 type snapshot = {

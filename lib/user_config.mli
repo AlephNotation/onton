@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain user-config *)
-
 open Base
 
 type t = { on_worktree_create : string option }

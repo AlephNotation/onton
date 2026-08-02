@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain start-point-plan *)
-
 (* Wiring test for [Worktree.create_with_io].
 
    Drives the [create] control flow — the [Sys.file_exists] short-circuit, the

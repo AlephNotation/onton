@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain prune-runner *)
-
 val run_prune :
   net:_ Eio.Net.t ->
   clock:_ Eio.Time.clock ->

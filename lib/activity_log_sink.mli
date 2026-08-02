@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain activity-log-sink *)
-
 val sink :
   main_branch:Types.Branch.t ->
   update:((Activity_log.t -> Activity_log.t) -> unit) ->

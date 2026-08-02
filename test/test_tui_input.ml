@@ -1,6 +1,3 @@
-(* @archlint.module stateTest
-   @archlint.domain tui-input *)
-
 open Onton_core
 open Tui_input
 

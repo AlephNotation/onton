@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain orchestrator *)
-
 open Base
 open Types
 
@@ -345,7 +342,7 @@ let human_intervention_reason (agent : Patch_agent.t) =
   if agent.Patch_agent.branch_blocked then
     Some
       "Branch is checked out in the repo root - switch the repo root to \
-       another branch before onton can manage this patch"
+       another branch before Liquid Onton can manage this patch"
   else
     Option.map (Patch_agent.intervention_reason agent) ~f:(fun code ->
         match code with

@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain ci-log-digest *)
-
 open Base
 
 type annotation = {

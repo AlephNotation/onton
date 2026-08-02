@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain session-meta *)
-
 open Base
 
 let patch_root ~project_dir ~patch_id =

@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain base-containment *)
-
 open Base
 open Onton_core
 

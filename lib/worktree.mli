@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain worktree *)
-
 open Base
 
 type t = private {

@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain patch-decision *)
-
 open Base
 open Onton_core.Types
 open Onton_core.Patch_agent

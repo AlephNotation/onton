@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain json *)
-
 open Base
 
 type t = {

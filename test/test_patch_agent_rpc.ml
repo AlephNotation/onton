@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain patch-agent-rpc *)
-
 open Base
 open Onton_core
 

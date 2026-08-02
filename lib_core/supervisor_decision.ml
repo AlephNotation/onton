@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain supervisor *)
-
 open Base
 
 type termination = Returned | Cancelled | Quit | Raised of string

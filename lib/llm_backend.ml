@@ -1,6 +1,3 @@
-(* @archlint.module exempt
-   @archlint.exempt-reason effect-boundary *)
-
 open Base
 
 type result = {

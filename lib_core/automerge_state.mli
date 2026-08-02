@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain automerge-state *)
-
 val merge_queue_timer_invariant : Patch_agent.t -> bool
 (** [true] when an agent is not simultaneously known to be in GitHub's merge
     queue and carrying an armed automerge deadline. Once a PR has a merge-queue

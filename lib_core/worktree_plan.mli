@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain worktree-plan *)
-
 (** Pure plans for sequences of worktree operations.
 
     Every plan is a list of {!op}. The fundamental safety invariant — enforced
@@ -42,9 +39,6 @@ type t = op list [@@deriving show, eq, sexp_of, compare]
     agent state by the runner. *)
 type anchor_event = Anchor_recorded of Anchor.t | Anchor_capture_failed
 [@@deriving show, eq, sexp_of, compare]
-
-val origin_of : Types.Branch.t -> Types.Branch.t
-(** Prepends ["origin/"] to a branch name. *)
 
 val for_rebase : new_base:Types.Branch.t -> t
 (** Plan for [Orchestrator.Rebase]: ensure the worktree, fetch fresh refs, then
