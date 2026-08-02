@@ -38,3 +38,24 @@ let () =
           | Some _ | None -> failwith "agent override did not decode strictly")
       | _ -> failwith "agent override did not decode strictly")
   | Error _ -> failwith "agent override did not decode strictly"
+
+let () =
+  let invalid_agents =
+    [
+      {|{"backend":"codex"}|};
+      {|{"model":"gpt-5"}|};
+      {|{"backend":" ","model":"gpt-5"}|};
+      {|{"backend":"codex","model":" "}|};
+      {|{"backend":"unknown","model":"gpt-5"}|};
+      {|{"backend":"codex","model":"gpt-5","extra":true}|};
+    ]
+  in
+  List.iter invalid_agents ~f:(fun agent ->
+      let json =
+        Printf.sprintf
+          {|{"project":"p","repository":"owner/repo","patches":[{"id":"a","goal":"g","dependsOn":[],"files":["a"],"checks":[{"run":"x","proves":"y"}],"agent":%s}]}|}
+          agent
+      in
+      match parse json with
+      | Error _ -> ()
+      | Ok _ -> failwith "invalid patch agent override was accepted")

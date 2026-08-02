@@ -78,6 +78,16 @@ let rec remove_outbox_message_field name = function
              else (field, value)))
   | json -> json
 
+let rec remove_agent_fields = function
+  | `Assoc fields ->
+      `Assoc
+        (List.filter fields ~f:(fun (field, _) ->
+             not (String.equal field "agent"))
+        |> List.map ~f:(fun (field, value) ->
+            (field, remove_agent_fields value)))
+  | `List values -> `List (List.map values ~f:remove_agent_fields)
+  | json -> json
+
 let snapshot_roundtrip =
   QCheck2.Test.make ~name:"snapshot JSON round-trip is identity" ~count:300
     gen_snapshot (fun snapshot ->
@@ -323,6 +333,57 @@ let legacy_outbox_payload_defaults_empty =
               List.is_empty (Onton.Orchestrator.message_payload message)
           | _ -> false))
 
+let patch_agent_override_snapshot_compatibility =
+  QCheck2.Test.make
+    ~name:"patch agent overrides round-trip and legacy snapshots default"
+    QCheck2.Gen.unit (fun () ->
+      let override : Patch.Agent.t =
+        { Patch.Agent.backend = "codex"; model = "gpt-5.6-sol" }
+      in
+      let patch : Patch.t =
+        {
+          id = Patch_id.of_string "override";
+          branch = Branch.of_string "onton/override";
+          goal = "preserve patch agent override";
+          dependencies = [];
+          files = [];
+          checks = [];
+          agent = Some override;
+        }
+      in
+      let gameplan =
+        {
+          Gameplan.project_name = "override";
+          repo_owner = "owner";
+          repo_name = "repo";
+          patches = [ patch ];
+        }
+      in
+      let snapshot =
+        {
+          Onton.Runtime.orchestrator =
+            Onton.Orchestrator.create ~patches:[ patch ]
+              ~main_branch:(Branch.of_string "main");
+          activity_log = Onton_core.Activity_log.empty;
+          gameplan;
+          transcripts = Hashtbl.create (module Patch_id);
+        }
+      in
+      let json = Onton.Persistence.snapshot_to_yojson snapshot in
+      let agent_of restored =
+        match restored.Onton.Runtime.gameplan.Gameplan.patches with
+        | [ patch ] -> patch.Patch.agent
+        | _ -> None
+      in
+      match
+        ( Onton.Persistence.snapshot_of_yojson json,
+          Onton.Persistence.snapshot_of_yojson (remove_agent_fields json) )
+      with
+      | Ok preserved, Ok legacy ->
+          Option.equal Patch.Agent.equal (agent_of preserved) (Some override)
+          && Option.is_none (agent_of legacy)
+      | Error _, _ | _, Error _ -> false)
+
 let () =
   let exit_code =
     QCheck_base_runner.run_tests ~verbose:true
@@ -337,6 +398,7 @@ let () =
         outbox_survives_restart;
         validation_counter_roundtrip_and_legacy_default;
         legacy_outbox_payload_defaults_empty;
+        patch_agent_override_snapshot_compatibility;
       ]
   in
   if exit_code <> 0 then Stdlib.exit exit_code
