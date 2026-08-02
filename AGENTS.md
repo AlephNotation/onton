@@ -1,4 +1,4 @@
-# onton — OCaml project
+# liquid-onton — OCaml project
 
 ## Build & test commands
 - `dune build` — type-check + compile with fatal warnings. Run after every edit.

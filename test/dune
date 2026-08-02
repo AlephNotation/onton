@@ -47,7 +47,7 @@
  (deps (package onton))
  (action
   (setenv ONTON_SETSID_EXEC
-   %{bin:onton-setsid-exec}
+   %{bin:lo-setsid-exec}
    (run %{test}))))
 
 (test
@@ -57,7 +57,7 @@
  (deps (package onton))
  (action
   (setenv ONTON_SETSID_EXEC
-   %{bin:onton-setsid-exec}
+   %{bin:lo-setsid-exec}
    (run %{test}))))
 
 (test
@@ -623,7 +623,7 @@
  (deps (package onton))
  (action
   (setenv ONTON_SETSID_EXEC
-   %{bin:onton-setsid-exec}
+   %{bin:lo-setsid-exec}
    (run %{test}))))
 
 (test

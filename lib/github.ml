@@ -1151,7 +1151,7 @@ let request ~net ~clock ?(timeout = default_timeout) t ~meth ~path ?(query = [])
                 ("Authorization", "Bearer " ^ t.token);
                 ("Content-Type", "application/json");
                 ("Accept", "application/vnd.github+json");
-                ("User-Agent", "onton/0.1.0");
+                ("User-Agent", "liquid-onton/0.1.0");
                 ("X-GitHub-Api-Version", "2022-11-28");
               ]
           in
@@ -1202,7 +1202,7 @@ let fetch_signed_job_log ~client ~sw ~url =
       Http.Header.of_list
         [
           ("Accept", "text/plain, application/octet-stream, */*");
-          ("User-Agent", "onton/0.1.0");
+          ("User-Agent", "liquid-onton/0.1.0");
         ]
     in
     let resp, resp_body = Cohttp_eio.Client.get client ~sw ~headers uri in
@@ -1248,7 +1248,7 @@ let fetch_job_log ~net ~clock t ~id =
               [
                 ("Authorization", "Bearer " ^ t.token);
                 ("Accept", "application/vnd.github+json");
-                ("User-Agent", "onton/0.1.0");
+                ("User-Agent", "liquid-onton/0.1.0");
                 ("X-GitHub-Api-Version", "2022-11-28");
               ]
           in
@@ -1360,7 +1360,7 @@ let fetch_all_contexts ~net ~clock ?timeout t ~oid :
   let rec loop ~after ~page acc =
     if page >= max_context_pages then (
       Eio.traceln
-        "onton: statusCheckRollup contexts exceeded %d pages for commit %s — \
+        "lo: statusCheckRollup contexts exceeded %d pages for commit %s — \
          using partial list"
         max_context_pages oid;
       Ok (List.concat (List.rev acc)))

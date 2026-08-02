@@ -1,7 +1,7 @@
 opam-version: "2.0"
 name: "onton"
 version: "0.6.0"
-synopsis: "OCaml orchestrator for parallel Claude Code agents"
+synopsis: "Liquid Onton: a durable orchestrator for parallel coding agents"
 maintainer: ["flowglad"]
 depends: [
   "ocaml" {= "5.4.1"}

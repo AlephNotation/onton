@@ -98,7 +98,7 @@ let request ~net ~clock ~backend ~meth ~path ?body () : (string, error) Result.t
                            ("Authorization", "Bearer " ^ token);
                            ("Content-Type", "application/json");
                            ("Accept", "application/json");
-                           ("User-Agent", "onton/0.1.0");
+                           ("User-Agent", "liquid-onton/0.1.0");
                          ]
                      in
                      Eio.Switch.run @@ fun sw ->

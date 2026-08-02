@@ -9,7 +9,7 @@
 
 let () =
   if Array.length Sys.argv < 2 then (
-    prerr_endline "onton-setsid-exec: missing program to exec";
+    prerr_endline "lo-setsid-exec: missing program to exec";
     exit 2);
   (try ignore (Unix.setsid () : int)
    with Unix.Unix_error _ ->

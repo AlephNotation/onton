@@ -444,8 +444,8 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
               (match repo_root with
               | Some user_repo when not (Base.String.is_empty user_repo) ->
                   Printf.eprintf
-                    "onton: --repo %s ignored when --plan is set; using \
-                     onton-managed checkout for %s/%s\n\
+                    "lo: --repo %s ignored when --plan is set; using \
+                     liquid-onton-managed checkout for %s/%s\n\
                      %!"
                     user_repo owner repo
               | _ -> ());
@@ -464,7 +464,8 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
                   Error
                     [
                       Printf.sprintf
-                        "Could not prepare onton-managed checkout for %s/%s: %s"
+                        "Could not prepare liquid-onton-managed checkout for \
+                         %s/%s: %s"
                         owner repo msg;
                     ]
               | Ok (repo_root, scheme) ->
@@ -566,7 +567,7 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
                         || Base.String.is_empty (Base.String.strip repo)
                       then begin
                         Printf.eprintf
-                          "onton: warning: stored project %S has no GitHub \
+                          "lo: warning: stored project %S has no GitHub \
                            owner/repo; skipping managed checkout refresh\n\
                            %!"
                           proj;
@@ -587,8 +588,7 @@ let resolve_config ~project ~gameplan_path ~github_token ~backend ~model
                         | Ok (_repo_root, scheme) -> Some scheme
                         | Error msg ->
                             Printf.eprintf
-                              "onton: warning: %s (resuming with local state)\n\
-                               %!"
+                              "lo: warning: %s (resuming with local state)\n%!"
                               msg;
                             stored_url_scheme)
                     else stored_url_scheme
@@ -935,7 +935,7 @@ let run_main_loop (setup : runtime_setup) (cap : constructed_capabilities)
   in
   let log_fatal message =
     log_event setup.runtime message;
-    Printf.eprintf "onton: %s\n%!" message
+    Printf.eprintf "lo: %s\n%!" message
   in
   let guard_fiber ?(quit_is_normal = false) ?(return_is_normal = false) name f
       () =
@@ -1014,7 +1014,7 @@ let run_with_config ~no_lock ~auto_merge (config : config) gameplan
       let after = try_raise_nofile_soft ~target:required in
       if after.soft < required then begin
         Printf.eprintf
-          "onton: soft FD limit %d is below the required %d (hard cap %d).\n\
+          "lo: soft FD limit %d is below the required %d (hard cap %d).\n\
           \       Raise it with: ulimit -n %d\n\
           \       macOS system ceiling: sudo launchctl limit maxfiles <soft> \
            <hard>.\n\
@@ -1031,12 +1031,12 @@ let run_with_config ~no_lock ~auto_merge (config : config) gameplan
       match
         Project_lock.acquire ~project_dir ~on_stale:(fun stale_pid ->
             if stale_pid > 0 then
-              Printf.eprintf "onton: reclaiming stale lock from pid %d\n%!"
+              Printf.eprintf "lo: reclaiming stale lock from pid %d\n%!"
                 stale_pid)
       with
       | Ok l -> Some l
       | Error e ->
-          Printf.eprintf "onton: %s\n"
+          Printf.eprintf "lo: %s\n"
             (Format.asprintf "%a" Project_lock.pp_error e);
           Printf.eprintf
             "       pass --no-lock (or set ONTON_NO_LOCK=1) to bypass.\n%!";
@@ -1190,8 +1190,8 @@ let max_ci_failures_arg =
     & opt (some int) None
     & info [ "max-ci-failures" ] ~docv:"N"
         ~doc:
-          "Consecutive CI-failure responses per patch before onton stops \
-           enqueueing CI feedback and flags the patch for intervention \
+          "Consecutive CI-failure responses per patch before Liquid Onton \
+           stops enqueueing CI feedback and flags the patch for intervention \
            (default: 3). Persisted to the project config on first run; on \
            resume the stored value applies unless this flag is passed, in \
            which case the flag wins and is persisted."
@@ -1282,12 +1282,12 @@ let main_cmd =
       $ prune_arg $ no_refresh_arg $ auto_merge_arg $ clone_scheme_arg)
   in
   let info =
-    Cmd.info "onton" ~version:Version.s
+    Cmd.info "lo" ~version:Version.s
       ~doc:
         "Orchestrate parallel patch development with an LLM coding agent.\n\n\
          Usage:\n\
-        \  onton [PROJECT] --plan PLAN [OPTIONS]   Start a new project\n\
-        \  onton PROJECT [OPTIONS]                 Resume a saved project"
+        \  lo [PROJECT] --plan PLAN [OPTIONS]   Start a new project\n\
+        \  lo PROJECT [OPTIONS]                 Resume a saved project"
   in
   Cmd.v info term
 

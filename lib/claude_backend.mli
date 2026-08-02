@@ -13,5 +13,5 @@ val create :
     passed via [--model]; [None] (or empty) lets the Claude CLI pick its own
     default. [timeout] is the maximum session duration in seconds before the
     process is killed. [setsid_exec], when [Some path], routes the subprocess
-    through the [onton-setsid-exec] shim so it leads its own process group and
-    the whole tree can be reaped on teardown. *)
+    through the [lo-setsid-exec] shim so it leads its own process group and the
+    whole tree can be reaped on teardown. *)

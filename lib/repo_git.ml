@@ -148,9 +148,7 @@ let make ~repo_root =
       in
       if resolves () then Ok ()
       else
-        let () =
-          Printf.eprintf "onton: fetching origin to verify branch...\n%!"
-        in
+        let () = Printf.eprintf "lo: fetching origin to verify branch...\n%!" in
         match run_git_capture ~repo_root [ "fetch"; "origin"; "--quiet" ] with
         | Some { status = Unix.WEXITED 0; _ } ->
             if resolves () then Ok ()

@@ -203,7 +203,7 @@ let resolve_setsid_exec ~executable_name ~override =
     | Some path -> Ok path
     | None ->
         let installed =
-          Stdlib.Filename.concat executable_dir "onton-setsid-exec"
+          Stdlib.Filename.concat executable_dir "lo-setsid-exec"
         in
         if Stdlib.Sys.file_exists installed then Ok installed
         else Ok (Stdlib.Filename.concat executable_dir "setsid_exec/main.exe")
@@ -213,13 +213,12 @@ let resolve_setsid_exec ~executable_name ~override =
         try Ok (Unix.realpath path)
         with exn ->
           Error
-            (Printf.sprintf "cannot resolve onton-setsid-exec at %s: %s" path
+            (Printf.sprintf "cannot resolve lo-setsid-exec at %s: %s" path
                (Exn.to_string exn))
       else
         Error
           (Printf.sprintf
-             "worker isolation unavailable: onton-setsid-exec not found at %s"
-             path))
+             "worker isolation unavailable: lo-setsid-exec not found at %s" path))
 
 let read_first_line path =
   try
@@ -600,7 +599,7 @@ let prepare_spawn t ~overrides ~setsid_exec args =
   match setsid_exec with
   | None ->
       Error
-        "worker process-group isolation is unavailable: onton-setsid-exec is \
+        "worker process-group isolation is unavailable: lo-setsid-exec is \
          missing; refusing to launch a worker whose descendants cannot be \
          reaped"
   | Some path when Stdlib.Filename.is_relative path ->

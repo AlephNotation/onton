@@ -15,17 +15,17 @@
 
     Usage:
     {v
-      onton-probe-findings-api <owner> <repo> <n>
-      onton-probe-findings-api <owner> <repo> <n> --all
-      onton-probe-findings-api <owner> <repo> <n> resolve <id> <kind> [reason]
+      lo-probe-findings-api <owner> <repo> <n>
+      lo-probe-findings-api <owner> <repo> <n> --all
+      lo-probe-findings-api <owner> <repo> <n> resolve <id> <kind> [reason]
     v} *)
 
 let usage () =
   prerr_endline
     "usage:\n\
-    \  onton-probe-findings-api <owner> <repo> <pull_number> [--all]\n\
-    \  onton-probe-findings-api <owner> <repo> <pull_number> resolve <id> \
-     <kind> [reason words...]\n\n\
+    \  lo-probe-findings-api <owner> <repo> <pull_number> [--all]\n\
+    \  lo-probe-findings-api <owner> <repo> <pull_number> resolve <id> <kind> \
+     [reason words...]\n\n\
      env:\n\
     \  GITHUB_PRIVATE_KEY        PEM contents (preferred)\n\
     \  GITHUB_PRIVATE_KEY_PATH   path to PEM file (fallback)\n\
@@ -60,7 +60,7 @@ let resolve_pem_path () =
               let tmp =
                 Filename.concat
                   (Filename.get_temp_dir_name ())
-                  (Printf.sprintf "onton-probe-key-%d-%08x.pem" (Unix.getpid ())
+                  (Printf.sprintf "lo-probe-key-%d-%08x.pem" (Unix.getpid ())
                      (Random.bits ()))
               in
               match
@@ -184,7 +184,7 @@ let do_resolve ~net ~clock ~backend ~owner ~repo ~pr_number ~finding_id ~kind
     ~reason () =
   match
     Onton.Review_service_client.mark_resolved ~net ~clock ~backend ~owner ~repo
-      ~pr_number ~finding_id ~kind ~actor:"onton:probe-findings-api" ?reason ()
+      ~pr_number ~finding_id ~kind ~actor:"lo:probe-findings-api" ?reason ()
   with
   | Error err ->
       prerr_endline (Onton.Review_service_client.show_error err);

@@ -382,13 +382,13 @@ let%test "parse_findings_response_string: missing count defaults to raw length"
 
 let%test "parse_resolve_response: ok with addressed outcome" =
   let raw =
-    {|{"id":"abc","outcome":{"kind":"addressed","detectedAt":"t","actor":"onton:agent-7"}}|}
+    {|{"id":"abc","outcome":{"kind":"addressed","detectedAt":"t","actor":"lo:agent-7"}}|}
   in
   match parse_resolve_response (Yojson.Safe.from_string raw) with
   | Ok r ->
       String.equal r.id "abc"
       && equal_outcome_kind r.outcome.kind Addressed
-      && Option.equal String.equal r.outcome.actor (Some "onton:agent-7")
+      && Option.equal String.equal r.outcome.actor (Some "lo:agent-7")
   | Error _ -> false
 
 let%test "resolve_request_to_yojson: omits None fields" =

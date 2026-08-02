@@ -1148,7 +1148,7 @@ let render_help_overlay ~width ~height ~version =
   let title =
     Term.styled
       [ Term.Sgr.bold; Term.Sgr.fg_cyan ]
-      (Printf.sprintf " Keyboard Shortcuts  onton %s  %s" version dismiss)
+      (Printf.sprintf " Keyboard Shortcuts  liquid-onton %s  %s" version dismiss)
   in
   let body =
     List.concat_map sections ~f:(fun (header, keys) ->

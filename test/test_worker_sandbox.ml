@@ -76,8 +76,8 @@ let test_packaged_setsid_resolution () =
     Stdlib.Filename.temp_dir "onton-package-layout-" "" |> Unix.realpath
   in
   Stdlib.Fun.protect ~finally:(fun () -> remove_tree package_dir) @@ fun () ->
-  let executable = Stdlib.Filename.concat package_dir "onton" in
-  let helper = Stdlib.Filename.concat package_dir "onton-setsid-exec" in
+  let executable = Stdlib.Filename.concat package_dir "lo" in
+  let helper = Stdlib.Filename.concat package_dir "lo-setsid-exec" in
   write_executable executable "#!/bin/sh\nexit 0\n";
   write_executable helper "#!/bin/sh\nexit 0\n";
   assert (
@@ -90,7 +90,7 @@ let test_packaged_setsid_resolution () =
     (fun () ->
       assert (
         Result.equal String.equal String.equal
-          (Worker_sandbox.resolve_setsid_exec ~executable_name:"onton"
+          (Worker_sandbox.resolve_setsid_exec ~executable_name:"lo"
              ~override:None)
           (Ok (Unix.realpath helper))));
   assert (
