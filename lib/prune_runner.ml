@@ -273,7 +273,7 @@ let run_prune ~net ~clock ~github_token ~refresh () =
         let acquired =
           Project_lock.acquire ~project_dir ~on_stale:(fun pid ->
               Stdlib.Printf.eprintf
-                "onton prune: reclaimed stale lock for %s (PID %d)\n%!" slug pid)
+                "lo prune: reclaimed stale lock for %s (PID %d)\n%!" slug pid)
         in
         match acquired with
         | Error (Project_lock.Held_by { pid; _ }) ->

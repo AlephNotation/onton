@@ -105,5 +105,6 @@ let release t =
 let pp_error ppf = function
   | Held_by { pid; path } ->
       Stdlib.Format.fprintf ppf
-        "another onton is already running (pid %d, lock %s)" pid path
+        "another Liquid Onton process is already running (pid %d, lock %s)" pid
+        path
   | Io_error s -> Stdlib.Format.fprintf ppf "lock i/o error: %s" s

@@ -1,16 +1,22 @@
-# onton
+# liquid-onton
 
-![onton](onton.png)
+![Liquid Onton](liquid_onton.png)
 
-A small, durable orchestrator for dependency-aware coding agents.
+> Solid Onton got the upstream. Liquid Onton got the recessive commits.
 
-Onton reads a strict JSON plan, builds its dependency graph, and runs one coding
+**[Solid Onton](https://github.com/flowglad/onton)** is the original: stable,
+disciplined, and trusted with the mission. **Liquid Onton** is this fork: its
+genetically identical, dramatically aggrieved brother, determined to prove it
+is the superior orchestration project by refactoring itself. Around here, it
+answers to **`lo`**. The other four syllables are classified.
+
+Liquid Onton reads a strict JSON plan, builds its dependency graph, and runs one coding
 agent per patch in an isolated git worktree. It owns the operational loop:
 pull-request creation, CI and review follow-up, rebasing, merge policy, and
 crash recovery.
 
 The plan contains only executor inputs: an observable goal, exact file scope,
-dependencies, and commands that prove the patch works. Onton rejects unknown
+dependencies, and commands that prove the patch works. Liquid Onton rejects unknown
 fields, invalid paths, duplicate identifiers, missing dependencies, and cycles
 before it starts any agent.
 
@@ -63,23 +69,23 @@ Pick **one** of the following methods:
 ### Option A: Homebrew (macOS)
 
 ```sh
-brew tap flowglad/onton https://github.com/flowglad/onton
-brew install onton
+brew tap AlephNotation/onton https://github.com/AlephNotation/onton
+brew install liquid-onton
 ```
 
 ### Option B: GitHub Releases
 
 Download a prebuilt binary from
-[Releases](https://github.com/flowglad/onton/releases) (macOS ARM64 and
+[Releases](https://github.com/AlephNotation/onton/releases) (macOS ARM64 and
 x86_64).
 
 ### Option C: From source
 
-Only needed if you want to modify onton or are on a platform without prebuilt
+Only needed if you want to modify Liquid Onton or are on a platform without prebuilt
 binaries. Requires OCaml 5.4.1, dune 3.21, and opam:
 
 ```sh
-git clone https://github.com/flowglad/onton.git
+git clone https://github.com/AlephNotation/onton.git
 cd onton
 opam switch create . ocaml.5.4.1 --deps-only
 eval $(opam env)
@@ -89,8 +95,8 @@ dune build
 
 ## Dependencies
 
-Onton shells out to several external tools and talks to the GitHub API. All
-of these must be installed and configured before onton can run.
+Liquid Onton shells out to several external tools and talks to the GitHub API.
+All of these must be installed and configured before `lo` can run.
 
 ### Runtime dependencies
 
@@ -100,7 +106,7 @@ of these must be installed and configured before onton can run.
 | `gh` (GitHub CLI) | Controller token resolution fallback (`gh auth token`) | `brew install gh`, then `gh auth login` |
 | Coding-agent CLI | Drives the actual patches. One of: `claude` ([Claude Code](https://docs.anthropic.com/en/docs/claude-code)), `codex` ([OpenAI Codex CLI](https://github.com/openai/codex)), `opencode` ([OpenCode](https://opencode.ai)), `pi`, `gemini` ([Gemini CLI](https://github.com/google-gemini/gemini-cli)). Selected via `--backend` (default `claude`) and `--model` (see [Backend & model](#backend--model) below). Must be on `PATH` | See each tool's docs |
 
-Worker execution is currently supported only on macOS, where Onton can enforce
+Worker execution is currently supported only on macOS, where Liquid Onton can enforce
 its Seatbelt profile. Other platforms fail closed before launching a worker.
 
 ### GitHub authentication
@@ -126,11 +132,11 @@ The token used by the OCaml binary is resolved in this order (see
 2. `GITHUB_TOKEN` environment variable
 3. `gh auth token` (executed as a subprocess)
 
-If all three are empty, onton refuses to start with
+If all three are empty, Liquid Onton refuses to start with
 `--token / GITHUB_TOKEN is required`.
 
 The simplest setup is therefore: install `gh`, run `gh auth login`, and let
-onton pick up the token automatically. Confirm with `gh auth token` that a
+Liquid Onton pick up the token automatically. Confirm with `gh auth token` that a
 non-empty value is printed.
 
 #### Token scopes
@@ -172,11 +178,11 @@ configures `gh` itself. Verify with:
 
 ```sh
 gh auth status        # shows which host and scopes are active
-gh auth token         # prints the token onton will pick up
+gh auth token         # prints the token Liquid Onton will pick up
 gh pr list --limit 1  # smoke-test repo access
 ```
 
-If you'd rather keep `gh`'s token separate from onton's, set `GITHUB_TOKEN`
+If you'd rather keep `gh`'s token separate from Liquid Onton's, set `GITHUB_TOKEN`
 explicitly and `gh` will prefer that variable too — keeping both in sync.
 
 #### SSH transport
@@ -185,25 +191,25 @@ OAuth tokens have per-scope restrictions enforced by GitHub even when the
 push itself looks routine. The most common gotcha: a token without the
 `workflow` scope is refused on any push that touches `.github/workflows/*`,
 with a clear `remote: refusing to allow an OAuth App to create or update
-workflow … without 'workflow' scope` message — and onton now classifies that
+workflow … without 'workflow' scope` message — and Liquid Onton classifies that
 as `workflow_scope_missing` and routes the agent straight to
 `needs_intervention` instead of retrying.
 
 SSH authentication is not subject to those per-scope restrictions. If you
 already maintain a sibling clone of `owner/repo` under one of `$PWD/..`,
 `~/code-src/`, `~/src/`, `~/code/`, `~/dev/`, or `~/projects/` whose `origin`
-uses SSH (`git@github.com:owner/repo.git`), onton will inherit the same SSH
+uses SSH (`git@github.com:owner/repo.git`), Liquid Onton will inherit the same SSH
 transport for its managed clone — you'll see
-`onton: detected SSH sibling clone at … — cloning managed repo via SSH` at
+`lo: detected SSH sibling clone at … — cloning managed repo via SSH` at
 startup, and `config.json` will record `url_scheme: "ssh"`. With no SSH
 sibling present, the managed clone defaults to HTTPS as before. SSH pushes
-flow through your ssh-agent / `~/.ssh/config`, so onton's OAuth token does
+flow through your ssh-agent / `~/.ssh/config`, so Liquid Onton's OAuth token does
 not gate workflow changes.
 
 #### Manual git inside a worktree
 
 The per-patch worktrees under `~/worktrees/<project>/patch-<N>` are vanilla
-git checkouts; onton's `GIT_ASKPASS` injection does not apply when you run
+git checkouts; Liquid Onton's `GIT_ASKPASS` injection does not apply when you run
 git there yourself. If you ever need to fetch or push from a worktree by
 hand and your interactive shell isn't authenticated for HTTPS pushes, run
 `gh auth setup-git` once — it installs gh's credential helper into your
@@ -212,18 +218,18 @@ token.
 
 ### Coding-agent authentication
 
-Onton gives each worker fresh CLI state under
+Liquid Onton gives each worker fresh CLI state under
 `spawn-envs/<patch_id>/sandbox/<backend>/<provider>/`. Backend and provider
-changes therefore cannot expose a previous provider's cached state. Onton
+changes therefore cannot expose a previous provider's cached state. Liquid Onton
 never copies or symlinks the user's normal CLI credential stores into that
 directory. Use a provider API-key environment variable supported by the
 selected backend. For Claude Code, a long-lived OAuth token is also supported
 because scoping `CLAUDE_CONFIG_DIR` prevents macOS Keychain discovery.
-For noninteractive Codex workers, use `CODEX_API_KEY`; Onton intentionally does
+For noninteractive Codex workers, use `CODEX_API_KEY`; Liquid Onton intentionally does
 not pass `OPENAI_API_KEY` to Codex and disables Codex shell snapshots so the
 worker does not persist its credential-bearing process environment.
 
-The fix is to give onton a long-lived OAuth token to inject as
+The fix is to give Liquid Onton a long-lived OAuth token to inject as
 `CLAUDE_CODE_OAUTH_TOKEN` (precedence #5 in [Claude Code's credential
 docs](https://code.claude.com/docs/en/iam#authentication-precedence)).
 
@@ -231,7 +237,7 @@ docs](https://code.claude.com/docs/en/iam#authentication-precedence)).
 # 1. Generate a 1-year token from your existing subscription (browser OAuth).
 claude setup-token
 
-# 2. Save it where onton will pick it up. Mode 0600 — it's a credential.
+# 2. Save it where Liquid Onton will pick it up. Mode 0600 — it's a credential.
 mkdir -p ~/.config/onton
 install -m 600 /dev/null ~/.config/onton/claude-oauth-token
 cat > ~/.config/onton/claude-oauth-token
@@ -240,7 +246,7 @@ chmod 600 ~/.config/onton/claude-oauth-token
 
 Paste the token at the `cat` prompt, then press `Ctrl-D`.
 
-Onton checks `CLAUDE_CODE_OAUTH_TOKEN` in the parent env first (for users who
+Liquid Onton checks `CLAUDE_CODE_OAUTH_TOKEN` in the parent env first (for users who
 prefer to export it from their shell rc), falling back to
 `$XDG_CONFIG_HOME/onton/claude-oauth-token` (or `~/.config/onton/claude-oauth-token`).
 The selected provider credential is an unavoidable exception to environment
@@ -272,9 +278,9 @@ declared by the patch; stages only declared paths; creates the deterministic
 patch commit; and performs any rebase, push, or GitHub mutation itself.
 
 The limitations matter. `/usr/bin/sandbox-exec` and Apple's bundled
-`system.sb` are deprecated/private macOS facilities, so Onton verifies their
+`system.sb` are deprecated/private macOS facilities, so Liquid Onton verifies their
 presence and fails closed elsewhere rather than claiming portable isolation.
-Worker launch also requires Onton's `setsid` shim so the controller can reap
+Worker launch also requires Liquid Onton's `setsid` shim so the controller can reap
 the complete descendant process group; a missing shim is a hard failure.
 Seatbelt is process sandboxing, not a VM or container. It does not impose CPU,
 memory, process-count, or output-size quotas. HTTPS is restricted by port, not
@@ -288,7 +294,7 @@ provider-key exfiltration by a malicious backend binary.
 
 ### Optional: per-repo and project state directories
 
-Onton writes to two locations on disk. Neither requires setup but both are
+Liquid Onton writes to two locations on disk. Neither requires setup but both are
 worth knowing about:
 
 - `~/.local/share/onton/<project>/` — durable project state (snapshot,
@@ -296,6 +302,9 @@ worth knowing about:
 - `~/.config/onton/<owner>/<repo>/` — per-repo user configuration, including
   the `on_worktree_create` hook described below. You create this directory by
   hand if you want a hook.
+
+Those paths intentionally retain the original `onton` namespace so `lo` can
+resume projects created by Solid Onton without a state migration.
 
 ### Building from source (development only)
 
@@ -307,8 +316,8 @@ dune 3.21, and opam. `opam install . --deps-only` installs the rest
 ## Usage
 
 ```sh
-onton --plan PLAN.json [OPTIONS]          # Start a new project from a plan
-onton PROJECT [OPTIONS]                  # Resume a saved project
+lo --plan PLAN.json [OPTIONS]          # Start a new project from a plan
+lo PROJECT [OPTIONS]                  # Resume a saved project
 ```
 
 | Flag | Default | Description |
@@ -431,7 +440,7 @@ logical IDs. The runner then:
 2. executes the Claude or rebase work for that accepted message
 3. marks the message completed when the patch finishes the operation
 
-If onton crashes after acceptance but before completion, the same acknowledged
+If Liquid Onton crashes after acceptance but before completion, the same acknowledged
 message is resumed on the next tick instead of creating a new one or replaying
 the original queue-consuming transition.
 
@@ -453,7 +462,7 @@ command the runner:
 3. durably applies the result and removes the command on success, schedules its
    next retry, or retains it as `Failed`
 
-If the external mutation succeeds but the outcome write fails, onton stops that
+If the external mutation succeeds but the outcome write fails, Liquid Onton stops that
 execution path and leaves the persisted claim for restart replay. This cannot
 provide exactly-once delivery across GitHub and the local snapshot—there is no
 cross-system transaction—but it cannot silently acknowledge an unpersisted
@@ -537,15 +546,15 @@ Two flags control which agent runs the patches:
 - `--backend BACKEND` — one of `claude`, `codex`, `opencode`, `pi`, `gemini`.
   Default: `claude`.
 - `--model MODEL` — model name passed through to the backend's CLI. When
-  omitted, onton does not pass `--model` to the underlying CLI, so each
+  omitted, Liquid Onton does not pass `--model` to the underlying CLI, so each
   provider's own default applies.
 
 ```sh
-onton --backend claude --model sonnet-4-6
-onton --backend claude --model opus
-onton --backend codex --model gpt-5.6-sol
-onton --backend gemini --model gemini-2.5-pro
-onton --backend opencode --model anthropic/claude-sonnet-4-5
+lo --backend claude --model sonnet-4-6
+lo --backend claude --model opus
+lo --backend codex --model gpt-5.6-sol
+lo --backend gemini --model gemini-2.5-pro
+lo --backend opencode --model anthropic/claude-sonnet-4-5
 ```
 
 Both flags are persisted in project config and reused on resume unless
@@ -575,12 +584,12 @@ Resolution order, evaluated per field independently:
 
 One backend/model pair applies to the entire run. Both `default` fields are
 optional; pin just `backend`, just `model`, or both. Run
-`onton-check-repo-config <owner> <repo>` to verify how a `config.json`
+`lo-check-repo-config <owner> <repo>` to verify how a `config.json`
 parses.
 
 ### Supported models
 
-Onton passes `--model` through to the backend CLI verbatim, so any model the
+Liquid Onton passes `--model` through to the backend CLI verbatim, so any model the
 underlying CLI accepts will work. Use unpinned aliases (e.g. `sonnet`,
 `opus`) when you want "current best in tier"; pin a specific version when you
 need reproducibility. The names below are accurate as of July 2026 —

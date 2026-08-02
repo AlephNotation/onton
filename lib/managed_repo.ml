@@ -232,12 +232,12 @@ let resolve_clone_scheme ?(override : Github_target.url_scheme option = None)
   (match (override, scheme) with
   | None, Github_target.Ssh ->
       Stdlib.Printf.eprintf
-        "onton: SSH probe to git@github.com succeeded — cloning managed repo \
-         via SSH\n\
+        "lo: SSH probe to git@github.com succeeded — cloning managed repo via \
+         SSH\n\
          %!"
   | None, Github_target.Https ->
       Stdlib.Printf.eprintf
-        "onton: SSH probe to git@github.com unavailable — cloning managed repo \
+        "lo: SSH probe to git@github.com unavailable — cloning managed repo \
          via HTTPS\n\
          %!"
   | Some _, _ -> ());
@@ -315,7 +315,7 @@ let ensure_managed_repo ?(clone_scheme = None) ~project_name ~token ~owner ~repo
         (* Log to stderr but don't abort — the user may be offline and the
            local clone may already have everything they need. *)
         Stdlib.Printf.eprintf
-          "onton: warning: %s (continuing with existing local clone)\n%!" msg;
+          "lo: warning: %s (continuing with existing local clone)\n%!" msg;
         Ok (repo_root, existing_scheme))
   else if repo_root_exists && not repo_root_is_dir then
     Error

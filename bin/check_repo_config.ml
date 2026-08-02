@@ -1,7 +1,7 @@
 (** One-off: load and pretty-print the per-repo onton config. Useful to verify a
     [reviewBackends] block parses before kicking off a real session.
 
-    Usage: [onton-check-repo-config <owner> <repo>] *)
+    Usage: [lo-check-repo-config <owner> <repo>] *)
 
 let () =
   match Array.to_list Sys.argv |> List.tl with
@@ -36,5 +36,5 @@ let () =
                       "    WARNING: PEM file does not exist on disk\n")
             c.review_backends)
   | _ ->
-      prerr_endline "usage: onton-check-repo-config <owner> <repo>";
+      prerr_endline "usage: lo-check-repo-config <owner> <repo>";
       exit 2

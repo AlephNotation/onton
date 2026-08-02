@@ -2393,7 +2393,7 @@ struct
                                                   ~artifact_dir
                                                   ~delivered:findings
                                                   ~actor:
-                                                    (Printf.sprintf "onton:%s"
+                                                    (Printf.sprintf "lo:%s"
                                                        (Patch_id.to_string
                                                           patch_id))
                                                   ();

@@ -1,5 +1,5 @@
 (executable
  (name main)
- (public_name onton-setsid-exec)
+ (public_name lo-setsid-exec)
  (package onton)
  (libraries unix))

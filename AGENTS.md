@@ -1,4 +1,12 @@
-# onton — OCaml project
+# liquid-onton — OCaml project
+
+## Identity and commands
+
+This repository is **Liquid Onton**, the AlephNotation fork. **Solid Onton**
+means the upstream `flowglad/onton` project. Use the `lo` executable and
+`lo-setsid-exec` helper when running or documenting this fork; do not call its
+binary `onton`. The OCaml package/library names and `~/.local/share/onton` /
+`~/.config/onton` state paths intentionally remain unchanged for compatibility.
 
 ## Build & test commands
 - `dune build` — type-check + compile with fatal warnings. Run after every edit.
