@@ -243,7 +243,7 @@ val apply_session_result : t -> Patch_id.t -> session_result -> t
     [Session_failed] -> on_session_failure + complete_failed.
     [Session_validation_failed] -> preserve the healthy backend session, queue
     its actionable detail as a direct message, increment the bounded validation
-    counter, and complete the current Start for ordinary replay.
+    counter, and complete the current worker operation for ordinary replay.
     [Session_no_resume] -> on_session_failure (not fresh) + clear llm_session_id
     \+ complete_failed. [Session_give_up] -> set_session_failed +
     set_tried_fresh + clear llm_session_id + complete_failed.

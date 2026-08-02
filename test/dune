@@ -614,6 +614,11 @@
  (libraries onton onton_core onton_test_support qcheck-core))
 
 (test
+ (name test_session_validation_repair)
+ (modules test_session_validation_repair)
+ (libraries onton onton_core eio eio_main eio.unix unix))
+
+(test
  (name test_backend_smoke)
  (modules test_backend_smoke)
  (libraries onton onton_core eio eio_main qcheck-core)

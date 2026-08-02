@@ -870,14 +870,14 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                     in
                     let final_session_result =
                       match publication with
-                      | `Rejected reason -> (
-                          match kind with
-                          | None ->
-                              Orchestrator.Session_validation_failed
-                                { detail = reason }
-                          | Some _ ->
-                              Orchestrator.Session_failed
-                                { is_fresh; detail = Some reason })
+                      | `Rejected reason ->
+                          (* Validation is controller-authored repair feedback,
+                             regardless of whether this was the initial Start
+                             or a post-PR response.  Preserve the healthy LLM
+                             session and enqueue only this bounded diagnostic
+                             for the next Human turn. *)
+                          Orchestrator.Session_validation_failed
+                            { detail = reason }
                       | `Pushed push_outcome -> (
                           let combined =
                             Orchestrator.combine_session_and_push
