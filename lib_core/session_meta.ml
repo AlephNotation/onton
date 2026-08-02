@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain session-meta *)
-
 open Base
 open Ppx_yojson_conv_lib.Yojson_conv.Primitives
 

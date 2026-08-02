@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain backend-routing *)
-
 (** Selection of the single backend/model pair used by a run. *)
 
 type decision = { backend : string; model : string option }

@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain content-gate *)
-
 open Base
 
 (** One-shot gate that fires the first time the LLM has *committed* a

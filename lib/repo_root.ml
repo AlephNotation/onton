@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain worktree-parser *)
-
 open Base
 
 (** Run [git -C path rev-parse --path-format=absolute --git-common-dir] and

@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain llm-backend-long-lived *)
-
 open Base
 
 (** Long-lived LLM backend interface.

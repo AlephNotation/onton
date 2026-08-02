@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain spawn-env *)
-
 val per_patch_env : backend:string -> state_dir:string -> (string * string) list
 (** Backend config-dir overrides for a resolved worker sandbox. The backing
     directory is [<state_dir>/config], inside the selected

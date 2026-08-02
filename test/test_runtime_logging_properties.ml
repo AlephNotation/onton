@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain runtime-logging *)
-
 [@@@warning "-4"]
 
 open Onton

@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain graph *)
-
 open Base
 open Types
 

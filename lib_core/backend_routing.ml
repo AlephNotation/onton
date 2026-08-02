@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain backend-routing *)
-
 open Base
 
 type decision = { backend : string; model : string option }

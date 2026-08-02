@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain gemini-event-parser *)
-
 open Base
 
 (** Pure NDJSON event parser + CLI-arg builder for

@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain patch-validator *)
-
 open Base
 open Onton_core.Types
 

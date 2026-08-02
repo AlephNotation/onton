@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain supervisor *)
-
 (** Effectful guard for long-lived supervisor fibers. *)
 
 exception

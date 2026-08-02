@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain activity-log *)
-
 open Base
 open Ppx_yojson_conv_lib.Yojson_conv.Primitives
 
@@ -70,7 +67,7 @@ let add_event t event = { t with events = event :: t.events }
 let add_stream_entry t entry =
   { t with stream_entries = entry :: t.stream_entries }
 
-let stream_kind_of_raw ~channel:_ raw =
+let stream_kind_of_raw raw =
   match Yojson.Safe.from_string raw with
   | exception _ -> None
   | `Assoc fields -> (

@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain state *)
-
 open Onton_core
 
 let state_updates_are_composable =

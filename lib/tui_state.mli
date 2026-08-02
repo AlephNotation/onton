@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain tui-state *)
-
 open Base
 
 type t = {

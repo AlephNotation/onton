@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain automerge-state *)
-
 open Base
 
 let merge_queue_timer_invariant (agent : Patch_agent.t) =

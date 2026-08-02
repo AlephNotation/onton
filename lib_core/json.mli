@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain json *)
-
 (** Total accessors over [Yojson.Safe.t] — the sanctioned alternative to
     [Yojson.Safe.Util], whose [member]/[to_string]/[to_*] are partial (they
     raise on a type mismatch or on [`Null], invisibly to the type checker). Here

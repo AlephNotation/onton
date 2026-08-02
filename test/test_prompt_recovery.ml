@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain prompt-recovery *)
-
 open Base
 open Onton
 

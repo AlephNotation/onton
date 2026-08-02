@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain activity-log *)
-
 open Base
 open Types
 
@@ -164,8 +161,8 @@ let sink ~main_branch ~update () =
         update (fun log ->
             Activity_log.add_event log
               (Activity_log.Event.create ~timestamp ?patch_id message))
-    | Stream { patch_id; raw; channel; _ } -> (
-        match Activity_log.stream_kind_of_raw ~channel raw with
+    | Stream { patch_id; raw; _ } -> (
+        match Activity_log.stream_kind_of_raw raw with
         | None -> ()
         | Some kind ->
             let timestamp = Unix.gettimeofday () in

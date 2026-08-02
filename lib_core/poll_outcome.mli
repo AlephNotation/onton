@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain poll-outcome *)
-
 (** Per-patch terminal outcome of a single GitHub poll attempt.
 
     The effectful poll driver translates [Github.error] and the success case

@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain anchor *)
-
 (** A recorded fact: the patch agent's branch was, at some past moment, anchored
     against [base] at the resolved tip SHA [sha]. The orchestrator uses anchors
     to compute the safe [<upstream>] argument for

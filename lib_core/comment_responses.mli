@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain comment-responses *)
-
 (** Pure decision logic for the review-comment response artifacts.
 
     During a Review_comments session the agent is not asked to reply to or

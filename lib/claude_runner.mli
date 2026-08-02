@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain claude-runner *)
-
 open Base
 
 (** Claude subprocess runner.

@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain supervisor *)
-
 (** Pure lifecycle decisions for supervisor fibers. *)
 
 type termination = Returned | Cancelled | Quit | Raised of string

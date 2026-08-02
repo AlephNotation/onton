@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain llm-backend *)
-
 open Base
 
 (** Generic LLM backend interface.

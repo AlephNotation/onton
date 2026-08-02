@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain rlimit *)
-
 (** Tests for [Onton.Rlimit]: POSIX RLIMIT_NOFILE bindings.
 
     We exercise [get_nofile] and [try_raise_nofile_soft] in-process; we do not

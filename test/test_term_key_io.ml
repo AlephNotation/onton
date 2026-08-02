@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain terminal *)
-
 let with_stdin fd f =
   let saved = Unix.dup Unix.stdin in
   Fun.protect

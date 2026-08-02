@@ -1,6 +1,3 @@
-(* @archlint.module stateTest
-   @archlint.domain orchestrator *)
-
 open Base
 open Onton
 open Onton_core
@@ -9,8 +6,7 @@ open Onton_core.Types
 (** State machine command sequence properties (P1–P7).
 
     These properties exercise multi-step command sequences on the orchestrator
-    and patch agent state machines, using the Invariants module as a
-    postcondition oracle after every transition. *)
+    and patch agent state machines. *)
 
 (* -- Helpers -- *)
 
@@ -76,20 +72,12 @@ let apply_command orch patches cmd =
         Orchestrator.reset_intervention_state orch (pid_of_idx patches i)
   with Invalid_argument _ -> orch
 
-(** Check per-agent invariants mirroring [Invariants.all_checks].
-
-    The canonical [Invariants] module operates on [State.t] which is not
-    available at the orchestrator test level. These checks replicate the same
-    conditions against [Patch_agent.t] directly so they stay in sync as
-    invariants evolve. When adding a new check to [lib/invariants.ml], add the
-    corresponding agent-level check here. *)
+(** Check per-agent invariants. *)
 let check_agent_invariants (a : Patch_agent.t) =
-  (* Mirrors Invariants.check_busy_implies_has_session *)
   if Patch_agent.is_busy a && not (Patch_agent.has_session a) then
     failwith
       (Printf.sprintf "busy_implies_has_session violated for %s"
          (Patch_id.to_string a.patch_id));
-  (* Mirrors Invariants.check_ci_failure_count_non_negative *)
   if a.ci_failure_count < 0 then
     failwith
       (Printf.sprintf "ci_failure_count_non_negative violated for %s"

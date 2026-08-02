@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain patch-validator *)
-
 open Onton_core.Types
 
 type command_failure = {

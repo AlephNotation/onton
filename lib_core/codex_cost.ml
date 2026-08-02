@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain codex-cost *)
-
 open Base
 
 (** Pure cost-tracking decision logic. See [codex_cost.mli] for contract. *)

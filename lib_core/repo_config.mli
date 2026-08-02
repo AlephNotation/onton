@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain repo-config *)
-
 (** Small per-repository operator configuration. *)
 
 type t = {

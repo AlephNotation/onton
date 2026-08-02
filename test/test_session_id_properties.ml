@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain session-id *)
-
 let session_ids_are_uuid_v4_shaped =
   QCheck2.Test.make ~name:"mint returns uuid-v4 shaped strings" ~count:20
     QCheck2.Gen.unit (fun () ->

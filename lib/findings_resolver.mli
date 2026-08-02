@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain review-service *)
-
 (** Post-Findings-session resolution: read the agent's per-finding wontfix files
     and POST [resolve] verbs back to the originating review backends.
 

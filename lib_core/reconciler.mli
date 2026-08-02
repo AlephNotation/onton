@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain reconciler *)
-
 open Base
 
 (** Pure reconciliation logic.

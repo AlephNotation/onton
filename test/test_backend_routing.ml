@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain backend-routing *)
-
 open Base
 open Onton_core
 

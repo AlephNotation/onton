@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain plan-parser *)
-
 open Base
 open Onton_core
 

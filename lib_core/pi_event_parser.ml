@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain pi-event-parser *)
-
 open Base
 
 (** Pure NDJSON event parser + CLI-arg builder for [pi --mode json]. The

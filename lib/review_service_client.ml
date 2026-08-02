@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain review-service *)
-
 type error =
   | Auth_error of Jwt.error
   | Transport_error of { meth : string; url : string; msg : string }
