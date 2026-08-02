@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain orchestrator *)
-
 open Onton_core
 
 type process_capture = {

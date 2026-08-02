@@ -7,9 +7,8 @@
 # decoding should go through Onton_core.Json (or ppx_yojson_conv). This guard
 # stops new raw call sites from creeping in.
 #
-# The allowlist (scripts/yojson-util-allowlist.txt) names the files still
-# permitted to reference Yojson.Safe.Util — long-term only lib_core/json.ml; the
-# rest are pre-existing sites being migrated, each removed as it is converted.
+# The allowlist (scripts/yojson-util-allowlist.txt) names the files permitted
+# to reference Yojson.Safe.Util.
 #
 # Exit 0 = clean. Exit 1 = an unallowlisted reference, or a stale allowlist
 # entry (file gone, or no longer references the pattern — prune it).

@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain codex-cost *)
-
 (** Pure cost-tracking decision logic for the Codex backend.
 
     No I/O, no exceptions: every value-returning function in this module is

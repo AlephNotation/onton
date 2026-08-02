@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain poller *)
-
 open Base
 open Types
 

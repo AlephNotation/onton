@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain automerge-state *)
-
 open Base
 open Onton_core
 open Onton_core.Types

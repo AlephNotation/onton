@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain prompt *)
-
 open Types
 
 val substitute_variables : string -> (string * string) list -> string

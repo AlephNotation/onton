@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain comment-responses *)
-
 (** Post-Review-session comment resolution: read the agent's per-comment
     response files and deterministically reply to and then resolve each
     delivered comment that has one.

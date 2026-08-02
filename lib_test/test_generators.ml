@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain test-support *)
-
 open Base
 open Onton_core.Types
 
@@ -491,15 +488,6 @@ let gen_orchestrator_action =
           (fun pid branch -> Onton.Orchestrator.Rebase (pid, branch))
           gen_patch_id gen_branch;
       ])
-
-(* -- Invariants -- *)
-
-let gen_violation =
-  QCheck2.Gen.(
-    map2
-      (fun invariant details -> Onton_core.Invariants.{ invariant; details })
-      (string_size ~gen:(char_range 'a' 'z') (int_range 5 30))
-      (string_size ~gen:printable (int_range 5 50)))
 
 (* -- Display status / Activity log -- *)
 

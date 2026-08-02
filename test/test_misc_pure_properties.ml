@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain priority *)
-
 open Base
 open Onton
 open Onton_core
@@ -31,21 +28,6 @@ let make_stream_entry =
     (fun timestamp patch_id kind ->
       Activity_log.Stream_entry.create ~timestamp ~patch_id ~kind)
     (float_range 0.0 1e12) gen_patch_id gen_kind
-
-let state_with_patch patch_id ~busy ~has_session ~ci_failure_count =
-  State.empty
-  |> State.update_patch_ctx ~f:(fun ctx ->
-      ctx
-      |> State.Patch_ctx.set_busy ~patch_id ~value:busy
-      |> State.Patch_ctx.set_has_session ~patch_id ~value:has_session
-      |> State.Patch_ctx.set_ci_failure_count ~patch_id ~count:ci_failure_count)
-
-let add_resolved_and_pending state ~comment ~patch_id =
-  state
-  |> State.update_comments ~f:(fun comments ->
-      comments
-      |> State.Comments.set_resolved ~comment ~value:true
-      |> State.Comments.set_pending ~comment ~patch_id ~value:true)
 
 let valid_parser_json ~project_name ~patches_json =
   Printf.sprintf
@@ -230,55 +212,6 @@ let () =
         && Bool.equal (Pr_state.enqueued pr) has_entry)
   in
 
-  let prop_invariants_empty_state =
-    Test.make ~name:"invariants: empty state is valid" ~count:1 Gen.unit
-      (fun () -> List.is_empty (Invariants.check_invariants State.empty))
-  in
-
-  let prop_invariants_negative_ci_detected =
-    Test.make ~name:"invariants: negative ci_failure_count detected" ~count:100
-      gen_patch_id (fun patch_id ->
-        let state =
-          state_with_patch patch_id ~busy:false ~has_session:false
-            ~ci_failure_count:(-1)
-        in
-        List.exists (Invariants.check_invariants state) ~f:(fun v ->
-            String.equal v.invariant "ci_failure_count_non_negative"))
-  in
-
-  let prop_invariants_busy_without_session_detected =
-    Test.make ~name:"invariants: busy without session detected" ~count:100
-      gen_patch_id (fun patch_id ->
-        let state =
-          state_with_patch patch_id ~busy:true ~has_session:false
-            ~ci_failure_count:0
-        in
-        List.exists (Invariants.check_invariants state) ~f:(fun v ->
-            String.equal v.invariant "busy_implies_has_session"))
-  in
-
-  let prop_invariants_resolved_pending_overlap_detected =
-    Test.make ~name:"invariants: resolved and pending overlap detected"
-      ~count:100
-      Gen.(pair gen_patch_id gen_comment)
-      (fun (patch_id, comment) ->
-        let state = add_resolved_and_pending State.empty ~comment ~patch_id in
-        List.exists (Invariants.check_invariants state) ~f:(fun v ->
-            String.equal v.invariant "resolved_not_pending"))
-  in
-
-  let prop_invariants_valid_state_stays_clean =
-    Test.make ~name:"invariants: valid constructed state has no violations"
-      ~count:200
-      Gen.(pair gen_patch_id (int_range 0 5))
-      (fun (patch_id, ci_failure_count) ->
-        let state =
-          state_with_patch patch_id ~busy:true ~has_session:true
-            ~ci_failure_count
-        in
-        List.is_empty (Invariants.check_invariants state))
-  in
-
   let prop_gameplan_parser_parses_single_patch =
     Test.make ~name:"gameplan_parser: parses valid single patch JSON" ~count:100
       Gen.(string_size ~gen:(char_range 'a' 'z') (int_range 1 20))
@@ -400,11 +333,6 @@ let () =
       prop_priority_dequeue_returns_peeked_highest;
       prop_pr_state_predicates;
       prop_pr_state_merge_queue_predicates;
-      prop_invariants_empty_state;
-      prop_invariants_negative_ci_detected;
-      prop_invariants_busy_without_session_detected;
-      prop_invariants_resolved_pending_overlap_detected;
-      prop_invariants_valid_state_stays_clean;
       prop_gameplan_parser_parses_single_patch;
       prop_gameplan_parser_rejects_cycle;
       prop_gameplan_parser_rejects_missing_dependency_target;

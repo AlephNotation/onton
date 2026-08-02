@@ -1,8 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain patch-agent-event-mapper *)
-
-open Base
-
 (** Total mapping from patch-agent stdio RPC events into onton's canonical
     [Types.Stream_event.t].
 
@@ -13,5 +8,4 @@ open Base
     strings default to [Types.Stop_reason.End_turn] and emit a warning to
     stderr. *)
 
-val parse_stop_reason : string -> Types.Stop_reason.t
 val map_event : Patch_agent_rpc.event -> Types.Stream_event.t

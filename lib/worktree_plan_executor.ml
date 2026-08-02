@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain anchor *)
-
 module type S = sig
   val execute :
     patch_id:Types.Patch_id.t ->

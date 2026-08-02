@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain priority *)
-
 open Base
 open Types
 

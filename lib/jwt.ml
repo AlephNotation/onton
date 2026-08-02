@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain failure-subkind *)
-
 type error =
   | Key_read_error of string
   | Key_decode_error of string

@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain backend-routing *)
-
 open Base
 
 type t = {

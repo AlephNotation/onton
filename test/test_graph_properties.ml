@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain graph *)
-
 open Base
 open Onton_core
 

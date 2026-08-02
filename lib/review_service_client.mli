@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain review-service-client *)
-
 (** Effectful HTTP client for the review-service backend.
 
     Pairs with {!Onton_core.Review_service} (pure parsers) and {!Jwt} (token

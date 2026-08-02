@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain push-reject-classify *)
-
 open Base
 
 type rejection =

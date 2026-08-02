@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain run-env *)
-
 (** Shared run-level capabilities captured at functor instantiation time. *)
 module type S = sig
   val runtime : Runtime.t

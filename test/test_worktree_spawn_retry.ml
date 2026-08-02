@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain session-meta *)
-
 open Base
 open Onton
 

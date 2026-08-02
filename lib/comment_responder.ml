@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain comment-responses *)
-
 let read_file path =
   try
     let ic = Stdlib.In_channel.open_text path in

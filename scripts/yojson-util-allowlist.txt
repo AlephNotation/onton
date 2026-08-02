@@ -5,8 +5,6 @@
 # lib_core/json.ml wraps the safe subset into total, option-returning accessors;
 # every other module should decode through Onton_core.Json (or ppx_yojson_conv).
 #
-# The end state is that only lib_core/json.ml remains here. The other entries are
-# pre-existing call sites being migrated; each conversion PR deletes its line.
 # Enforced by scripts/check-no-raw-yojson.sh (run in CI). Blank lines and
 # #-comments are ignored.
 

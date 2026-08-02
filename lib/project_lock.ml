@@ -1,6 +1,3 @@
-(* @archlint.module shell
-   @archlint.domain session-meta *)
-
 open Base
 
 type t = { fd : Unix.file_descr }

@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain merge-queue-decision *)
-
 open Base
 open Onton_core
 open Onton_core.Types

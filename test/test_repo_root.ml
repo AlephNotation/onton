@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain repo-root *)
-
 (** Tests for [Onton.Repo_root.normalize]: running [onton] from any directory
     inside a git repository — including a worktree — should resolve to the main
     working tree, never to a worktree path. *)

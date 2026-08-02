@@ -1,6 +1,3 @@
-(* @archlint.module state
-   @archlint.domain tui-input *)
-
 open Base
 include Tui_input_decision
 

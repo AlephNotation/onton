@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain failure-subkind *)
-
 open Base
 open Onton
 open Onton_core

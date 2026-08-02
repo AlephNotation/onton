@@ -1,6 +1,3 @@
-(* @archlint.module exempt
-   @archlint.exempt-reason effect-boundary *)
-
 (* Tiny launcher shim. Calls setsid(2) so the exec'd process becomes the
    leader of a new session and process group, then execvp's its argv. Onton
    uses this to put each LLM subprocess into its own group so that on

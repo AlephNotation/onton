@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain user-config *)
-
 open Base
 open Onton
 

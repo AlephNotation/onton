@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain repo-git *)
-
 module type S = sig
   val infer_owner_repo : unit -> (string * string) option
   val fetch_managed_repo : unit -> (unit, string) Result.t

@@ -1,6 +1,3 @@
-(* @archlint.module interface
-   @archlint.domain run-classification *)
-
 open Base
 
 (** Pure classification of Claude runner outcomes.
@@ -26,12 +23,6 @@ type classification =
   | Success of { stream_errors : string }
   | Session_failed of { exit_code : int; detail : string }
 [@@deriving show, eq]
-
-val is_context_exhausted : string -> bool
-(** [true] when the error stream reports a context-window overflow ("ran out of
-    room", "context window", "context_length_exceeded",
-    "model_context_window_exceeded"). Matched on the error stream only, so
-    legitimate agent output mentioning these phrases cannot trip it. *)
 
 val classify :
   is_resume:bool -> (run_outcome, string) Result.t -> classification

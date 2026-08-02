@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain display-status *)
-
 open Base
 open Onton_core
 

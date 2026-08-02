@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain patch-agent-event-mapper *)
-
 open Base
 open Onton
 open Onton_core
@@ -135,38 +132,6 @@ let prop_deterministic =
         (Patch_agent_event_mapper.map_event event)
         (Patch_agent_event_mapper.map_event event))
 
-let prop_parse_stop_reason_total =
-  QCheck2.Test.make
-    ~name:"Patch_agent_event_mapper > parse_stop_reason is total" ~count:500
-    gen_string (fun raw ->
-      try
-        ignore
-          (Patch_agent_event_mapper.parse_stop_reason raw : Types.Stop_reason.t);
-        true
-      with _ -> false)
-
-let prop_parse_stop_reason_known_values =
-  QCheck2.Test.make
-    ~name:"Patch_agent_event_mapper > parse_stop_reason known values" ~count:500
-    (QCheck2.Gen.oneof_list [ "stop"; "tool_use"; "max_tokens"; "error" ])
-    (fun raw ->
-      let expected =
-        match raw with
-        | "stop" -> Types.Stop_reason.End_turn
-        | "tool_use" -> Types.Stop_reason.Tool_use
-        | "max_tokens" -> Types.Stop_reason.Max_tokens
-        | _ -> Types.Stop_reason.End_turn
-      in
-      Types.Stop_reason.equal
-        (Patch_agent_event_mapper.parse_stop_reason raw)
-        expected)
-
-let prop_public_surface_is_linked =
-  QCheck2.Test.make ~name:"Patch_agent_event_mapper > public surface is linked"
-    QCheck2.Gen.unit (fun () ->
-      ignore Patch_agent_event_mapper.parse_stop_reason;
-      true)
-
 let () =
   let suite =
     [
@@ -177,9 +142,6 @@ let () =
       prop_stop_reason_mapping_contract;
       prop_whitespace_code_uses_message;
       prop_deterministic;
-      prop_parse_stop_reason_total;
-      prop_parse_stop_reason_known_values;
-      prop_public_surface_is_linked;
     ]
   in
   let exit_code = QCheck_base_runner.run_tests ~verbose:true suite in

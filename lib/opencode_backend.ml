@@ -1,6 +1,3 @@
-(* @archlint.module exempt
-   @archlint.exempt-reason effect-facade *)
-
 open Base
 
 (* Pure parser, tool-name normalization, and CLI-arg builder live in

@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain ci-log-digest *)
-
 open Base
 open Onton_core
 

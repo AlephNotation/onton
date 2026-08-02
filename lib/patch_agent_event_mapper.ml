@@ -1,6 +1,3 @@
-(* @archlint.module core
-   @archlint.domain patch-agent-event-mapper *)
-
 open Base
 
 let warn_unknown_stop_reason raw =

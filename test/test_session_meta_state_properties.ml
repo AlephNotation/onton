@@ -1,6 +1,3 @@
-(* @archlint.module stateTest
-   @archlint.domain session-meta *)
-
 open Onton_core
 
 let session_meta_create_is_total_across_event_sequences =

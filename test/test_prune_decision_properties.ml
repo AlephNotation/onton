@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain prune-decision *)
-
 open Base
 open Onton_core
 open Onton_core.Types

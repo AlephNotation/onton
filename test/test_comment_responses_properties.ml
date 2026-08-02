@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain comment-responses *)
-
 open Base
 open Onton_core
 

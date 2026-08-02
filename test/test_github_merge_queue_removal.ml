@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain review-backend *)
-
 (* Tests for [parse_merge_queue_removal_response].
 
    GitHub runs merge-queue CI on the ephemeral merge-group commit, not the PR

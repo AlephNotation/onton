@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain github-effect *)
-
 open Base
 open Onton_core
 open Types

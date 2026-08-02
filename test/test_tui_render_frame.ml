@@ -1,6 +1,3 @@
-(* @archlint.module test
-   @archlint.domain markdown-render *)
-
 (** Rendering tests for [Tui.render_frame], focused on the short-terminal
     behavior described in flowglad/onton#267.
 
