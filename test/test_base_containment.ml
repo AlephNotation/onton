@@ -25,6 +25,7 @@ let mk_patch ~id ~deps : Types.Patch.t =
     dependencies = List.map deps ~f:pid;
     files = [];
     checks = [];
+    agent = None;
   }
 
 (* P -> {d1, d2, d3}, d2 a stacked child of d1, d3 an independent sibling. *)

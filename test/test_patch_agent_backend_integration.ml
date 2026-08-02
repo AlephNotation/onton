@@ -124,6 +124,7 @@ let smoke_test =
                       dependencies = [];
                       files = [];
                       checks = [];
+                      agent = None;
                     }
                   in
                   let gameplan : Types.Gameplan.t =

@@ -44,21 +44,25 @@
  (name test_worker_sandbox)
  (modules test_worker_sandbox)
  (libraries onton onton_core base eio eio_main eio.unix unix)
- (deps (package onton))
+ (deps (package onton) ../bin/setsid_exec/main.exe)
  (action
   (setenv ONTON_SETSID_EXEC
-   %{bin:lo-setsid-exec}
+   %{dep:../bin/setsid_exec/main.exe}
    (run %{test}))))
 
-(test
+(executable
  (name test_worker_backend_sandbox)
  (modules test_worker_backend_sandbox)
  (libraries onton onton_core base eio eio_main eio.unix unix)
- (deps (package onton))
+ (link_deps ../bin/setsid_exec/main.exe))
+
+(rule
+ (alias runtest)
+ (deps test_worker_backend_sandbox.exe)
  (action
   (setenv ONTON_SETSID_EXEC
    %{bin:lo-setsid-exec}
-   (run %{test}))))
+   (run %{exe:test_worker_backend_sandbox.exe}))))
 
 (test
  (name test_controller_publication)

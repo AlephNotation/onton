@@ -186,6 +186,7 @@ let prop_detect_rebases_skips_merge_queue_target =
           dependencies;
           files = [];
           checks = [];
+          agent = None;
         }
       in
       let graph = Graph.of_patches [ patch p1 []; patch p2 [ p1 ] ] in
@@ -609,6 +610,7 @@ let prop_stale_base_suppressed_while_in_merge_queue =
           dependencies = [];
           files = [];
           checks = [];
+          agent = None;
         }
       in
       let graph = Graph.of_patches [ patch ] in
@@ -653,6 +655,7 @@ let prop_detect_stale_bases_enqueues_wrong_base =
           dependencies;
           files = [];
           checks = [];
+          agent = None;
         }
       in
       let graph =
@@ -699,6 +702,7 @@ let prop_reconcile_e2e_catches_drift =
           dependencies = [];
           files = [];
           checks = [];
+          agent = None;
         }
       in
       let graph = Graph.of_patches [ patch ] in
@@ -732,6 +736,7 @@ let prop_reconcile_dedup_rebase =
           dependencies = [];
           files = [];
           checks = [];
+          agent = None;
         }
       in
       let graph = Graph.of_patches [ patch ] in
@@ -766,6 +771,7 @@ let mk_patch ~id ~deps : Types.Patch.t =
     dependencies = List.map deps ~f:pid;
     files = [];
     checks = [];
+    agent = None;
   }
 
 (* P -> {d1, d2, d3}, with d2 a stacked child of d1 and d3 an independent

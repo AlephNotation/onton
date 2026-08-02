@@ -11,6 +11,7 @@ let patch i =
       dependencies = [];
       files = [];
       checks = [];
+      agent = None;
     }
 
 let agent_for_patch ?(merged = false) (p : Patch.t) =

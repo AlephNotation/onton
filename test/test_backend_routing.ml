@@ -1,7 +1,7 @@
 open Base
 open Onton_core
 
-let known_backends = [ "claude"; "codex"; "opencode"; "pi"; "gemini" ]
+let known_backends = Backend_routing.supported_backends
 
 let optional_model =
   QCheck2.Gen.oneof
@@ -68,6 +68,32 @@ let () =
         String.equal backend stored_backend
         && String.equal model configured_model)
   in
+  let patch_override_is_atomic =
+    Test.make ~name:"patch agent override wins as one complete pair" ~count:200
+      (Gen.pair
+         (Gen.oneof_list known_backends)
+         (Gen.oneof_list [ "sol"; "luna" ]))
+      (fun (backend, model) ->
+        let patch : Types.Patch.t =
+          {
+            id = Types.Patch_id.of_string "p";
+            goal = "p";
+            branch = Types.Branch.of_string "p";
+            dependencies = [];
+            files = [];
+            checks = [];
+            agent = Some { Types.Patch.Agent.backend; model };
+          }
+        in
+        let selected =
+          Backend_routing.for_patch
+            ~default:
+              (Backend_routing.decide ~backend:"claude" ~model:(Some "default"))
+            patch
+        in
+        String.equal selected.backend backend
+        && Option.equal String.equal selected.model (Some model))
+  in
   let exit_code =
     QCheck_base_runner.run_tests ~verbose:true
       [
@@ -75,6 +101,7 @@ let () =
         cli_backend_wins;
         built_in_backend_is_total_fallback;
         fields_resolve_independently;
+        patch_override_is_atomic;
       ]
   in
   if exit_code <> 0 then Stdlib.exit exit_code

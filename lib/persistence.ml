@@ -935,6 +935,7 @@ let%test_module "session_id_sidecars" =
           dependencies = [];
           files = [];
           checks = [];
+          agent = None;
         }
 
     let gameplan =

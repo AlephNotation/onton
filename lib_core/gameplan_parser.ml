@@ -100,13 +100,27 @@ type parsed_patch = {
   dependencies : Types.Patch_id.t list;
   files : string list;
   checks : Types.Check.t list;
+  agent : Types.Patch.Agent.t option;
 }
+
+let parse_agent ~where json =
+  let fields = object_fields ~where json in
+  reject_unknown ~where ~allowed:[ "backend"; "model" ] fields;
+  let backend =
+    nonempty_string ~where:(where ^ ".backend") (field ~where fields "backend")
+  in
+  let model =
+    nonempty_string ~where:(where ^ ".model") (field ~where fields "model")
+  in
+  if not (Backend_routing.is_supported_backend backend) then
+    fail (where ^ ".backend") (Printf.sprintf "unsupported backend %S" backend);
+  { Types.Patch.Agent.backend; model }
 
 let parse_patch ~index json =
   let where = Printf.sprintf "patches[%d]" index in
   let fields = object_fields ~where json in
   reject_unknown ~where
-    ~allowed:[ "id"; "goal"; "dependsOn"; "files"; "checks" ]
+    ~allowed:[ "id"; "goal"; "dependsOn"; "files"; "checks"; "agent" ]
     fields;
   let id = patch_id ~where:(where ^ ".id") (field ~where fields "id") in
   let goal =
@@ -141,7 +155,12 @@ let parse_patch ~index json =
   let checks =
     parse_checks ~where:(where ^ ".checks") (field ~where fields "checks")
   in
-  { id; goal; dependencies; files; checks }
+  let agent =
+    match List.Assoc.find fields "agent" ~equal:String.equal with
+    | None -> None
+    | Some json -> Some (parse_agent ~where:(where ^ ".agent") json)
+  in
+  { id; goal; dependencies; files; checks; agent }
 
 let detect_cycle dependency_graph =
   let visited = Hash_set.create (module Types.Patch_id) in
@@ -221,6 +240,7 @@ let parse_json json =
           dependencies = patch.dependencies;
           files = patch.files;
           checks = patch.checks;
+          agent = patch.agent;
         })
   in
   {

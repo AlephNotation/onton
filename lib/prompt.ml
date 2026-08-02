@@ -410,6 +410,7 @@ let%test "plan-derived PR body contains required checks exactly once" =
         files = [ "lib/unused.ml" ];
         checks =
           [ { Check.run = "dune build"; proves = "the retained code builds" } ];
+        agent = None;
       }
   in
   let body =
@@ -1086,6 +1087,7 @@ let%test "patch prompt includes goal and dependencies" =
         files = [ "lib/prompt.ml" ];
         checks =
           [ { Check.run = "dune runtest"; proves = "prompt tests pass" } ];
+        agent = None;
       }
   in
   let gameplan : Gameplan.t =
@@ -1109,6 +1111,7 @@ let%test "patch prompt includes goal and dependencies" =
                     proves = "core type tests pass";
                   };
                 ];
+              agent = None;
             };
             patch;
           ];
@@ -1149,6 +1152,7 @@ let%test "patch prompt static prefix is byte-identical across patches" =
               proves = "static prefix is identical across patches";
             };
           ];
+        agent = None;
       }
   in
   let patch_2 : Patch.t =
@@ -1160,6 +1164,7 @@ let%test "patch prompt static prefix is byte-identical across patches" =
         dependencies = [ Patch_id.of_string "1" ];
         files = [ "lib/claude_runner.ml" ];
         checks = [ { Check.run = "dune build"; proves = "runner compiles" } ];
+        agent = None;
       }
   in
   let gameplan : Gameplan.t =
@@ -1197,6 +1202,7 @@ let%test "agents_md content appears in static prefix when Some" =
         files = [ "AGENTS.md" ];
         checks =
           [ { Check.run = "dune runtest"; proves = "prompt tests pass" } ];
+        agent = None;
       }
   in
   let gameplan : Gameplan.t =
@@ -1230,6 +1236,7 @@ let%test "agents_md section is omitted when None" =
         files = [ "lib/prompt.ml" ];
         checks =
           [ { Check.run = "dune runtest"; proves = "prompt tests pass" } ];
+        agent = None;
       }
   in
   let gameplan : Gameplan.t =
@@ -1269,6 +1276,7 @@ let make_layer_test_fixture () =
         files = [ "lib/prompt.ml" ];
         checks =
           [ { Check.run = "dune runtest"; proves = "prompt tests pass" } ];
+        agent = None;
       }
   in
   let patch_b : Patch.t =
@@ -1280,6 +1288,7 @@ let make_layer_test_fixture () =
         dependencies = [ Patch_id.of_string "1" ];
         files = [ "bin/main.ml" ];
         checks = [ { Check.run = "dune build"; proves = "dispatch compiles" } ];
+        agent = None;
       }
   in
   let gameplan : Gameplan.t =

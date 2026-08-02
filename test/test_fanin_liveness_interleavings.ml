@@ -488,6 +488,7 @@ let mk_patch ~id ~deps : Patch.t =
     dependencies = List.map deps ~f:Patch_id.of_string;
     files = [];
     checks = [];
+    agent = None;
   }
 
 (* Index:        0       1            2            3

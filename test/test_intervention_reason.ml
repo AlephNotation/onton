@@ -105,7 +105,16 @@ let () =
   print_endline "PASS: human_intervention_reason surfaces the actionable reason"
 
 let make_patch ?(deps = []) ~id ~branch ~goal () =
-  Patch.{ id; goal; branch; dependencies = deps; files = []; checks = [] }
+  Patch.
+    {
+      id;
+      goal;
+      branch;
+      dependencies = deps;
+      files = [];
+      checks = [];
+      agent = None;
+    }
 
 let make_gameplan patches =
   Gameplan.

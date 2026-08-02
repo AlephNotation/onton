@@ -14,6 +14,9 @@ let display_name_of_claude_model = function
 let make_factory ~(process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t) ~clock
     ~timeout ~setsid_exec : backend:string -> model:string option -> kind =
  fun ~backend ~model ->
+  if not (Backend_routing.is_supported_backend backend) then
+    invalid_arg
+      (Printf.sprintf "Backend_registry.get: unknown backend %S" backend);
   let decision = Backend_routing.decide ~backend ~model in
   let backend = decision.Backend_routing.backend in
   let model = decision.Backend_routing.model in

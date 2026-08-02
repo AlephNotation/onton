@@ -14,6 +14,7 @@ let patch : Patch.t =
       dependencies = [];
       files = [];
       checks = [];
+      agent = None;
     }
 
 let () =

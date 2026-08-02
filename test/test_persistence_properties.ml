@@ -191,6 +191,7 @@ let outbox_survives_restart =
           files = [ "lib/durable.ml" ];
           checks =
             [ { Check.run = "dune build"; proves = "the project builds" } ];
+          agent = None;
         }
       in
       let gameplan =
@@ -281,6 +282,7 @@ let legacy_outbox_payload_defaults_empty =
           dependencies = [];
           files = [];
           checks = [];
+          agent = None;
         }
       in
       let gameplan =

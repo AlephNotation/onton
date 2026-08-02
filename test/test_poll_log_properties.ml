@@ -23,6 +23,7 @@ let make_patch pid branch =
       dependencies = [];
       files = [];
       checks = [];
+      agent = None;
     }
 
 let make_orch patch agent =

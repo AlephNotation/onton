@@ -137,7 +137,7 @@ module type FIBER_ENV = sig
   val backend_decision : Backend_routing.decision
   val backend_name : string
   val version : string
-  val backend : Backend_registry.kind
+  val backend_registry : Backend_registry.t
   val find_pr_number : patch_id:Patch_id.t -> Pr_number.t option
   val register_pr_number : patch_id:Patch_id.t -> pr_number:Pr_number.t -> unit
   val unregister_pr_number : patch_id:Patch_id.t -> unit
@@ -175,8 +175,8 @@ struct
         let transcripts = Env.transcripts
         let event_log = Env.event_log
         let process_mgr = Env.process_mgr
-        let backend = Env.backend
-        let backend_decision = Env.backend_decision
+        let backend_registry = Env.backend_registry
+        let default_backend = Env.backend_decision
         let register_pr = Env.register_pr_number
       end)
 
@@ -650,7 +650,7 @@ type constructed_capabilities = {
   worktree_client : (module Worktree.S);
   startup_reconciler : (module STARTUP_RECONCILER);
   branch_of : Patch_id.t -> Branch.t;
-  backend : Backend_registry.kind;
+  backend_registry : Backend_registry.t;
   backend_decision : Backend_routing.decision;
   backend_name : string;
   find_pr_number : patch_id:Patch_id.t -> Pr_number.t option;
@@ -774,11 +774,6 @@ let construct_capabilities ~net (setup : runtime_setup) =
     if Base.String.is_empty model then None else Some model
   in
   let repo_config = config.Resolved_config.repo_config in
-  (match Backend_preflight.validate ~backend () with
-  | Ok () -> ()
-  | Error error ->
-      Printf.eprintf "Error: %s\n" error;
-      Stdlib.exit 1);
   let registry =
     Backend_registry.create ~process_mgr:setup.process_mgr ~clock:setup.clock
       ~timeout:session_timeout ~setsid_exec
@@ -787,11 +782,16 @@ let construct_capabilities ~net (setup : runtime_setup) =
     Backend_registry.resolve_model ~backend ~model:effective_model_opt
   in
   let backend_decision = Backend_routing.decide ~backend ~model in
-  let selected_backend = Backend_registry.get registry ~backend ~model in
-  let backend_name = function
-    | Backend_registry.Ephemeral backend -> backend.Llm_backend.name
-    | Backend_registry.Long_lived (Llm_backend_long_lived.T { name; _ }) -> name
+  let effective_backends =
+    Backend_routing.distinct_effective_backends ~default:backend_decision
+      setup.gameplan.Gameplan.patches
   in
+  Base.List.iter effective_backends ~f:(fun backend ->
+      match Backend_preflight.validate ~backend () with
+      | Ok () -> ()
+      | Error error ->
+          Printf.eprintf "Error: %s\n" error;
+          Stdlib.exit 1);
   let pre_agents =
     Runtime.read setup.runtime (fun snap ->
         Orchestrator.all_agents snap.Runtime.orchestrator)
@@ -874,9 +874,9 @@ let construct_capabilities ~net (setup : runtime_setup) =
     worktree_client;
     startup_reconciler = (module Reconciler : STARTUP_RECONCILER);
     branch_of;
-    backend = selected_backend;
+    backend_registry = registry;
     backend_decision;
-    backend_name = backend_name selected_backend;
+    backend_name = backend;
     find_pr_number = Pr_registry.find pr_registry;
     register_pr_number = Pr_registry.register pr_registry;
     unregister_pr_number = Pr_registry.unregister pr_registry;
@@ -908,7 +908,7 @@ let build_fiber_env (setup : runtime_setup) (cap : constructed_capabilities)
     let backend_decision = cap.backend_decision
     let backend_name = cap.backend_name
     let version = Version.s
-    let backend = cap.backend
+    let backend_registry = cap.backend_registry
     let find_pr_number = cap.find_pr_number
     let register_pr_number = cap.register_pr_number
     let unregister_pr_number = cap.unregister_pr_number

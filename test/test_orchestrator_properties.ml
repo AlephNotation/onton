@@ -22,6 +22,7 @@ let patch ?(dependencies = []) id =
       dependencies;
       files = [];
       checks = [];
+      agent = None;
     }
 
 (* Stub conflict_info: the orchestrator's Conflict arm doesn't inspect the

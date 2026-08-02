@@ -389,7 +389,11 @@ let patch_view_of_agent (agent : Patch_agent.t)
     ~(backend_decision : Backend_routing.decision) =
   let patch_id = agent.patch_id in
   let patch_opt = Map.find patches_by_id patch_id in
-  let { Backend_routing.backend = backend_name; model } = backend_decision in
+  let { Backend_routing.backend = backend_name; model } =
+    match patch_opt with
+    | None -> backend_decision
+    | Some patch -> Backend_routing.for_patch ~default:backend_decision patch
+  in
   let title =
     match patch_opt with
     | Some p -> p.Patch.goal

@@ -1,13 +1,7 @@
 open Base
 
-let command_for_backend = function
-  | "claude" -> Some "claude"
-  | "codex" -> Some "codex"
-  | "opencode" -> Some "opencode"
-  | "pi" -> Some "pi"
-  | "gemini" -> Some "gemini"
-  | "patch-agent" -> Some "patch-agent"
-  | _ -> None
+let command_for_backend backend =
+  if Backend_routing.is_supported_backend backend then Some backend else None
 
 let path_dirs getenv_opt =
   match getenv_opt "PATH" with
