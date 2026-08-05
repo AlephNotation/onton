@@ -52,6 +52,7 @@ let patch =
     dependencies = [];
     files = [ "lib/session_driver.ml" ];
     checks = [ { Check.run = "dune build"; proves = "builds" } ];
+    agent = None;
   }
 
 let gameplan =
