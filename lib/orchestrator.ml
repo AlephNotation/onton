@@ -61,6 +61,48 @@ let create ~patches ~main_branch =
     main_branch;
   }
 
+let extend t ~patches =
+  try
+    let existing_ids = Graph.all_patch_ids t.graph in
+    List.iter patches ~f:(fun patch ->
+        if List.mem existing_ids patch.Patch.id ~equal:Patch_id.equal then
+          invalid_arg
+            ("Orchestrator.extend: duplicate patch id "
+            ^ Patch_id.to_string patch.id);
+        List.iter patch.dependencies ~f:(fun dependency ->
+            if
+              (not (List.mem existing_ids dependency ~equal:Patch_id.equal))
+              && not
+                   (List.exists patches ~f:(fun candidate ->
+                        Patch_id.equal candidate.id dependency))
+            then
+              invalid_arg
+                ("Orchestrator.extend: unknown dependency "
+                ^ Patch_id.to_string dependency)));
+    let agents =
+      List.fold patches ~init:t.agents ~f:(fun agents patch ->
+          match
+            Map.add agents ~key:patch.Patch.id
+              ~data:(Patch_agent.create ~branch:patch.branch patch.id)
+          with
+          | `Ok next -> next
+          | `Duplicate -> assert false)
+    in
+    let old_graph_patches =
+      List.map existing_ids ~f:(fun id ->
+          {
+            Patch.id;
+            goal = "";
+            branch = t.main_branch;
+            dependencies = Graph.deps t.graph id;
+            files = [];
+            checks = [];
+            agent = None;
+          })
+    in
+    Ok { t with agents; graph = Graph.of_patches (old_graph_patches @ patches) }
+  with Invalid_argument message -> Error message
+
 let agent t patch_id =
   match Map.find t.agents patch_id with
   | Some a -> a

@@ -63,6 +63,13 @@ val commit_orchestrator :
 val commit_orchestrator_returning :
   t -> (Orchestrator.t -> Orchestrator.t * 'a) -> ('a, string) result
 
+val commit_expansion :
+  t ->
+  policy:Expansion_policy.t option ->
+  parent_id:Patch_id.t ->
+  Plan_expansion.proposal ->
+  (bool, string) result
+
 val update_activity_log : t -> (Activity_log.t -> Activity_log.t) -> unit
 (** Convenience: update only the activity log. *)
 

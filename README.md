@@ -644,6 +644,37 @@ dedup-based entry tracking.
 
 ## Safety properties
 
+### Controller-owned plan expansion
+
+A root plan may opt into one bounded append-only expansion envelope:
+
+```json
+"expansion": {
+  "maxPatches": 3,
+  "files": ["lib_core/parser.ml", "test/test_parser.ml"],
+  "checks": [{"run": "dune runtest", "proves": "parser behavior remains correct"}]
+}
+```
+
+All three fields are required when `expansion` is present. `maxPatches` is a
+positive total budget, including seed patches; `files` and `checks` are exact,
+finite allow-lists. Unknown fields, duplicate values, non-relative paths,
+empty lists, and a budget smaller than the seed graph are rejected.
+
+Only an initial Start session can be given the controller-owned proposal file.
+Its JSON contains only local patch ids, goals, sibling dependencies, files,
+and checks. The controller derives global ids and branches, inherits the
+emitting patch's backend/model override, rejects cycles, unordered overlapping
+write scopes, and authority violations, then atomically persists the expanded
+gameplan together with the new patch agents. A replay of identical output is a
+no-op; a conflicting replay fails closed. No later turn receives this
+capability, and workers cannot choose publication behavior, credentials,
+backends, or policy.
+
+This is narrowly analogous to Haxl's dynamic dependency discovery: a durable
+controller can discover more dependencies while evaluating a graph. It is not
+caching, automatic batching, a priority system, or a merge queue.
+
 The state machine and its controller are covered by example and property tests.
 Important properties include:
 

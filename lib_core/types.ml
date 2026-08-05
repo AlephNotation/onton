@@ -143,6 +143,11 @@ module Check = struct
   [@@deriving show, eq, sexp_of, compare, yojson]
 end
 
+module Expansion_policy = struct
+  type t = { max_patches : int; files : string list; checks : Check.t list }
+  [@@deriving show, eq, sexp_of, compare, yojson]
+end
+
 module Patch = struct
   module Agent = struct
     type t = { backend : string; model : string }

@@ -3,6 +3,7 @@ open Base
 type t = {
   gameplan : Types.Gameplan.t;
   dependency_graph : Types.Patch_id.t list Map.M(Types.Patch_id).t;
+  expansion : Types.Expansion_policy.t option;
 }
 
 exception Parse_error of string
@@ -65,7 +66,8 @@ let validate_repo_path ~where path =
   if
     String.split path ~on:'/'
     |> List.exists ~f:(fun segment ->
-        String.is_empty segment || String.equal segment "..")
+        String.is_empty segment || String.equal segment ".."
+        || String.equal segment ".")
   then fail where "must not contain empty or '..' path segments"
 
 let parse_check ~where json =
@@ -82,8 +84,14 @@ let parse_check ~where json =
 let parse_checks ~where json =
   let values = array ~where json in
   if List.is_empty values then fail where "must contain at least one check";
-  List.mapi values ~f:(fun index value ->
-      parse_check ~where:(Printf.sprintf "%s[%d]" where index) value)
+  let checks =
+    List.mapi values ~f:(fun index value ->
+        parse_check ~where:(Printf.sprintf "%s[%d]" where index) value)
+  in
+  List.iteri checks ~f:(fun index check ->
+      if List.exists (List.take checks index) ~f:(Types.Check.equal check) then
+        fail where "contains duplicate check");
+  checks
 
 let parse_repository json =
   let repository = nonempty_string ~where:"repository" json in
@@ -210,10 +218,34 @@ let validate_graph patches =
   detect_cycle graph;
   graph
 
+let parse_expansion json =
+  let where = "expansion" in
+  let fields = object_fields ~where json in
+  reject_unknown ~where ~allowed:[ "maxPatches"; "files"; "checks" ] fields;
+  let max_patches =
+    match field ~where fields "maxPatches" with
+    | `Int value when value > 0 -> value
+    | `Int _ -> fail (where ^ ".maxPatches") "must be positive"
+    | _ -> fail (where ^ ".maxPatches") "must be an integer"
+  in
+  let files =
+    array ~where:(where ^ ".files") (field ~where fields "files")
+    |> unique_strings ~where:(where ^ ".files")
+  in
+  if List.is_empty files then fail (where ^ ".files") "must not be empty";
+  List.iteri files ~f:(fun index path ->
+      validate_repo_path ~where:(Printf.sprintf "%s.files[%d]" where index) path);
+  let checks =
+    parse_checks ~where:(where ^ ".checks") (field ~where fields "checks")
+  in
+  { Types.Expansion_policy.max_patches; files; checks }
+
 let parse_json json =
   let where = "plan" in
   let fields = object_fields ~where json in
-  reject_unknown ~where ~allowed:[ "project"; "repository"; "patches" ] fields;
+  reject_unknown ~where
+    ~allowed:[ "project"; "repository"; "patches"; "expansion" ]
+    fields;
   let project_name =
     nonempty_string ~where:"project" (field ~where fields "project")
   in
@@ -227,6 +259,14 @@ let parse_json json =
     |> List.mapi ~f:(fun index value -> parse_patch ~index value)
   in
   if List.is_empty parsed_patches then fail "patches" "must not be empty";
+  let expansion =
+    match List.Assoc.find fields "expansion" ~equal:String.equal with
+    | None -> None
+    | Some value -> Some (parse_expansion value)
+  in
+  Option.iter expansion ~f:(fun policy ->
+      if policy.max_patches < List.length parsed_patches then
+        fail "expansion.maxPatches" "must cover every seed patch");
   let dependency_graph = validate_graph parsed_patches in
   let slug = Types.Gameplan.slugify project_name in
   let patches =
@@ -246,6 +286,7 @@ let parse_json json =
   {
     gameplan = { Types.Gameplan.project_name; repo_owner; repo_name; patches };
     dependency_graph;
+    expansion;
   }
 
 let parse_json_string input =

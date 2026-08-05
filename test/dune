@@ -662,3 +662,13 @@
  (name test_dependency_injection_functors)
  (modules test_dependency_injection_functors)
  (libraries onton onton_core eio))
+
+(test
+ (name test_plan_expansion_properties)
+ (modules test_plan_expansion_properties)
+ (libraries onton_core qcheck-core))
+
+(test
+ (name test_self_growing_controller)
+ (modules test_self_growing_controller)
+ (libraries onton onton_core eio eio_main))

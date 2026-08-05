@@ -109,6 +109,51 @@ let commit_orchestrator_returning t f =
       let orchestrator, value = f s.orchestrator in
       ({ s with orchestrator }, value))
 
+let commit_expansion t ~policy ~parent_id proposal =
+  (* Hold the same lock as [commit]: validation, graph growth, durable write,
+     and in-memory publication are one transition. *)
+  Eio.Mutex.lock t.mutex;
+  Fun.protect
+    ~finally:(fun () -> Eio.Mutex.unlock t.mutex)
+    (fun () ->
+      match
+        Plan_expansion.materialize ~gameplan:t.snap.gameplan ~policy ~parent_id
+          proposal
+      with
+      | Error message -> Error message
+      | Ok { Plan_expansion.changed = false; _ } -> Ok false
+      | Ok { Plan_expansion.patches; changed = true } -> (
+          let existing_ids =
+            t.snap.gameplan.Gameplan.patches
+            |> List.map (fun (patch : Patch.t) -> patch.id)
+          in
+          let added_patches =
+            List.filter
+              (fun (patch : Patch.t) ->
+                not
+                  (List.exists
+                     (fun id -> Patch_id.equal id patch.id)
+                     existing_ids))
+              patches
+          in
+          match
+            Orchestrator.extend t.snap.orchestrator ~patches:added_patches
+          with
+          | Error message -> Error message
+          | Ok orchestrator -> (
+              let next =
+                {
+                  t.snap with
+                  gameplan = { t.snap.gameplan with patches };
+                  orchestrator;
+                }
+              in
+              match t.durable_store next with
+              | Error message -> Error message
+              | Ok () ->
+                  t.snap <- next;
+                  Ok true)))
+
 let update_activity_log t f =
   update t (fun s -> { s with activity_log = f s.activity_log })
 
