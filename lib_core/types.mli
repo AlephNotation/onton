@@ -125,6 +125,11 @@ module Check : sig
   [@@deriving show, eq, sexp_of, compare, yojson]
 end
 
+module Expansion_policy : sig
+  type t = { max_patches : int; files : string list; checks : Check.t list }
+  [@@deriving show, eq, sexp_of, compare, yojson]
+end
+
 module Patch : sig
   module Agent : sig
     type t = { backend : string; model : string }

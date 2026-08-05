@@ -14,6 +14,10 @@ type t
 val create : patches:Patch.t list -> main_branch:Branch.t -> t
 (** Build orchestrator state from a list of patches and a main branch. *)
 
+val extend : t -> patches:Patch.t list -> (t, string) Result.t
+(** Append unknown patches while retaining current agents and durable outboxes.
+*)
+
 type action =
   | Start of Patch_id.t * Branch.t
   | Respond of Patch_id.t * Operation_kind.t

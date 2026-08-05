@@ -246,8 +246,8 @@ esac
         { gameplan with Types.Gameplan.patches = [ new_patch ] }
       in
       let setsid_exec =
-        Stdlib.Sys.getenv_opt "ONTON_SETSID_EXEC"
-        |> Option.value_exn |> Unix.realpath
+        Worker_sandbox.resolve_setsid_exec ~executable_name:"lo" ~override:None
+        |> Result.ok_or_failwith
       in
       with_environment
         [
