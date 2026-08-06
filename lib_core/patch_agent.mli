@@ -290,7 +290,8 @@ val start : t -> base_branch:Types.Branch.t -> t
     externally. Postconditions: [has_session], [busy], [satisfies],
     [base_branch = Some base_branch]. Pending direct messages move atomically to
     [inflight_human_messages], and a queued [Human] operation is consumed by the
-    Start turn so pre-PR feedback does not require a parallel operation. *)
+    Start turn so pre-PR feedback does not require a parallel operation. The
+    code-capable turn invalidates any prior completion attestation. *)
 
 val rebase : t -> base_branch:Types.Branch.t -> t
 (** [PatchCtx ~> Rebase] — orchestrator-executed rebase. Preconditions:
@@ -303,7 +304,8 @@ val respond : t -> Types.Operation_kind.t -> t
     (checked): [has_pr], [~merged], [~busy], [~needs_intervention], [k] in
     [queue], [k] is [highest_priority]. Postconditions per spec: sets
     [has_session], [busy]; dequeues [k]; conditionally updates [satisfies],
-    [changed], [has_conflict], and resolves [pending_comments]. *)
+    [changed], [has_conflict], and resolves [pending_comments]. Code-capable
+    operations invalidate any prior completion attestation. *)
 
 val complete : t -> t
 (** [PatchCtx ~> Complete] — session finished. Preconditions (checked): [busy].

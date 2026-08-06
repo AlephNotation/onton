@@ -903,6 +903,7 @@ let start t ~base_branch =
        so the drift detector knows the branch is on the right base. *)
     branch_rebased_onto = Some base_branch;
     ci_checks = [];
+    completion = Completion_unattested;
   }
 
 let set_branch_rebased_onto t branch =
@@ -1011,7 +1012,7 @@ let complete t =
   if not (is_busy t) then t
   else { t with activity = Inactive; inflight_human_messages = [] }
 
-let%test "code-capable responses invalidate the prior completion attestation" =
+let%test "code-capable starts and responses invalidate prior completion" =
   let patch_id = Patch_id.of_string "completion-turn" in
   let branch = Branch.of_string "onton/completion-turn" in
   let base = Branch.of_string "main" in
@@ -1021,9 +1022,16 @@ let%test "code-capable responses invalidate the prior completion attestation" =
     set_pr_number agent (Pr_number.of_int 7) |> fun agent ->
     attest_completion agent "old-head" |> fun agent -> enqueue agent operation
   in
+  let start_turn =
+    create ~branch patch_id |> fun agent ->
+    set_pr_number agent (Pr_number.of_int 7) |> fun agent ->
+    attest_completion agent "old-head" |> clear_pr |> fun agent ->
+    start agent ~base_branch:base
+  in
   let code_turn = ready Human |> fun agent -> respond agent Human in
   let notes_turn = ready Pr_body |> fun agent -> respond agent Pr_body in
-  equal_completion_state code_turn.completion Completion_unattested
+  equal_completion_state start_turn.completion Completion_unattested
+  && equal_completion_state code_turn.completion Completion_unattested
   && equal_completion_state notes_turn.completion
        (Completion_attested "old-head")
 
