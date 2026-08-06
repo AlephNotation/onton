@@ -252,7 +252,8 @@ let activity_of_yojson json =
 
 let session_to_yojson = function
   | Patch_agent.Not_started -> `Assoc [ ("state", `String "not_started") ]
-  | Patch_agent.Started { resume_id; fallback } ->
+  | Patch_agent.Started
+      { resume_id; fallback; conversation_generation; prompt_fingerprint } ->
       `Assoc
         [
           ("state", `String "started");
@@ -260,6 +261,10 @@ let session_to_yojson = function
             Option.value_map resume_id ~default:`Null ~f:(fun id -> `String id)
           );
           ("fallback", Patch_agent.yojson_of_session_fallback fallback);
+          ("conversation_generation", `Int conversation_generation);
+          ( "prompt_fingerprint",
+            Option.value_map prompt_fingerprint ~default:`Null ~f:(fun value ->
+                `String value) );
         ]
 
 let session_of_yojson json =
@@ -271,10 +276,54 @@ let session_of_yojson json =
           resume_id = nullable_string_member "resume_id" json;
           fallback =
             decode_member "fallback" Patch_agent.session_fallback_of_yojson json;
+          conversation_generation =
+            int_member_or ~default:0 "conversation_generation" json;
+          prompt_fingerprint =
+            (match Json.field "prompt_fingerprint" json with
+            | None | Some `Null -> None
+            | Some (`String value) -> Some value
+            | Some _ ->
+                raise
+                  (Decode_error "prompt_fingerprint: expected a string or null"));
         }
   | state ->
       raise
         (Decode_error (Printf.sprintf "session.state: unknown value %S" state))
+
+let%test "session conversation identity round-trips and legacy state is fresh" =
+  let session =
+    Patch_agent.Started
+      {
+        resume_id = Some "resume";
+        fallback = Patch_agent.Tried_fresh;
+        conversation_generation = 7;
+        prompt_fingerprint = Some "prompt";
+      }
+  in
+  let legacy =
+    `Assoc
+      [
+        ("state", `String "started");
+        ("resume_id", `Null);
+        ( "fallback",
+          Patch_agent.yojson_of_session_fallback Patch_agent.Fresh_available );
+      ]
+  in
+  Patch_agent.equal_session_state
+    (session_of_yojson (session_to_yojson session))
+    session
+  &&
+  match session_of_yojson legacy with
+  | Patch_agent.Started
+      {
+        resume_id = None;
+        fallback;
+        conversation_generation;
+        prompt_fingerprint = None;
+      } ->
+      Patch_agent.equal_session_fallback fallback Patch_agent.Fresh_available
+      && conversation_generation = 0
+  | Patch_agent.Not_started | Patch_agent.Started _ -> false
 
 let json_number key = function
   | `Float value -> value
@@ -682,6 +731,7 @@ let orchestrator_to_yojson (o : Orchestrator.t) =
                   (match msg.status with
                   | Orchestrator.Pending -> "Pending"
                   | Orchestrator.Acked -> "Acked"
+                  | Orchestrator.Awaiting_publication -> "Awaiting_publication"
                   | Orchestrator.Completed -> "Completed"
                   | Orchestrator.Obsolete -> "Obsolete") );
             ] ))
@@ -734,6 +784,7 @@ let action_of_yojson json =
 let message_status_of_string = function
   | "Pending" -> Ok Orchestrator.Pending
   | "Acked" -> Ok Orchestrator.Acked
+  | "Awaiting_publication" -> Ok Orchestrator.Awaiting_publication
   | "Completed" -> Ok Orchestrator.Completed
   | "Obsolete" -> Ok Orchestrator.Obsolete
   | other -> Error (Printf.sprintf "unknown message status: %s" other)
@@ -987,6 +1038,8 @@ let%test_module "session_id_sidecars" =
             {
               resume_id = llm_session_id;
               fallback = Patch_agent.Fresh_available;
+              conversation_generation = 0;
+              prompt_fingerprint = None;
             }
         else Patch_agent.Not_started
       in

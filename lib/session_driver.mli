@@ -56,10 +56,18 @@ module Make (_ : Worktree.S) (_ : ENV) : sig
     effort:string ->
     gameplan_prompt:string ->
     patch_prompt:string ->
+    conversation_generation:int ->
     long_lived_session
 
-  val update_long_lived_session_prompts :
-    long_lived_session -> gameplan_prompt:string -> patch_prompt:string -> unit
+  val update_long_lived_session :
+    long_lived_session ->
+    gameplan_prompt:string ->
+    patch_prompt:string ->
+    conversation_generation:int ->
+    unit
+  (** Restart the backend handle when either stable prompt content or the
+      durable conversation generation changes. This makes controller-directed
+      fresh starts effective for backends that have no resume-id API. *)
 
   val long_lived_session_failed : long_lived_session -> bool
   val shutdown_long_lived_session : long_lived_session -> unit

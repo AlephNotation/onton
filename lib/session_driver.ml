@@ -50,6 +50,7 @@ let completion_claim_is_authoritative = function
   | Orchestrator.Session_ok | Orchestrator.Session_no_commits -> true
   | Orchestrator.Session_process_error _ | Orchestrator.Session_no_resume
   | Orchestrator.Session_failed _ | Orchestrator.Session_validation_failed _
+  | Orchestrator.Session_rebase_conflict_remaining _
   | Orchestrator.Session_controller_failed _ | Orchestrator.Session_give_up
   | Orchestrator.Session_worktree_missing | Orchestrator.Session_push_failed _
   | Orchestrator.Session_context_exhausted ->
@@ -191,7 +192,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
         log_event runtime ~patch_id
           "Session fallback exhausted — continue and fresh both failed, needs \
            intervention";
-        Runtime.update_orchestrator runtime (fun orch ->
+        Runtime.commit_orchestrator_exn runtime (fun orch ->
             Orchestrator.apply_session_result orch patch_id
               Orchestrator.Session_give_up);
         (`Failed, [])
@@ -204,7 +205,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
         in
         match WS.ensure_worktree ~patch_id ~agent () with
         | Worktree_setup.Missing ->
-            Runtime.update_orchestrator runtime (fun orch ->
+            Runtime.commit_orchestrator_exn runtime (fun orch ->
                 Orchestrator.apply_session_result orch patch_id
                   Orchestrator.Session_worktree_missing);
             (`Failed, [])
@@ -214,7 +215,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
             | Error detail ->
                 log_event runtime ~patch_id
                   ("Worker sandbox refused session — " ^ detail);
-                Runtime.update_orchestrator runtime (fun orch ->
+                Runtime.commit_orchestrator_exn runtime (fun orch ->
                     Orchestrator.apply_session_result orch patch_id
                       (Orchestrator.Session_process_error
                          { is_fresh; detail = Some detail }));
@@ -345,7 +346,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                     let mark_backend_accepted_turn () =
                       if not !backend_accepted_turn then (
                         backend_accepted_turn := true;
-                        Runtime.update_orchestrator runtime (fun orch ->
+                        Runtime.commit_orchestrator_exn runtime (fun orch ->
                             Orchestrator.mark_inflight_human_messages_delivered
                               orch patch_id))
                     in
@@ -520,6 +521,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                       | Eio.Cancel.Cancelled _ as exn ->
                           cancelled := Some exn;
                           Error (Stdlib.Printexc.to_string exn)
+                      | Runtime.Durable_store_failed _ as exn -> raise exn
                       | exn -> Error (Stdlib.Printexc.to_string exn)
                     in
                     let open Run_classification in
@@ -758,7 +760,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                     | None -> ()
                     | Some exn ->
                         let agent_before, agent_after =
-                          Runtime.update_orchestrator_returning runtime
+                          Runtime.commit_orchestrator_returning_exn runtime
                             (fun orch ->
                               let agent_before =
                                 Orchestrator.agent orch patch_id
@@ -841,6 +843,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                         let reason =
                           match failure with
                           | Orchestrator.Repair_required { detail; _ }
+                          | Orchestrator.Rebase_conflict_remaining { detail }
                           | Orchestrator.Controller_failed { detail } ->
                               detail
                         in
@@ -936,6 +939,10 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                              fail closed. *)
                           Orchestrator.Session_validation_failed
                             { target; detail }
+                      | `Rejected
+                          (Orchestrator.Rebase_conflict_remaining { detail }) ->
+                          Orchestrator.Session_rebase_conflict_remaining
+                            { detail }
                       | `Rejected (Orchestrator.Controller_failed { detail }) ->
                           (* The worker has neither Git metadata authority nor
                              supervisor capabilities. Asking it to repair a
@@ -958,6 +965,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                           | Orchestrator.Session_no_resume
                           | Orchestrator.Session_failed _
                           | Orchestrator.Session_validation_failed _
+                          | Orchestrator.Session_rebase_conflict_remaining _
                           | Orchestrator.Session_controller_failed _
                           | Orchestrator.Session_give_up
                           | Orchestrator.Session_worktree_missing
@@ -979,6 +987,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                       | Orchestrator.Session_no_resume
                       | Orchestrator.Session_failed _
                       | Orchestrator.Session_validation_failed _
+                      | Orchestrator.Session_rebase_conflict_remaining _
                       | Orchestrator.Session_controller_failed _
                       | Orchestrator.Session_give_up
                       | Orchestrator.Session_worktree_missing
@@ -991,10 +1000,22 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                       else None
                     in
                     let agent_before, push_agent_after =
-                      Runtime.update_orchestrator_returning runtime (fun orch ->
+                      Runtime.commit_orchestrator_returning_exn runtime
+                        (fun orch ->
                           let agent_before = Orchestrator.agent orch patch_id in
                           let orch =
                             apply_session_transition orch final_session_result
+                          in
+                          let orch =
+                            match (kind, final_user_result) with
+                            | None, `Ok ->
+                                Orchestrator.mark_start_awaiting_publication
+                                  orch patch_id
+                            | ( None,
+                                ( `Failed | `No_commits | `Pr_body_miss
+                                | `Retry_push | `Review_unresolved ) )
+                            | Some _, _ ->
+                                orch
                           in
                           let orch =
                             match (completion_claim, publication) with
@@ -1079,12 +1100,13 @@ module Make (W : Worktree.S) (Env : ENV) = struct
         effort : string;
         mutable gameplan_prompt : string;
         mutable patch_prompt : string;
+        mutable conversation_generation : int;
         timeout : float;
       }
         -> long_lived_session
 
   let create_long_lived_session ~(backend : Llm_backend_long_lived.t) ~provider
-      ~model ~effort ~gameplan_prompt ~patch_prompt =
+      ~model ~effort ~gameplan_prompt ~patch_prompt ~conversation_generation =
     let (Llm_backend_long_lived.T
            { name; timeout; start; prompt = prompt_backend; shutdown; _ }) =
       backend
@@ -1105,14 +1127,17 @@ module Make (W : Worktree.S) (Env : ENV) = struct
         effort;
         gameplan_prompt;
         patch_prompt;
+        conversation_generation;
         timeout;
       }
 
-  let update_long_lived_session_prompts session ~gameplan_prompt ~patch_prompt =
+  let update_long_lived_session session ~gameplan_prompt ~patch_prompt
+      ~conversation_generation =
     let (Long_lived_session session) = session in
     let changed =
       (not (String.equal session.gameplan_prompt gameplan_prompt))
-      || not (String.equal session.patch_prompt patch_prompt)
+      || (not (String.equal session.patch_prompt patch_prompt))
+      || session.conversation_generation <> conversation_generation
     in
     if changed then (
       (match session.handle with
@@ -1125,7 +1150,8 @@ module Make (W : Worktree.S) (Env : ENV) = struct
       session.failed <- false;
       session.failure_reason <- None);
     session.gameplan_prompt <- gameplan_prompt;
-    session.patch_prompt <- patch_prompt
+    session.patch_prompt <- patch_prompt;
+    session.conversation_generation <- conversation_generation
 
   let long_lived_session_failed = function
     | Long_lived_session session -> session.failed
@@ -1233,6 +1259,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                   Some "long-lived backend prompt cancelled";
                 (try session.shutdown handle with _ -> ());
                 raise exn
+            | Runtime.Durable_store_failed _ as exn -> raise exn
             | exn ->
                 session.handle <- None;
                 session.sandbox_profile <- None;

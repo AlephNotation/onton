@@ -11,7 +11,12 @@ type session_fallback = Fresh_available | Tried_fresh | Given_up
 
 type session_state =
   | Not_started
-  | Started of { resume_id : string option; fallback : session_fallback }
+  | Started of {
+      resume_id : string option;
+      fallback : session_fallback;
+      conversation_generation : int;
+      prompt_fingerprint : string option;
+    }
 [@@deriving show, eq, sexp_of, compare]
 
 type op_state = Queued | Running
@@ -316,7 +321,8 @@ val complete : t -> t
 (** {2 State mutation helpers} *)
 
 val enqueue : t -> Types.Operation_kind.t -> t
-(** Add an operation to the queue (idempotent). *)
+(** Add an operation to the queue (idempotent). Worker-editing work invalidates
+    any prior completion attestation as soon as the work becomes required. *)
 
 val mark_merged : t -> t
 (** Mark the patch as merged. *)
@@ -342,18 +348,20 @@ val clear_session_fallback : t -> t
 (** Reset session fallback to [Fresh_available]. *)
 
 val on_session_failure : t -> is_fresh:bool -> t
-(** Handle a Claude session failure. Pure decision:
+(** Handle a worker session failure. Pure decision:
     - Start path (no PR) + fresh failure: reset to [Fresh_available] for retry
-    - Resume failure: escalate to [Tried_fresh] (will try fresh next)
-    - Respond path fresh failure: escalate to [Given_up] → needs_intervention *)
+    - Resume failure: escalate toward a fresh retry
+    - Respond-path fresh failure: advance toward [Given_up] Every non-start
+      failure advances the backend-neutral conversation generation so long-lived
+      providers cannot silently reuse the failed handle. *)
 
 val on_pr_discovery_failure : t -> t
-(** Handle a successful Claude run where PR discovery failed. Increments the
+(** Handle a successful worker run where PR discovery failed. Increments the
     durable attempt counter so [needs_intervention] fires after repeated
     failures. No-op when the agent already has a PR. *)
 
 val on_pre_session_failure : t -> t
-(** Handle a failure that occurs before a Claude session starts (worktree
+(** Handle a failure that occurs before a worker session starts (worktree
     creation, process spawn error). Increments [start_attempts_without_pr] for
     no-PR agents so they hit [needs_intervention] after 2 failures instead of
     retrying indefinitely. No-op for agents that already have a PR. *)
@@ -587,6 +595,22 @@ val set_llm_session_id : t -> string option -> t
     Preserved across fallback escalation so the operator can resume the session
     after intervention. Cleared on start-path fresh-failure reset (clean retry)
     and when the session is known dead (no-resume, give-up). *)
+
+val conversation_generation : t -> int
+(** Durable identity of the model conversation. Incremented whenever the
+    controller requires a genuinely fresh conversation, including for long-lived
+    backends that do not use resume ids. *)
+
+val prompt_fingerprint : t -> string option
+
+val restart_conversation : t -> t
+(** Clear the ephemeral resume id and advance the backend-neutral conversation
+    generation. *)
+
+val align_prompt_fingerprint : t -> string -> t
+(** Bind the current conversation to the stable prompt prefix. A changed prefix,
+    or a legacy resumed conversation with no recorded fingerprint, starts a new
+    conversation. Idempotent for the current fingerprint. *)
 
 val mark_inflight_human_messages_delivered : t -> t
 (** Clear [inflight_human_messages] once the backend has emitted evidence that

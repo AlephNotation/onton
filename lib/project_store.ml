@@ -74,24 +74,56 @@ let clear_completion_claim ~project_name ~patch_id =
 let read_completion_claim ~project_name ~patch_id =
   let path = completion_claim_path ~project_name ~patch_id in
   try
-    let stat = Unix.lstat path in
-    if Poly.equal stat.Unix.st_kind Unix.S_LNK then
+    let path_stat = Unix.lstat path in
+    if Poly.equal path_stat.Unix.st_kind Unix.S_LNK then
       Error "completion claim must not be a symlink"
-    else if not (Poly.equal stat.Unix.st_kind Unix.S_REG) then
+    else if not (Poly.equal path_stat.Unix.st_kind Unix.S_REG) then
       Error "completion claim must be a regular file"
-    else if stat.Unix.st_size > 4096 then
+    else if path_stat.Unix.st_size > 4096 then
       Error "completion claim exceeds 4096 bytes"
     else
-      let channel = Stdlib.open_in_bin path in
-      let content =
+      let fd = Unix.openfile path [ Unix.O_RDONLY; Unix.O_NONBLOCK ] 0 in
+      let channel = Unix.in_channel_of_descr fd in
+      let result =
         Stdlib.Fun.protect
           ~finally:(fun () -> Stdlib.close_in_noerr channel)
-          (fun () -> Stdlib.In_channel.input_all channel)
+          (fun () ->
+            let opened_stat = Unix.fstat fd in
+            if
+              (not (Poly.equal opened_stat.Unix.st_kind Unix.S_REG))
+              || opened_stat.Unix.st_dev <> path_stat.Unix.st_dev
+              || opened_stat.Unix.st_ino <> path_stat.Unix.st_ino
+            then Error "completion claim changed while it was opened"
+            else
+              let buffer = Bytes.create 4097 in
+              let rec read offset =
+                if offset = Bytes.length buffer then offset
+                else
+                  match
+                    Stdlib.input channel buffer offset
+                      (Bytes.length buffer - offset)
+                  with
+                  | 0 -> offset
+                  | count -> read (offset + count)
+              in
+              let length = read 0 in
+              let final_stat = Unix.fstat fd in
+              if length > 4096 then Error "completion claim exceeds 4096 bytes"
+              else if
+                final_stat.Unix.st_size <> length
+                || final_stat.Unix.st_size <> opened_stat.Unix.st_size
+                || (not
+                      (Float.equal final_stat.Unix.st_mtime opened_stat.st_mtime))
+                || not
+                     (Float.equal final_stat.Unix.st_ctime opened_stat.st_ctime)
+              then Error "completion claim changed while it was read"
+              else Ok (Stdlib.Bytes.sub_string buffer 0 length))
       in
-      match Yojson.Safe.from_string content with
-      | json -> Completion_claim.of_yojson json
-      | exception exn ->
-          Error ("completion claim is not valid JSON: " ^ Exn.to_string exn)
+      Result.bind result ~f:(fun content ->
+          match Yojson.Safe.from_string content with
+          | json -> Completion_claim.of_yojson json
+          | exception exn ->
+              Error ("completion claim is not valid JSON: " ^ Exn.to_string exn))
   with
   | Unix.Unix_error (Unix.ENOENT, _, _) ->
       Error "worker did not write a completion claim"
@@ -399,6 +431,29 @@ let%test "completion claims are fresh, bounded, and strictly decoded" =
           && Result.is_ok (clear_completion_claim ~project_name ~patch_id)
           && (not (Stdlib.Sys.file_exists path))
           && Result.is_error (read_completion_claim ~project_name ~patch_id))
+
+let%test "completion claim byte limit and symlink checks fail closed" =
+  with_temp_data_dir (fun () ->
+      let project_name = "Completion Boundary" in
+      let patch_id = Types.Patch_id.of_string "bounded" in
+      let path = completion_claim_path ~project_name ~patch_id in
+      ensure_dir (Stdlib.Filename.dirname path);
+      match write_file_atomically ~path ~content:(String.make 4097 'x') with
+      | Error _ -> false
+      | Ok () -> (
+          let oversized = read_completion_claim ~project_name ~patch_id in
+          Unix.unlink path;
+          let target = path ^ ".target" in
+          match
+            write_file_atomically ~path:target
+              ~content:"{\"status\":\"complete\"}"
+          with
+          | Error _ -> false
+          | Ok () ->
+              Unix.symlink target path;
+              Result.is_error oversized
+              && Result.is_error (read_completion_claim ~project_name ~patch_id)
+          ))
 
 let%test "ci_check_key uses run id for CheckRuns and slug for id-less checks" =
   let run_check = ci_check_for_test ~id:123 ~name:"CI / Test Suite" () in

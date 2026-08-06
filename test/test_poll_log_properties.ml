@@ -49,7 +49,12 @@ let make_agent ~patch_id ~branch ~has_conflict ~ci_failure_count ~current_op
   let session =
     if busy then
       Patch_agent.Started
-        { resume_id = None; fallback = Patch_agent.Fresh_available }
+        {
+          resume_id = None;
+          fallback = Patch_agent.Fresh_available;
+          conversation_generation = 0;
+          prompt_fingerprint = None;
+        }
     else Patch_agent.Not_started
   in
   Patch_agent.restore ~patch_id ~branch

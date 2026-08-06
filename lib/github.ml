@@ -63,6 +63,35 @@ let response_error_message_contains body ~substring =
   |> List.exists ~f:(fun msg ->
       String.is_substring (String.lowercase msg) ~substring:needle)
 
+let pull_request_already_exists = function
+  | Http_error { status = 422; body; _ } ->
+      response_error_message_contains body
+        ~substring:"pull request already exists"
+  | Http_error _ | Json_parse_error _ | Graphql_error _ | Timeout _
+  | Transport_error _ ->
+      false
+
+let%test "pull_request_already_exists accepts only the matching 422" =
+  pull_request_already_exists
+    (Http_error
+       {
+         meth = "POST";
+         path = "/pulls";
+         status = 422;
+         body =
+           {|{"errors":[{"message":"A pull request already exists for this head"}]}|};
+       })
+  && (not
+        (pull_request_already_exists
+           (Http_error
+              {
+                meth = "POST";
+                path = "/pulls";
+                status = 422;
+                body = {|{"message":"No commits between main and branch"}|};
+              })))
+  && not (pull_request_already_exists (Graphql_error [ "already exists" ]))
+
 let%test "response_error_message_contains: empty body returns false" =
   not (response_error_message_contains "" ~substring:"already exists")
 

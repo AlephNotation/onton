@@ -8,7 +8,12 @@ type session_fallback = Fresh_available | Tried_fresh | Given_up
 
 type session_state =
   | Not_started
-  | Started of { resume_id : string option; fallback : session_fallback }
+  | Started of {
+      resume_id : string option;
+      fallback : session_fallback;
+      conversation_generation : int;
+      prompt_fingerprint : string option;
+    }
 [@@deriving show, eq, sexp_of, compare]
 
 type op_state = Queued | Running
@@ -207,7 +212,14 @@ let review_failure t =
   | Review_not_requested | Review_requested _ -> None
 
 let start_session = function
-  | Not_started -> Started { resume_id = None; fallback = Fresh_available }
+  | Not_started ->
+      Started
+        {
+          resume_id = None;
+          fallback = Fresh_available;
+          conversation_generation = 0;
+          prompt_fingerprint = None;
+        }
   | Started _ as session -> session
 
 let default_max_ci_failures = 3
@@ -366,8 +378,12 @@ let highest_priority t =
       Int.compare (Priority.priority a) (Priority.priority b))
 
 let enqueue t k =
-  if List.mem t.queue k ~equal:Operation_kind.equal then t
-  else { t with queue = k :: t.queue }
+  let completion =
+    if Operation_kind.requires_completion_claim k then Completion_unattested
+    else t.completion
+  in
+  if List.mem t.queue k ~equal:Operation_kind.equal then { t with completion }
+  else { t with queue = k :: t.queue; completion }
 
 let mark_merged t = { t with merged = true }
 
@@ -405,7 +421,27 @@ let clear_session_fallback t =
   | Started session ->
       { t with session = Started { session with fallback = Fresh_available } }
 
-(** Handle a Claude session failure. Pure decision logic:
+let advance_conversation_generation t =
+  match t.session with
+  | Not_started -> t
+  | Started session ->
+      {
+        t with
+        session =
+          Started
+            {
+              session with
+              conversation_generation = session.conversation_generation + 1;
+            };
+      }
+
+let restart_conversation t =
+  match (advance_conversation_generation t).session with
+  | Not_started -> t
+  | Started session ->
+      { t with session = Started { session with resume_id = None } }
+
+(** Handle a worker session failure. Pure decision logic:
     - Start path (no PR) + fresh failure: reset to Fresh_available for retry
     - Resume failure: escalate to Tried_fresh (will try fresh next)
     - Fresh failure (respond path): escalate one step via set_tried_fresh *)
@@ -414,10 +450,20 @@ let on_session_failure t ~is_fresh =
     (* Start path fresh failure: full reset for clean retry *)
     {
       t with
-      session = Started { resume_id = None; fallback = Fresh_available };
+      session =
+        (match t.session with
+        | Not_started -> start_session Not_started
+        | Started session ->
+            Started
+              {
+                session with
+                resume_id = None;
+                fallback = Fresh_available;
+                conversation_generation = session.conversation_generation + 1;
+              });
     }
-  else if is_fresh then set_tried_fresh t
-  else set_session_failed t
+  else if is_fresh then set_tried_fresh t |> advance_conversation_generation
+  else set_session_failed t |> advance_conversation_generation
 
 let set_has_conflict t = { t with has_conflict = true }
 let clear_has_conflict t = { t with has_conflict = false }
@@ -443,7 +489,13 @@ let on_context_exhausted t =
     session =
       (match t.session with
       | Not_started -> Not_started
-      | Started session -> Started { session with resume_id = None });
+      | Started session ->
+          Started
+            {
+              session with
+              resume_id = None;
+              conversation_generation = session.conversation_generation + 1;
+            });
   }
 
 let reset_context_exhaustion_count t = { t with context_exhaustion_count = 0 }
@@ -573,7 +625,13 @@ let on_validation_failure t target =
     match decision with
     | Validation_repair.Restart_session -> (
         match t.session with
-        | Started session -> Started { session with resume_id = None }
+        | Started session ->
+            Started
+              {
+                session with
+                resume_id = None;
+                conversation_generation = session.conversation_generation + 1;
+              }
         | Not_started -> Not_started)
     | Validation_repair.Continue | Validation_repair.Exhausted -> t.session
   in
@@ -642,9 +700,58 @@ let set_llm_session_id t resume_id =
   match (t.session, resume_id) with
   | Not_started, None -> t
   | Not_started, Some _ ->
-      { t with session = Started { resume_id; fallback = Fresh_available } }
+      {
+        t with
+        session =
+          Started
+            {
+              resume_id;
+              fallback = Fresh_available;
+              conversation_generation = 0;
+              prompt_fingerprint = None;
+            };
+      }
   | Started session, _ ->
       { t with session = Started { session with resume_id } }
+
+let conversation_generation t =
+  match t.session with
+  | Not_started -> 0
+  | Started session -> session.conversation_generation
+
+let prompt_fingerprint t =
+  match t.session with
+  | Not_started -> None
+  | Started session -> session.prompt_fingerprint
+
+let align_prompt_fingerprint t fingerprint =
+  let fingerprint = String.strip fingerprint in
+  if String.is_empty fingerprint then t
+  else
+    match t.session with
+    | Not_started -> t
+    | Started session -> (
+        match session.prompt_fingerprint with
+        | Some current when String.equal current fingerprint -> t
+        | None when Option.is_none session.resume_id ->
+            {
+              t with
+              session =
+                Started { session with prompt_fingerprint = Some fingerprint };
+            }
+        | None | Some _ ->
+            {
+              t with
+              session =
+                Started
+                  {
+                    resume_id = None;
+                    fallback = Fresh_available;
+                    conversation_generation =
+                      session.conversation_generation + 1;
+                    prompt_fingerprint = Some fingerprint;
+                  };
+            })
 
 let mark_inflight_human_messages_delivered t =
   { t with inflight_human_messages = [] }
@@ -720,19 +827,29 @@ let reset_intervention_state t =
     | Completion_blocked _ -> true
     | Completion_unattested | Completion_attested _ -> false
   in
+  let restart_failed_session =
+    match t.session with
+    | Started { fallback = Tried_fresh | Given_up; _ } -> true
+    | Not_started | Started { fallback = Fresh_available; _ } -> false
+  in
   {
     t with
     session =
       (match t.session with
       | Not_started -> Not_started
       | Started session ->
+          let restart =
+            restart_validation_session || restart_completion_session
+            || restart_failed_session
+          in
           Started
             {
+              session with
               fallback = Fresh_available;
-              resume_id =
-                (if restart_validation_session || restart_completion_session
-                 then None
-                 else session.resume_id);
+              resume_id = (if restart then None else session.resume_id);
+              conversation_generation =
+                (if restart then session.conversation_generation + 1
+                 else session.conversation_generation);
             });
     ci_failure_count = 0;
     validation_repair = Validation_repair.empty;
@@ -1016,8 +1133,10 @@ let respond t k =
   }
 
 let complete t =
-  if not (is_busy t) then t
-  else { t with activity = Inactive; inflight_human_messages = [] }
+  match t.activity with
+  | Inactive -> t
+  | Active _ | Interrupted _ ->
+      { t with activity = Inactive; inflight_human_messages = [] }
 
 let%test "code-capable starts, responses, and resumes invalidate completion" =
   let patch_id = Patch_id.of_string "completion-turn" in
@@ -1035,7 +1154,9 @@ let%test "code-capable starts, responses, and resumes invalidate completion" =
     attest_completion agent "old-head" |> clear_pr |> fun agent ->
     start agent ~base_branch:base
   in
-  let code_turn = ready Human |> fun agent -> respond agent Human in
+  let queued_code = ready Human in
+  let duplicate_code = enqueue queued_code Human in
+  let code_turn = respond queued_code Human in
   let notes_turn = ready Pr_body |> fun agent -> respond agent Pr_body in
   let resumed_start =
     attest_completion (create ~branch patch_id) "old-head" |> fun agent ->
@@ -1054,6 +1175,8 @@ let%test "code-capable starts, responses, and resumes invalidate completion" =
     resume_current_message agent ~op:(Some Rebase)
   in
   equal_completion_state start_turn.completion Completion_unattested
+  && equal_completion_state queued_code.completion Completion_unattested
+  && equal_completion_state duplicate_code.completion Completion_unattested
   && equal_completion_state code_turn.completion Completion_unattested
   && equal_completion_state notes_turn.completion
        (Completion_attested "old-head")
@@ -1063,6 +1186,39 @@ let%test "code-capable starts, responses, and resumes invalidate completion" =
        (Completion_attested "old-head")
   && equal_completion_state resumed_rebase.completion
        (Completion_attested "old-head")
+
+let%test "stable prompt identity rotates legacy and changed conversations once"
+    =
+  let branch = Branch.of_string "onton/prompt-identity" in
+  let patch_id = Patch_id.of_string "prompt-identity" in
+  let initial =
+    create ~branch patch_id |> fun agent ->
+    start agent ~base_branch:(Branch.of_string "main") |> fun agent ->
+    set_llm_session_id agent (Some "legacy-session")
+  in
+  let aligned = align_prompt_fingerprint initial "prefix-a" in
+  let same = align_prompt_fingerprint aligned "prefix-a" in
+  let changed = align_prompt_fingerprint same "prefix-b" in
+  Option.is_none (llm_session_id aligned)
+  && conversation_generation aligned = 1
+  && equal aligned same
+  && conversation_generation changed = 2
+  && Option.equal String.equal (prompt_fingerprint changed) (Some "prefix-b")
+
+let%test "intervention restarts a terminal conversation" =
+  let agent =
+    create
+      ~branch:(Branch.of_string "onton/intervention")
+      (Patch_id.of_string "intervention")
+    |> fun agent ->
+    start agent ~base_branch:(Branch.of_string "main") |> fun agent ->
+    set_llm_session_id agent (Some "failed-session") |> set_session_given_up
+  in
+  let generation = conversation_generation agent in
+  let reset = reset_intervention_state agent in
+  Option.is_none (llm_session_id reset)
+  && equal_session_fallback (session_fallback reset) Fresh_available
+  && conversation_generation reset = generation + 1
 
 (* -- Tests for session failure recovery -- *)
 
@@ -1074,7 +1230,14 @@ let%test
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Tried_fresh };
+      session =
+        Started
+          {
+            resume_id = None;
+            fallback = Tried_fresh;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:true in
@@ -1086,11 +1249,20 @@ let%test "on_session_failure: resume failure escalates to Tried_fresh" =
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Fresh_available };
+      session =
+        Started
+          {
+            resume_id = Some "failed-resume";
+            fallback = Fresh_available;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:false in
   equal_session_fallback (session_fallback t) Tried_fresh
+  && Option.equal String.equal (llm_session_id t) (Some "failed-resume")
+  && conversation_generation t = 1
 
 let%test "on_session_failure: respond path fresh escalates to Tried_fresh" =
   let t = create ~branch:(Branch.of_string "b1") (Patch_id.of_string "1") in
@@ -1099,11 +1271,20 @@ let%test "on_session_failure: respond path fresh escalates to Tried_fresh" =
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Fresh_available };
+      session =
+        Started
+          {
+            resume_id = Some "failed-fresh";
+            fallback = Fresh_available;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:true in
   equal_session_fallback (session_fallback t) Tried_fresh
+  && Option.equal String.equal (llm_session_id t) (Some "failed-fresh")
+  && conversation_generation t = 1
 
 let%test
     "on_session_failure: respond path second fresh failure escalates to \
@@ -1114,7 +1295,14 @@ let%test
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Tried_fresh };
+      session =
+        Started
+          {
+            resume_id = None;
+            fallback = Tried_fresh;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:true in
@@ -1128,7 +1316,14 @@ let%test
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Tried_fresh };
+      session =
+        Started
+          {
+            resume_id = None;
+            fallback = Tried_fresh;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:true in

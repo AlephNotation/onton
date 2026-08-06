@@ -9,6 +9,8 @@ type snapshot = {
 
 type durable_store = snapshot -> (unit, string) result
 
+exception Durable_store_failed of string
+
 type t = {
   mutex : Eio.Mutex.t;
   durable_store : durable_store;
@@ -108,6 +110,14 @@ let commit_orchestrator_returning t f =
   commit t (fun s ->
       let orchestrator, value = f s.orchestrator in
       ({ s with orchestrator }, value))
+
+let commit_orchestrator_returning_exn t f =
+  match commit_orchestrator_returning t f with
+  | Ok value -> value
+  | Error message -> raise (Durable_store_failed message)
+
+let commit_orchestrator_exn t f =
+  commit_orchestrator_returning_exn t (fun orchestrator -> (f orchestrator, ()))
 
 let update_activity_log t f =
   update t (fun s -> { s with activity_log = f s.activity_log })

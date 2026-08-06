@@ -145,6 +145,9 @@ let do_start m pid base =
        module note), so publish it promptly so the gate never interferes; the
        Start gate's own liveness lives in [test_interleaving_properties.ml]. *)
     let orch = Orchestrator.set_checks_passing orch pid true in
+    let head = "head-" ^ Patch_id.to_string pid in
+    let orch = Orchestrator.set_head_oid orch pid (Some head) in
+    let orch = Orchestrator.attest_completion orch pid head in
     let orch = Orchestrator.complete orch pid in
     absorb { m with orch } ~branch:agent.Patch_agent.branch ~from:base
 
@@ -193,6 +196,9 @@ let do_rebase_traced m pid base =
         Orchestrator.apply_rebase_result orch pid Worktree.Noop base
       in
       let orch = Orchestrator.set_checks_passing orch pid true in
+      let head = "head-" ^ Patch_id.to_string pid in
+      let orch = Orchestrator.set_head_oid orch pid (Some head) in
+      let orch = Orchestrator.attest_completion orch pid head in
       ( { m with orch },
         Some
           {
@@ -207,6 +213,9 @@ let do_rebase_traced m pid base =
         Orchestrator.apply_rebase_result orch pid Worktree.Ok base
       in
       let orch = Orchestrator.set_checks_passing orch pid true in
+      let head = "head-" ^ Patch_id.to_string pid in
+      let orch = Orchestrator.set_head_oid orch pid (Some head) in
+      let orch = Orchestrator.attest_completion orch pid head in
       ( absorb { m with orch } ~branch:agent.Patch_agent.branch ~from:base,
         Some
           {

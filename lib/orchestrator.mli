@@ -20,7 +20,14 @@ type action =
   | Rebase of Patch_id.t * Branch.t
 [@@deriving sexp_of, show, eq]
 
-type message_status = Pending | Acked | Completed | Obsolete
+type message_status =
+  | Pending
+  | Acked
+  | Awaiting_publication
+      (** A successful initial worker turn has durably published its branch;
+          only deterministic pull-request creation/association remains. *)
+  | Completed
+  | Obsolete
 [@@deriving sexp_of, show, eq]
 
 type patch_agent_message = {
@@ -116,6 +123,11 @@ val set_tried_fresh : t -> Patch_id.t -> t
 val clear_session_fallback : t -> Patch_id.t -> t
 val on_session_failure : t -> Patch_id.t -> is_fresh:bool -> t
 val on_pr_discovery_failure : t -> Patch_id.t -> t
+val mark_start_awaiting_publication : t -> Patch_id.t -> t
+
+(* Keep an awaiting Start replayable without rerunning its worker turn. Also
+   records the bounded publication failure and leaves the agent interrupted. *)
+val defer_start_publication : t -> Patch_id.t -> t
 val set_has_conflict : t -> Patch_id.t -> t
 val clear_has_conflict : t -> Patch_id.t -> t
 val reset_conflict_noop_count : t -> Patch_id.t -> t
@@ -172,6 +184,8 @@ val mark_running : t -> Patch_id.t -> t
 
 val set_worktree_path : t -> Patch_id.t -> string -> t
 val set_llm_session_id : t -> Patch_id.t -> string option -> t
+val align_prompt_fingerprint : t -> Patch_id.t -> string -> t
+val restart_conversation : t -> Patch_id.t -> t
 
 val mark_inflight_human_messages_delivered : t -> Patch_id.t -> t
 (** Clear inflight Human messages after backend turn acceptance. See
@@ -229,6 +243,7 @@ val agents_map : t -> Patch_agent.t Map.M(Patch_id).t
     postmortem diagnosis. *)
 type publication_failure =
   | Repair_required of { target : Validation_repair.target; detail : string }
+  | Rebase_conflict_remaining of { detail : string }
   | Controller_failed of { detail : string }
 [@@deriving show, eq, sexp_of]
 
@@ -241,6 +256,7 @@ type session_result =
       target : Validation_repair.target;
       detail : string;
     }
+  | Session_rebase_conflict_remaining of { detail : string }
   | Session_controller_failed of { detail : string }
   | Session_give_up
   | Session_worktree_missing
@@ -263,12 +279,15 @@ val apply_session_result : t -> Patch_id.t -> session_result -> t
     [Session_validation_failed] -> preserve or deliberately rotate the healthy
     backend session according to the failure-local repair budget, queue its
     actionable detail, and complete the current operation for durable replay.
-    [Session_controller_failed] -> fail closed without asking the capability-
-    bounded worker to repair supervisor or repository state. [Session_no_resume]
-    -> on_session_failure (not fresh) + clear llm_session_id \+ complete_failed.
-    [Session_give_up] -> set_session_given_up + clear llm_session_id +
-    complete_failed. [Session_worktree_missing] -> on_pre_session_failure +
-    complete_failed.
+    [Session_rebase_conflict_remaining] -> mark the conflict, enqueue another
+    [Merge_conflict] operation, and complete without consuming validation-repair
+    attempts; each successful [rebase --continue] made progress even when the
+    next commit conflicts. [Session_controller_failed] -> fail closed without
+    asking the capability- bounded worker to repair supervisor or repository
+    state. [Session_no_resume] -> restart the provider-neutral conversation +
+    complete_failed. [Session_give_up] -> set_session_given_up + restart the
+    conversation + complete_failed. [Session_worktree_missing] ->
+    on_pre_session_failure + complete_failed.
 
     {b Deferred completion}: [Session_push_failed] and [Session_no_commits] do
     NOT complete the agent — they only adjust state ([clear_session_fallback] in
@@ -418,6 +437,7 @@ val apply_rebase_with_anchor :
 
 type rebase_push_resolution =
   | Rebase_push_ok
+  | Rebase_completion_unbound
   | Rebase_push_failed
   | Rebase_push_queue_locked
   | Rebase_push_error
@@ -435,6 +455,9 @@ val apply_rebase_push_result :
     updated state and resolution.
 
     - [Rebase_push_ok]: push succeeded or was up-to-date; no further action.
+    - [Rebase_completion_unbound]: push succeeded, but an existing completion
+      attestation could not be mapped to an exact rewritten head. Invalidates it
+      and queues a worker re-attestation turn instead of guessing.
     - [Rebase_push_failed]: push was rejected (lease failure); resets conflict
       state and enqueues [Merge_conflict] so the next poll cycle retries.
     - [Rebase_push_queue_locked]: push was rejected because the PR is queued in

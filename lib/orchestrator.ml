@@ -9,7 +9,12 @@ open Types
     > It wires together the state store, patch agents, poller, and reconciler.
     v} *)
 
-type message_status = Pending | Acked | Completed | Obsolete
+type message_status =
+  | Pending
+  | Acked
+  | Awaiting_publication
+  | Completed
+  | Obsolete
 [@@deriving sexp_of, show, eq]
 
 type action =
@@ -261,7 +266,7 @@ let reconcile_message t msg =
         else acc)
   in
   match Map.find t.outbox msg.message_id with
-  | Some { status = Pending | Acked | Completed; _ } -> t
+  | Some { status = Pending | Acked | Awaiting_publication | Completed; _ } -> t
   | Some { status = Obsolete; _ } | None ->
       { t with outbox = Map.set t.outbox ~key:msg.message_id ~data:msg }
 
@@ -485,6 +490,13 @@ let runnable_messages t =
             (Patch_agent.current_message_id agent)
             (Some msg.message_id)
           && not (Patch_agent.is_busy agent)
+      | Awaiting_publication ->
+          let agent = agent t msg.patch_id in
+          Option.equal Message_id.equal
+            (Patch_agent.current_message_id agent)
+            (Some msg.message_id)
+          && (not (Patch_agent.is_busy agent))
+          && not (Patch_agent.needs_intervention agent)
       | Completed | Obsolete -> false)
   |> List.sort ~compare:(fun a b ->
       Int.compare (action_rank a.action) (action_rank b.action))
@@ -494,7 +506,7 @@ let accept_message t message_id =
   | None -> (t, None)
   | Some msg -> (
       match msg.status with
-      | Acked | Completed | Obsolete -> (t, None)
+      | Acked | Awaiting_publication | Completed | Obsolete -> (t, None)
       | Pending ->
           let agent = agent t msg.patch_id in
           if agent.Patch_agent.generation <> msg.generation then
@@ -515,7 +527,7 @@ let resume_message t message_id =
   | None -> (t, None)
   | Some msg -> (
       match msg.status with
-      | Pending | Completed | Obsolete -> (t, None)
+      | Pending | Awaiting_publication | Completed | Obsolete -> (t, None)
       | Acked ->
           let agent = agent t msg.patch_id in
           if
@@ -576,6 +588,34 @@ let on_session_failure t patch_id ~is_fresh =
 
 let on_pr_discovery_failure t patch_id =
   update_agent t patch_id ~f:Patch_agent.on_pr_discovery_failure
+
+let mark_start_awaiting_publication t patch_id =
+  match find_agent t patch_id with
+  | None -> t
+  | Some agent -> (
+      match Patch_agent.current_message_id agent with
+      | None -> t
+      | Some message_id -> (
+          match Map.find t.outbox message_id with
+          | Some ({ action = Start _; status = Acked; _ } as message) ->
+              {
+                t with
+                outbox =
+                  Map.set t.outbox ~key:message_id
+                    ~data:{ message with status = Awaiting_publication };
+              }
+          | Some
+              {
+                status = Pending | Awaiting_publication | Completed | Obsolete;
+                _;
+              }
+          | Some { action = Respond _ | Rebase _; status = Acked; _ }
+          | None ->
+              t))
+
+let defer_start_publication t patch_id =
+  let t = on_pr_discovery_failure t patch_id in
+  update_agent t patch_id ~f:Patch_agent.reset_busy
 
 let set_has_conflict t patch_id =
   update_agent t patch_id ~f:Patch_agent.set_has_conflict
@@ -688,6 +728,13 @@ let set_worktree_path t patch_id path =
 let set_llm_session_id t patch_id session_id =
   update_agent t patch_id ~f:(fun a ->
       Patch_agent.set_llm_session_id a session_id)
+
+let align_prompt_fingerprint t patch_id fingerprint =
+  update_agent t patch_id ~f:(fun agent ->
+      Patch_agent.align_prompt_fingerprint agent fingerprint)
+
+let restart_conversation t patch_id =
+  update_agent t patch_id ~f:Patch_agent.restart_conversation
 
 let mark_inflight_human_messages_delivered t patch_id =
   update_agent t patch_id ~f:Patch_agent.mark_inflight_human_messages_delivered
@@ -819,11 +866,13 @@ let apply_rebase_with_anchor t patch_id rebase_result new_base anchor_events =
 
 type publication_failure =
   | Repair_required of { target : Validation_repair.target; detail : string }
+  | Rebase_conflict_remaining of { detail : string }
   | Controller_failed of { detail : string }
 [@@deriving show, eq, sexp_of]
 
 type rebase_push_resolution =
   | Rebase_push_ok
+  | Rebase_completion_unbound
   | Rebase_push_failed
   | Rebase_push_queue_locked
   | Rebase_push_error
@@ -832,17 +881,49 @@ type rebase_push_resolution =
 
 let apply_rebase_push_result t patch_id ?rewritten_head
     (push_outcome : Worktree.push_result option) =
+  let require_reattestation t =
+    let detail =
+      "The controller published a rebased branch but could not bind the prior \
+       completion attestation to the exact published Git head. Re-check the \
+       integrated patch and write a fresh completion claim."
+    in
+    let t =
+      update_agent t patch_id ~f:(fun agent ->
+          Patch_agent.add_human_message agent detail)
+      |> fun t -> enqueue t patch_id Operation_kind.Human
+    in
+    (t, Rebase_completion_unbound)
+  in
+  let completion_is_attested t =
+    match (agent t patch_id).Patch_agent.completion with
+    | Patch_agent.Completion_attested _ -> true
+    | Patch_agent.Completion_unattested | Patch_agent.Completion_blocked _ ->
+        false
+  in
   match push_outcome with
   | None -> (t, Rebase_push_ok) (* no push effect emitted; already handled *)
   | Some Worktree.Push_ok | Some Worktree.Push_up_to_date ->
-      let t =
+      let t, resolution =
         match rewritten_head with
-        | None -> t
+        | None ->
+            if completion_is_attested t then require_reattestation t
+            else (t, Rebase_push_ok)
         | Some (from_head, to_head) ->
-            update_agent t patch_id ~f:(fun agent ->
-                Patch_agent.carry_completion_forward agent ~from_head ~to_head)
+            let t =
+              update_agent t patch_id ~f:(fun agent ->
+                  Patch_agent.carry_completion_forward agent ~from_head ~to_head)
+            in
+            if
+              match (agent t patch_id).Patch_agent.completion with
+              | Patch_agent.Completion_attested head ->
+                  not (String.equal head to_head)
+              | Patch_agent.Completion_unattested
+              | Patch_agent.Completion_blocked _ ->
+                  false
+            then require_reattestation t
+            else (t, Rebase_push_ok)
       in
-      (t, Rebase_push_ok)
+      (t, resolution)
   | Some (Worktree.Push_rejected Push_reject_classify.Merge_queue_locked) ->
       (* GitHub locked the head branch because the PR is queued in a merge
          queue — there is no conflict and nothing to retry. Drop the push: the
@@ -1004,6 +1085,7 @@ type session_result =
       target : Validation_repair.target;
       detail : string;
     }
+  | Session_rebase_conflict_remaining of { detail : string }
   | Session_controller_failed of { detail : string }
   | Session_give_up
   | Session_worktree_missing
@@ -1097,10 +1179,7 @@ let apply_session_result t patch_id result =
          ladder.  Clearing [llm_session_id] forces the next iteration to
          Fresh ([session_mode]), and a Fresh attempt can never produce
          [Session_no_resume] (classifier requires [is_resume]), so no loop. *)
-      let t =
-        update_agent t patch_id ~f:(fun a ->
-            Patch_agent.set_llm_session_id a None)
-      in
+      let t = restart_conversation t patch_id in
       complete_failed t patch_id
   | Session_failed { is_fresh; _ } ->
       let t = on_session_failure t patch_id ~is_fresh in
@@ -1117,20 +1196,22 @@ let apply_session_result t patch_id result =
       in
       let t = enqueue t patch_id Operation_kind.Human in
       complete t patch_id
+  | Session_rebase_conflict_remaining { detail = _ } ->
+      let t = clear_session_fallback t patch_id in
+      let t = set_has_conflict t patch_id in
+      let t = enqueue t patch_id Operation_kind.Merge_conflict in
+      complete t patch_id
   | Session_controller_failed { detail } ->
       let t = set_session_given_up t patch_id in
       let t =
         update_agent t patch_id ~f:(fun agent ->
-            Patch_agent.set_llm_session_id agent None |> fun agent ->
+            Patch_agent.restart_conversation agent |> fun agent ->
             Patch_agent.add_human_message agent detail)
       in
       complete t patch_id
   | Session_give_up ->
       let t = set_session_given_up t patch_id in
-      let t =
-        update_agent t patch_id ~f:(fun a ->
-            Patch_agent.set_llm_session_id a None)
-      in
+      let t = restart_conversation t patch_id in
       complete_failed t patch_id
   | Session_worktree_missing ->
       let t = update_agent t patch_id ~f:Patch_agent.on_pre_session_failure in
@@ -1190,6 +1271,10 @@ let reject_rebase_publication t patch_id = function
       ( apply_session_result t patch_id
           (Session_validation_failed { target; detail }),
         Rebase_publication_rejected )
+  | Rebase_conflict_remaining { detail } ->
+      ( apply_session_result t patch_id
+          (Session_rebase_conflict_remaining { detail }),
+        Rebase_publication_rejected )
   | Controller_failed { detail } ->
       ( apply_session_result t patch_id (Session_controller_failed { detail }),
         Rebase_publication_rejected )
@@ -1218,9 +1303,10 @@ let combine_session_and_push ~branch_changed ~(session : session_result)
               Session_worktree_missing
               (* unreachable — outer match catches this *))
       | Session_process_error _ | Session_no_resume | Session_failed _
-      | Session_validation_failed _ | Session_controller_failed _
-      | Session_give_up | Session_worktree_missing | Session_push_failed _
-      | Session_no_commits | Session_context_exhausted ->
+      | Session_validation_failed _ | Session_rebase_conflict_remaining _
+      | Session_controller_failed _ | Session_give_up | Session_worktree_missing
+      | Session_push_failed _ | Session_no_commits | Session_context_exhausted
+        ->
           session)
 
 type start_outcome = Start_ok | Start_failed | Start_stale

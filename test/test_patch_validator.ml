@@ -80,6 +80,7 @@ let () =
           assert (String.equal result.Patch_validator.stderr "diagnostic");
           assert (not (Stdlib.Sys.file_exists (marker "should-not-run")))
       | Error
-          (Patch_validator.Scope_read_failed _ | Patch_validator.Outside_scope _)
-        ->
+          ( Patch_validator.Scope_read_failed _
+          | Patch_validator.Outside_scope _
+          | Patch_validator.Check_modified_repository _ ) ->
           assert false)

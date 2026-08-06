@@ -653,6 +653,9 @@ let gen_session_result =
           (fun b ->
             Onton.Orchestrator.Session_failed { is_fresh = b; detail = None })
           bool;
+        return
+          (Onton.Orchestrator.Session_rebase_conflict_remaining
+             { detail = "another conflict" });
         return Onton.Orchestrator.Session_give_up;
         return Onton.Orchestrator.Session_worktree_missing;
         return (Onton.Orchestrator.Session_push_failed None);

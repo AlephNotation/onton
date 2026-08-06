@@ -207,6 +207,55 @@ let () =
     | None -> false);
   Stdlib.print_endline "AO-1c passed"
 
+(* ========== AO-1c2: successful Start publication is a distinct durable phase
+   and a transient forge failure never replays the model action. ========== *)
+
+let () =
+  let orch, _patches, gameplan, pid = bootstrap_pre_pr () in
+  let orch, start_message = next_start orch gameplan pid in
+  let message_id = Orchestrator.message_id start_message in
+  let orch, accepted = Orchestrator.accept_message orch message_id in
+  assert (Option.is_some accepted);
+  let orch = Orchestrator.mark_start_awaiting_publication orch pid in
+  assert (
+    match Orchestrator.find_message orch message_id with
+    | Some message ->
+        Orchestrator.equal_message_status
+          (Orchestrator.message_status message)
+          Orchestrator.Awaiting_publication
+    | None -> false);
+  let orch = Orchestrator.defer_start_publication orch pid in
+  assert (not (Patch_agent.is_busy (Orchestrator.agent orch pid)));
+  assert (
+    List.exists (Orchestrator.runnable_messages orch) ~f:(fun message ->
+        Message_id.equal (Orchestrator.message_id message) message_id
+        && Orchestrator.equal_message_status
+             (Orchestrator.message_status message)
+             Orchestrator.Awaiting_publication));
+  let planned =
+    Patch_controller.plan_messages orch ~patches:gameplan.Gameplan.patches
+  in
+  assert (List.length planned = 1);
+  assert (
+    match planned with
+    | [ message ] ->
+        Message_id.equal (Orchestrator.message_id message) message_id
+        && Orchestrator.equal_message_status
+             (Orchestrator.message_status message)
+             Orchestrator.Awaiting_publication
+    | [] | _ :: _ :: _ -> false);
+  let orch = Orchestrator.record_created_pr orch pid (Pr_number.of_int 42) in
+  let orch = Orchestrator.complete orch pid in
+  assert (Patch_agent.has_pr (Orchestrator.agent orch pid));
+  assert (
+    match Orchestrator.find_message orch message_id with
+    | Some message ->
+        Orchestrator.equal_message_status
+          (Orchestrator.message_status message)
+          Orchestrator.Completed
+    | None -> false);
+  Stdlib.print_endline "AO-1c2 passed"
+
 (* ========== AO-1d: one validation gate gets a bounded resumed window and one
    fresh window; human intervention resets the lifecycle ========== *)
 

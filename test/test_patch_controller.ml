@@ -468,7 +468,12 @@ let () =
             ~pr_status:(Patch_pr_status.Present (Pr_number.of_int 42))
             ~session:
               (Patch_agent.Started
-                 { resume_id = None; fallback = Patch_agent.Fresh_available })
+                 {
+                   resume_id = None;
+                   fallback = Patch_agent.Fresh_available;
+                   conversation_generation = 0;
+                   prompt_fingerprint = None;
+                 })
             ~activity:Patch_agent.Inactive ~merged:false
             ~queue:[ Operation_kind.Rebase ] ~satisfies:false ~changed:false
             ~has_conflict:false ~base_branch:(Some branch)
@@ -514,7 +519,12 @@ let () =
             ~pr_status:(Patch_pr_status.Present (Pr_number.of_int 42))
             ~session:
               (Patch_agent.Started
-                 { resume_id = None; fallback = Patch_agent.Fresh_available })
+                 {
+                   resume_id = None;
+                   fallback = Patch_agent.Fresh_available;
+                   conversation_generation = 0;
+                   prompt_fingerprint = None;
+                 })
             ~activity:Patch_agent.Inactive ~merged:false
             ~queue:[ Operation_kind.Ci ] ~satisfies:false ~changed:false
             ~has_conflict:false ~base_branch:(Some branch)
@@ -784,7 +794,12 @@ let () =
             ~pr_status:(Patch_pr_status.Present (Pr_number.of_int 42))
             ~session:
               (Patch_agent.Started
-                 { resume_id = None; fallback = Patch_agent.Fresh_available })
+                 {
+                   resume_id = None;
+                   fallback = Patch_agent.Fresh_available;
+                   conversation_generation = 0;
+                   prompt_fingerprint = None;
+                 })
             ~activity:Patch_agent.Inactive ~merged:false ~queue:[]
             ~satisfies:false ~changed:true ~has_conflict:false
             ~base_branch:(Some main) ~notified_base_branch:(Some main)
@@ -857,7 +872,12 @@ let () =
             ~pr_status:(Patch_pr_status.Present (Pr_number.of_int 42))
             ~session:
               (Patch_agent.Started
-                 { resume_id = None; fallback = Patch_agent.Fresh_available })
+                 {
+                   resume_id = None;
+                   fallback = Patch_agent.Fresh_available;
+                   conversation_generation = 0;
+                   prompt_fingerprint = None;
+                 })
             ~activity:Patch_agent.Inactive ~merged:false ~queue:[]
             ~satisfies:false ~changed:true ~has_conflict:false
             ~base_branch:(Some main) ~notified_base_branch:(Some main)
@@ -923,7 +943,12 @@ let () =
             ~pr_status:(Patch_pr_status.Present (Pr_number.of_int 42))
             ~session:
               (Patch_agent.Started
-                 { resume_id = None; fallback = Patch_agent.Fresh_available })
+                 {
+                   resume_id = None;
+                   fallback = Patch_agent.Fresh_available;
+                   conversation_generation = 0;
+                   prompt_fingerprint = None;
+                 })
             ~activity:Patch_agent.Inactive ~merged:false
             ~queue:[ Operation_kind.Ci ] ~satisfies:false ~changed:true
             ~has_conflict:false ~base_branch:(Some main)
@@ -1341,7 +1366,12 @@ let () =
             ~pr_status:Patch_pr_status.Absent
             ~session:
               (Patch_agent.Started
-                 { resume_id = None; fallback = Patch_agent.Fresh_available })
+                 {
+                   resume_id = None;
+                   fallback = Patch_agent.Fresh_available;
+                   conversation_generation = 0;
+                   prompt_fingerprint = None;
+                 })
             ~activity:Patch_agent.Inactive ~merged:false ~queue:[]
             ~satisfies:false ~changed:false ~has_conflict:false
             ~base_branch:None ~notified_base_branch:None ~ci_failure_count:0
@@ -1387,7 +1417,12 @@ let () =
             ~pr_status:(Patch_pr_status.Present (Pr_number.of_int 42))
             ~session:
               (Patch_agent.Started
-                 { resume_id = None; fallback = Patch_agent.Fresh_available })
+                 {
+                   resume_id = None;
+                   fallback = Patch_agent.Fresh_available;
+                   conversation_generation = 0;
+                   prompt_fingerprint = None;
+                 })
             ~activity:Patch_agent.Inactive ~merged:false ~queue:[]
             ~satisfies:false ~changed:false ~has_conflict:false
             ~base_branch:(Some main) ~notified_base_branch:(Some main)

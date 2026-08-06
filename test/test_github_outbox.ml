@@ -561,6 +561,30 @@ let test_failed_writes_do_not_expose_transitions () =
            (Onton.Orchestrator.all_github_effects current.Runtime.orchestrator)))
     "failed durable write changed in-memory state"
 
+let test_required_durable_write_raises_and_preserves_state () =
+  let runtime =
+    Onton.Runtime.create ~gameplan ~main_branch:main
+      ~durable_store:(fun _ -> Error "disk full")
+      ()
+  in
+  let raised =
+    try
+      Onton.Runtime.commit_orchestrator_exn runtime (fun orch ->
+          Onton.Orchestrator.mark_merged orch patch_id);
+      false
+    with
+    | Onton.Runtime.Durable_store_failed message ->
+        String.equal message "disk full"
+    | _ -> false
+  in
+  check raised "required durable write did not stop on storage failure";
+  check
+    (not
+       (Onton.Runtime.read runtime (fun snap ->
+            (Onton.Orchestrator.agent snap.Runtime.orchestrator patch_id)
+              .Onton_core.Patch_agent.merged)))
+    "failed required durable write leaked into memory"
+
 let test_failed_outcome_write_keeps_claim () =
   let original =
     command (Onton_core.Github_effect.Direct_merge { pr_number })
@@ -641,5 +665,6 @@ let () =
   test_merge_observation_retains_running_and_failed_commands ();
   test_review_reconcile_replaces_stale_retry ();
   test_failed_writes_do_not_expose_transitions ();
+  test_required_durable_write_raises_and_preserves_state ();
   test_failed_outcome_write_keeps_claim ();
   Stdlib.print_endline "GitHub outbox durability tests passed"

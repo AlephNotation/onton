@@ -878,7 +878,7 @@ let () =
               let mismatched =
                 Orchestrator.attest_completion initial pid "other-head"
               in
-              let mismatched, _ =
+              let mismatched, mismatched_resolution =
                 Orchestrator.apply_rebase_push_result mismatched pid
                   ~rewritten_head:("old-head", "new-head")
                   (Some Worktree.Push_ok)
@@ -890,7 +890,37 @@ let () =
                    (Patch_agent.Completion_attested "new-head")
               && Patch_agent.equal_completion_state
                    (Orchestrator.agent mismatched pid).Patch_agent.completion
-                   (Patch_agent.Completion_attested "other-head")
+                   Patch_agent.Completion_unattested
+              && Orchestrator.equal_rebase_push_resolution mismatched_resolution
+                   Orchestrator.Rebase_completion_unbound
+        with _ -> false)
+  in
+
+  let prop_rebase_push_without_rewrite_requires_reattestation =
+    Test.make
+      ~name:"apply_rebase_push_result: missing rewrite cannot retain completion"
+      gen_patch_list_unique (fun patches ->
+        try
+          match patches with
+          | [] -> true
+          | first :: _ ->
+              let pid = first.Patch.id in
+              let initial = Orchestrator.create ~patches ~main_branch:main in
+              let initial =
+                Orchestrator.attest_completion initial pid "old-head"
+              in
+              let updated, resolution =
+                Orchestrator.apply_rebase_push_result initial pid
+                  (Some Worktree.Push_ok)
+              in
+              let agent = Orchestrator.agent updated pid in
+              Orchestrator.equal_rebase_push_resolution resolution
+                Orchestrator.Rebase_completion_unbound
+              && Patch_agent.equal_completion_state agent.Patch_agent.completion
+                   Patch_agent.Completion_unattested
+              && List.mem agent.Patch_agent.queue Operation_kind.Human
+                   ~equal:Operation_kind.equal
+              && not (List.is_empty agent.Patch_agent.human_messages)
         with _ -> false)
   in
 
@@ -1937,6 +1967,7 @@ let () =
       prop_rebase_push_ok;
       prop_rebase_push_up_to_date;
       prop_rebase_push_carries_exact_completion;
+      prop_rebase_push_without_rewrite_requires_reattestation;
       prop_rebase_publication_uses_failure_lifecycle;
       prop_rebase_push_rejected;
       prop_rebase_push_queue_locked;
