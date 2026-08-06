@@ -311,14 +311,41 @@ let () =
         Runtime.read runtime (fun snapshot ->
             Orchestrator.agent snapshot.Runtime.orchestrator patch_id)
       in
+      let completed_event_agent = ref None in
+      let interested_in = function
+        | Telemetry.Event.Complete _ -> true
+        | Telemetry.Event.Poll _ | Telemetry.Event.Action _
+        | Telemetry.Event.Stream _ | Telemetry.Event.Spawn_started _
+        | Telemetry.Event.Spawn_finalized _ | Telemetry.Event.Free_form _ ->
+            false
+      in
+      let consume = function
+        | Telemetry.Event.Complete { payload = `Assoc fields; _ } ->
+            completed_event_agent :=
+              List.Assoc.find fields ~equal:String.equal "agent_after"
+        | Telemetry.Event.Complete _ | Telemetry.Event.Poll _
+        | Telemetry.Event.Action _ | Telemetry.Event.Stream _
+        | Telemetry.Event.Spawn_started _ | Telemetry.Event.Spawn_finalized _
+        | Telemetry.Event.Free_form _ ->
+            ()
+      in
+      let completion_sink : Telemetry.Sink.t =
+        {
+          Telemetry.Sink.name = "session-validation-repair-completion";
+          interested_in;
+          consume;
+        }
+      in
       let result, _ =
-        Driver.run
-          ~sandbox_for_worktree:(fun ~worktree:_ -> Ok (Stdlib.Obj.magic ()))
-          ~kind:(Some Operation_kind.Human) ~patch_id ~prompt:"full repair"
-          ~resume_prompt:"delta repair" ~agent
-          ~on_pr_detected:(fun _ -> ())
-          ~validate_before_push:(fun ~worktree:_ ~base_branch:_ -> Ok ())
-          ~backend:successful_backend
+        Telemetry_dispatch.with_sink ~sink:completion_sink (fun () ->
+            Driver.run
+              ~sandbox_for_worktree:(fun ~worktree:_ ->
+                Ok (Stdlib.Obj.magic ()))
+              ~kind:(Some Operation_kind.Human) ~patch_id ~prompt:"full repair"
+              ~resume_prompt:"delta repair" ~agent
+              ~on_pr_detected:(fun _ -> ())
+              ~validate_before_push:(fun ~worktree:_ ~base_branch:_ -> Ok ())
+              ~backend:successful_backend)
       in
       assert (
         match result with
@@ -335,5 +362,12 @@ let () =
       in
       assert (Patch_agent.validation_failure_count completed = 0);
       assert (Patch_agent.completion_matches_head completed);
+      assert (
+        match !completed_event_agent with
+        | Some json -> (
+            match Persistence.patch_agent_of_yojson json with
+            | Ok agent -> Patch_agent.completion_matches_head agent
+            | Error _ -> false)
+        | None -> false);
       Stdlib.print_endline
         "session validation repair and completion attestation passed")

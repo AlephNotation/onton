@@ -713,35 +713,25 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                              "Session ended with %d non-completed tool call(s) \
                               (%s): %s"
                              (List.length failures) backend_name rendered));
-                    let apply_result_and_emit_complete final_session_result =
-                      let agent_before, agent_after =
-                        Runtime.update_orchestrator_returning runtime
-                          (fun orch ->
-                            let agent_before =
-                              Orchestrator.agent orch patch_id
-                            in
-                            (* Store the captured session_id BEFORE applying the session
-                     result. [apply_session_result] clears [llm_session_id] on
-                     start-path fresh failure (via [on_session_failure]) and on
-                     [Session_no_resume] / [Session_give_up]; doing the set
-                     afterwards would overwrite that reset and break the
-                     clean-retry path. *)
-                            let orch =
-                              match !captured_session_id with
-                              | Some _ ->
-                                  Orchestrator.set_llm_session_id orch patch_id
-                                    !captured_session_id
-                              | None -> orch
-                            in
-                            let orch =
-                              Orchestrator.apply_session_result orch patch_id
-                                final_session_result
-                            in
-                            let agent_after =
-                              Orchestrator.agent orch patch_id
-                            in
-                            (orch, (agent_before, agent_after)))
+                    let apply_session_transition orch final_session_result =
+                      (* Store the captured session_id BEFORE applying the
+                         session result. [apply_session_result] clears
+                         [llm_session_id] on start-path fresh failure (via
+                         [on_session_failure]) and on [Session_no_resume] /
+                         [Session_give_up]; doing the set afterwards would
+                         overwrite that reset and break the clean-retry path. *)
+                      let orch =
+                        match !captured_session_id with
+                        | Some _ ->
+                            Orchestrator.set_llm_session_id orch patch_id
+                              !captured_session_id
+                        | None -> orch
                       in
+                      Orchestrator.apply_session_result orch patch_id
+                        final_session_result
+                    in
+                    let emit_complete final_session_result ~agent_before
+                        ~agent_after =
                       Telemetry_dispatch.emit
                         (Telemetry.Event.Complete
                            {
@@ -762,13 +752,26 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                                      Persistence.patch_agent_to_yojson
                                        agent_after );
                                  ];
-                           });
-                      (agent_before, agent_after)
+                           })
                     in
                     (match !cancelled with
                     | None -> ()
                     | Some exn ->
-                        ignore (apply_result_and_emit_complete session_result);
+                        let agent_before, agent_after =
+                          Runtime.update_orchestrator_returning runtime
+                            (fun orch ->
+                              let agent_before =
+                                Orchestrator.agent orch patch_id
+                              in
+                              let orch =
+                                apply_session_transition orch session_result
+                              in
+                              let agent_after =
+                                Orchestrator.agent orch patch_id
+                              in
+                              (orch, (agent_before, agent_after)))
+                        in
+                        emit_complete session_result ~agent_before ~agent_after;
                         raise exn);
                     (* The supervisor is the sole publication boundary. Agent
              commits remain local until the declared patch contract accepts
@@ -982,46 +985,57 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                       | Orchestrator.Session_context_exhausted ->
                           `Failed
                     in
-                    let _, push_agent_after =
-                      apply_result_and_emit_complete final_session_result
-                    in
                     let completion_claim =
                       if completion_claim_is_authoritative final_session_result
                       then completion_claim
                       else None
                     in
-                    (match (completion_claim, publication) with
-                    | ( None,
-                        `Pushed
-                          ( Worktree.Push_ok | Worktree.Push_up_to_date
-                          | Worktree.Push_no_commits ) ) ->
-                        ()
-                    | ( Some claim,
-                        `Pushed
-                          ( Worktree.Push_ok | Worktree.Push_up_to_date
-                          | Worktree.Push_no_commits ) ) ->
-                        Runtime.update_orchestrator runtime (fun orch ->
-                            match (claim, push_local_sha) with
-                            | Ok Completion_claim.Complete, Some head_oid ->
-                                Orchestrator.attest_completion orch patch_id
-                                  head_oid
-                            | Ok Completion_claim.Complete, None ->
-                                Orchestrator.block_completion orch patch_id
-                                  "Controller accepted the completion claim \
-                                   but could not bind it to a Git head."
-                            | Ok (Completion_claim.Blocked reason), _ ->
-                                Orchestrator.block_completion orch patch_id
-                                  ("Worker reported the patch incomplete: "
-                                 ^ reason)
-                            | Error reason, _ ->
-                                Orchestrator.block_completion orch patch_id
-                                  ("Completion claim rejected: " ^ reason))
-                    | ( (None | Some _),
-                        ( `Rejected _
-                        | `Pushed
-                            ( Worktree.Push_rejected _ | Worktree.Push_error _
-                            | Worktree.Push_worktree_missing ) ) ) ->
-                        ());
+                    let agent_before, push_agent_after =
+                      Runtime.update_orchestrator_returning runtime (fun orch ->
+                          let agent_before = Orchestrator.agent orch patch_id in
+                          let orch =
+                            apply_session_transition orch final_session_result
+                          in
+                          let orch =
+                            match (completion_claim, publication) with
+                            | ( None,
+                                `Pushed
+                                  ( Worktree.Push_ok | Worktree.Push_up_to_date
+                                  | Worktree.Push_no_commits ) ) ->
+                                orch
+                            | ( Some claim,
+                                `Pushed
+                                  ( Worktree.Push_ok | Worktree.Push_up_to_date
+                                  | Worktree.Push_no_commits ) ) -> (
+                                match (claim, push_local_sha) with
+                                | Ok Completion_claim.Complete, Some head_oid ->
+                                    Orchestrator.attest_completion orch patch_id
+                                      head_oid
+                                | Ok Completion_claim.Complete, None ->
+                                    Orchestrator.block_completion orch patch_id
+                                      "Controller accepted the completion \
+                                       claim but could not bind it to a Git \
+                                       head."
+                                | Ok (Completion_claim.Blocked reason), _ ->
+                                    Orchestrator.block_completion orch patch_id
+                                      ("Worker reported the patch incomplete: "
+                                     ^ reason)
+                                | Error reason, _ ->
+                                    Orchestrator.block_completion orch patch_id
+                                      ("Completion claim rejected: " ^ reason))
+                            | ( (None | Some _),
+                                ( `Rejected _
+                                | `Pushed
+                                    ( Worktree.Push_rejected _
+                                    | Worktree.Push_error _
+                                    | Worktree.Push_worktree_missing ) ) ) ->
+                                orch
+                          in
+                          let agent_after = Orchestrator.agent orch patch_id in
+                          (orch, (agent_before, agent_after)))
+                    in
+                    emit_complete final_session_result ~agent_before
+                      ~agent_after:push_agent_after;
                     (match publication with
                     | `Rejected _ -> ()
                     | `Pushed push_outcome ->
