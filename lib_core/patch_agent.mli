@@ -41,6 +41,12 @@ type review_state =
   | Review_failed of { head_oid : string; error : string }
 [@@deriving show, eq, sexp_of, compare]
 
+type completion_state =
+  | Completion_unattested
+  | Completion_attested of string
+  | Completion_blocked of string
+[@@deriving show, eq, sexp_of, compare, yojson]
+
 type t = private {
   patch_id : Types.Patch_id.t;
   branch : Types.Branch.t;
@@ -66,10 +72,13 @@ type t = private {
           construction (and re-stamped on snapshot restore via
           {!Orchestrator.set_max_ci_failures}) from the [--max-ci-failures] flag
           / stored project config; defaults to {!default_max_ci_failures}. *)
-  validation_failure_count : int;
-      (** Consecutive controller validation failures before PR publication. At
-          three failures the patch fails closed even while its last feedback is
-          still queued. A human message resets the counter. *)
+  validation_repair : Validation_repair.t;
+      (** Controller-owned, failure-local validation repair budget. Each exact
+          gate gets a bounded current-session window and one fresh-session
+          window; alternating gates remain bounded by a patch-wide ceiling. *)
+  completion : completion_state;
+      (** Worker completion attestation bound to an exact validated Git head, or
+          the reason the worker explicitly could not complete the goal. *)
   human_messages : string list;
   inflight_human_messages : string list;
   ci_checks : Types.Ci_check.t list;
@@ -226,7 +235,8 @@ val intervention_reason_of_fields :
   human_in_queue:bool ->
   ci_failure_count:int ->
   max_ci_failures:int ->
-  validation_failure_count:int ->
+  validation_repair_exhausted:bool ->
+  completion_blocked:bool ->
   start_attempts_without_pr:int ->
   conflict_noop_count:int ->
   no_commits_push_count:int ->
@@ -247,6 +257,7 @@ val needs_intervention : t -> bool
     - [Human] not in queue AND any of: [ci_failure_count >= max_ci_failures],
       [(not has_pr) && start_attempts_without_pr >= 2],
       [conflict_noop_count >= 2], [no_commits_push_count >= 2],
+      [validation_repair] is exhausted, [completion] is blocked,
       [context_exhaustion_count >= 2], [push_failure_count >= 3],
       [rebase_failure_count >= 2], [pr_body_artifact_miss_count >= 2],
       [review_unresolved_cycle_count >= 2]. *)
@@ -258,7 +269,8 @@ val needs_intervention_of_fields :
   human_in_queue:bool ->
   ci_failure_count:int ->
   max_ci_failures:int ->
-  validation_failure_count:int ->
+  validation_repair_exhausted:bool ->
+  completion_blocked:bool ->
   start_attempts_without_pr:int ->
   conflict_noop_count:int ->
   no_commits_push_count:int ->
@@ -314,7 +326,11 @@ val add_human_messages : t -> string list -> t
 (** Prepend multiple messages to the pending list, preserving their order. *)
 
 val set_session_failed : t -> t
-(** Mark session fallback as [Given_up]. *)
+(** Record failure of a resumed session by advancing [Fresh_available] to
+    [Tried_fresh]. *)
+
+val set_session_given_up : t -> t
+(** Move a started session directly to terminal [Given_up]. *)
 
 val set_tried_fresh : t -> t
 (** Advance session fallback to [Tried_fresh]. No-op if already [Tried_fresh] or
@@ -575,8 +591,29 @@ val mark_inflight_human_messages_delivered : t -> t
     it accepted the turn. Start and Human turns can both carry direct messages.
     Does not complete the session or change fallback state. *)
 
-val increment_validation_failure_count : t -> t
-val reset_validation_failure_count : t -> t
+val validation_failure_count : t -> int
+(** Total controller validation rejections in the current repair lifecycle.
+    Retained as an observation for telemetry and legacy snapshot migration; it
+    is not the intervention decision. *)
+
+val on_validation_failure :
+  t -> Validation_repair.target -> t * Validation_repair.decision
+(** Record one repairable controller rejection. [Restart_session] clears the
+    resume id in the returned agent; [Exhausted] makes the agent need
+    intervention. *)
+
+val reset_validation_repair : t -> t
+val attest_completion : t -> string -> t
+val block_completion : t -> string -> t
+
+val carry_completion_forward : t -> from_head:string -> to_head:string -> t
+(** Rebind an attested completion across a controller-owned, validated Git
+    rewrite. Does nothing unless the existing attestation exactly matches
+    [from_head]. *)
+
+val completion_matches_head : t -> bool
+(** True only when the worker's complete claim is bound to the exact current
+    polled PR head. *)
 
 val set_automerge_enabled : t -> bool -> t
 (** Enable or disable automerge for this patch. When the value actually changes,
@@ -658,6 +695,8 @@ val restore :
   ci_failure_count:int ->
   ?max_ci_failures:int ->
   ?validation_failure_count:int ->
+  ?validation_repair:Validation_repair.t ->
+  ?completion:completion_state ->
   human_messages:string list ->
   inflight_human_messages:string list ->
   ci_checks:Types.Ci_check.t list ->

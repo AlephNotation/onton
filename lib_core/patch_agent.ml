@@ -1,6 +1,7 @@
 open Base
 open Types
 open Operation_kind
+open Ppx_yojson_conv_lib.Yojson_conv.Primitives
 
 type session_fallback = Fresh_available | Tried_fresh | Given_up
 [@@deriving show, eq, sexp_of, compare, yojson]
@@ -37,6 +38,12 @@ type review_state =
   | Review_failed of { head_oid : string; error : string }
 [@@deriving show, eq, sexp_of, compare]
 
+type completion_state =
+  | Completion_unattested
+  | Completion_attested of string
+  | Completion_blocked of string
+[@@deriving show, eq, sexp_of, compare, yojson]
+
 type t = {
   patch_id : Patch_id.t;
   branch : Branch.t;
@@ -52,7 +59,8 @@ type t = {
   notified_base_branch : Branch.t option;
   ci_failure_count : int;
   max_ci_failures : int;
-  validation_failure_count : int;
+  validation_repair : Validation_repair.t;
+  completion : completion_state;
   human_messages : string list;
   inflight_human_messages : string list;
   ci_checks : Ci_check.t list;
@@ -212,10 +220,11 @@ let default_max_ci_failures = 3
    event log so operators can grep for "why is this patch stuck?" by
    reason. *)
 let intervention_reason_of_fields ~merged ~has_pr ~session_given_up
-    ~human_in_queue ~ci_failure_count ~max_ci_failures ~validation_failure_count
-    ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
-    ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
-    ~pr_body_artifact_miss_count ~review_unresolved_cycle_count =
+    ~human_in_queue ~ci_failure_count ~max_ci_failures
+    ~validation_repair_exhausted ~completion_blocked ~start_attempts_without_pr
+    ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
+    ~push_failure_count ~rebase_failure_count ~pr_body_artifact_miss_count
+    ~review_unresolved_cycle_count =
   if merged then None
   else if session_given_up then Some "session_fallback=given_up"
     (* The Human exemption below lets a newly-arrived human message be delivered
@@ -228,7 +237,8 @@ let intervention_reason_of_fields ~merged ~has_pr ~session_given_up
        [merged] is terminal — a merged agent never needs intervention, so
        short-circuit on it to keep the predicate self-consistent even for
        callers that don't pre-filter by [merged]. *)
-  else if validation_failure_count >= 3 then Some "validation_failure_count>=3"
+  else if validation_repair_exhausted then Some "validation_repair=exhausted"
+  else if completion_blocked then Some "completion=blocked"
   else if human_in_queue then None
   else if ci_failure_count >= max_ci_failures then
     Some (Printf.sprintf "ci_failure_count>=%d" max_ci_failures)
@@ -252,7 +262,12 @@ let intervention_reason t =
       ~human_in_queue:
         (List.mem t.queue Operation_kind.Human ~equal:Operation_kind.equal)
       ~ci_failure_count:t.ci_failure_count ~max_ci_failures:t.max_ci_failures
-      ~validation_failure_count:t.validation_failure_count
+      ~validation_repair_exhausted:
+        (Validation_repair.is_exhausted t.validation_repair)
+      ~completion_blocked:
+        (match t.completion with
+        | Completion_blocked _ -> true
+        | Completion_unattested | Completion_attested _ -> false)
       ~start_attempts_without_pr:t.start_attempts_without_pr
       ~conflict_noop_count:t.conflict_noop_count
       ~no_commits_push_count:t.no_commits_push_count
@@ -278,17 +293,18 @@ let intervention_reason t =
 let needs_intervention t = Option.is_some (intervention_reason t)
 
 let needs_intervention_of_fields ~merged ~has_pr ~session_given_up
-    ~human_in_queue ~ci_failure_count ~max_ci_failures ~validation_failure_count
-    ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
-    ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
-    ~pr_body_artifact_miss_count ~review_unresolved_cycle_count =
+    ~human_in_queue ~ci_failure_count ~max_ci_failures
+    ~validation_repair_exhausted ~completion_blocked ~start_attempts_without_pr
+    ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
+    ~push_failure_count ~rebase_failure_count ~pr_body_artifact_miss_count
+    ~review_unresolved_cycle_count =
   Option.is_some
     (intervention_reason_of_fields ~merged ~has_pr ~session_given_up
        ~human_in_queue ~ci_failure_count ~max_ci_failures
-       ~validation_failure_count ~start_attempts_without_pr ~conflict_noop_count
-       ~no_commits_push_count ~context_exhaustion_count ~push_failure_count
-       ~rebase_failure_count ~pr_body_artifact_miss_count
-       ~review_unresolved_cycle_count)
+       ~validation_repair_exhausted ~completion_blocked
+       ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
+       ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
+       ~pr_body_artifact_miss_count ~review_unresolved_cycle_count)
 
 let create ~branch ?(max_ci_failures = default_max_ci_failures) patch_id =
   {
@@ -306,7 +322,8 @@ let create ~branch ?(max_ci_failures = default_max_ci_failures) patch_id =
     notified_base_branch = None;
     ci_failure_count = 0;
     max_ci_failures;
-    validation_failure_count = 0;
+    validation_repair = Validation_repair.empty;
+    completion = Completion_unattested;
     human_messages = [];
     inflight_human_messages = [];
     ci_checks = [];
@@ -366,6 +383,12 @@ let set_session_failed t =
   | Started ({ fallback = Fresh_available; _ } as session) ->
       { t with session = Started { session with fallback = Tried_fresh } }
   | Started { fallback = Tried_fresh | Given_up; _ } -> t
+
+let set_session_given_up t =
+  match t.session with
+  | Not_started -> t
+  | Started session ->
+      { t with session = Started { session with fallback = Given_up } }
 
 let set_tried_fresh t =
   match t.session with
@@ -539,10 +562,51 @@ let increment_ci_failure_count t =
 
 let reset_ci_failure_count t = { t with ci_failure_count = 0 }
 
-let increment_validation_failure_count t =
-  { t with validation_failure_count = t.validation_failure_count + 1 }
+let validation_failure_count t =
+  Validation_repair.total_attempts t.validation_repair
 
-let reset_validation_failure_count t = { t with validation_failure_count = 0 }
+let on_validation_failure t target =
+  let validation_repair, decision =
+    Validation_repair.record_failure t.validation_repair target
+  in
+  let session =
+    match decision with
+    | Validation_repair.Restart_session -> (
+        match t.session with
+        | Started session -> Started { session with resume_id = None }
+        | Not_started -> Not_started)
+    | Validation_repair.Continue | Validation_repair.Exhausted -> t.session
+  in
+  ({ t with validation_repair; session }, decision)
+
+let reset_validation_repair t =
+  { t with validation_repair = Validation_repair.empty }
+
+let attest_completion t head_oid =
+  let head_oid = String.strip head_oid in
+  if String.is_empty head_oid then t
+  else { t with completion = Completion_attested head_oid }
+
+let block_completion t reason =
+  let reason = String.strip reason in
+  if String.is_empty reason then t
+  else { t with completion = Completion_blocked reason }
+
+let carry_completion_forward t ~from_head ~to_head =
+  let from_head = String.strip from_head in
+  let to_head = String.strip to_head in
+  match t.completion with
+  | Completion_attested attested
+    when (not (String.is_empty to_head)) && String.equal attested from_head ->
+      { t with completion = Completion_attested to_head }
+  | Completion_unattested | Completion_attested _ | Completion_blocked _ -> t
+
+let completion_matches_head t =
+  match (t.completion, t.head_oid) with
+  | Completion_attested attested, Some current -> String.equal attested current
+  | ( (Completion_unattested | Completion_blocked _ | Completion_attested _),
+      (None | Some _) ) ->
+      false
 
 (* Config stamp, not a state transition: deliberately does not bump
    [generation], so restoring a snapshot under a different --max-ci-failures
@@ -641,14 +705,35 @@ let mark_running t =
       { t with activity = Active { active with phase = Running } }
 
 let reset_intervention_state t =
+  let restart_validation_session =
+    Validation_repair.is_exhausted t.validation_repair
+  in
+  let restart_completion_session =
+    match t.completion with
+    | Completion_blocked _ -> true
+    | Completion_unattested | Completion_attested _ -> false
+  in
   {
     t with
     session =
       (match t.session with
       | Not_started -> Not_started
-      | Started session -> Started { session with fallback = Fresh_available });
+      | Started session ->
+          Started
+            {
+              fallback = Fresh_available;
+              resume_id =
+                (if restart_validation_session || restart_completion_session
+                 then None
+                 else session.resume_id);
+            });
     ci_failure_count = 0;
-    validation_failure_count = 0;
+    validation_repair = Validation_repair.empty;
+    completion =
+      (match t.completion with
+      | Completion_blocked _ -> Completion_unattested
+      | (Completion_unattested | Completion_attested _) as completion ->
+          completion);
     start_attempts_without_pr = 0;
     conflict_noop_count = 0;
     no_commits_push_count = 0;
@@ -678,11 +763,13 @@ let reset_busy t =
 let restore ~patch_id ~branch ~pr_status ~session ~activity ~merged ~queue
     ~satisfies ~changed ~has_conflict ~base_branch ~notified_base_branch
     ~ci_failure_count ?(max_ci_failures = default_max_ci_failures)
-    ?(validation_failure_count = 0) ~human_messages ~inflight_human_messages
-    ~ci_checks ~merge_ready ?(head_oid = None) ?(review_decision = None)
-    ?(unresolved_comment_count = 0) ~mergeability_unknown ~merge_queue_required
-    ~merge_queue_entry ~merge_commit_sha ~base_contains_merged_siblings
-    ~is_draft ~pr_body_delivered ~pr_body_artifact_miss_count
+    ?(validation_failure_count = 0) ?validation_repair
+    ?(completion = Completion_unattested) ~human_messages
+    ~inflight_human_messages ~ci_checks ~merge_ready ?(head_oid = None)
+    ?(review_decision = None) ?(unresolved_comment_count = 0)
+    ~mergeability_unknown ~merge_queue_required ~merge_queue_entry
+    ~merge_commit_sha ~base_contains_merged_siblings ~is_draft
+    ~pr_body_delivered ~pr_body_artifact_miss_count
     ?(review_unresolved_cycle_count = 0) ~start_attempts_without_pr
     ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
     ~push_failure_count ~rebase_failure_count ~branch_rebased_onto
@@ -704,7 +791,10 @@ let restore ~patch_id ~branch ~pr_status ~session ~activity ~merged ~queue
     notified_base_branch;
     ci_failure_count;
     max_ci_failures;
-    validation_failure_count;
+    validation_repair =
+      Option.value validation_repair
+        ~default:(Validation_repair.of_legacy_count validation_failure_count);
+    completion;
     human_messages;
     inflight_human_messages;
     ci_checks;
@@ -912,11 +1002,30 @@ let respond t k =
     merge_ready = false;
     mergeability_unknown = false;
     checks_passing = false;
+    completion =
+      (if Operation_kind.requires_completion_claim k then Completion_unattested
+       else t.completion);
   }
 
 let complete t =
   if not (is_busy t) then t
   else { t with activity = Inactive; inflight_human_messages = [] }
+
+let%test "code-capable responses invalidate the prior completion attestation" =
+  let patch_id = Patch_id.of_string "completion-turn" in
+  let branch = Branch.of_string "onton/completion-turn" in
+  let base = Branch.of_string "main" in
+  let ready operation =
+    create ~branch patch_id |> fun agent ->
+    start agent ~base_branch:base |> complete |> fun agent ->
+    set_pr_number agent (Pr_number.of_int 7) |> fun agent ->
+    attest_completion agent "old-head" |> fun agent -> enqueue agent operation
+  in
+  let code_turn = ready Human |> fun agent -> respond agent Human in
+  let notes_turn = ready Pr_body |> fun agent -> respond agent Pr_body in
+  equal_completion_state code_turn.completion Completion_unattested
+  && equal_completion_state notes_turn.completion
+       (Completion_attested "old-head")
 
 (* -- Tests for session failure recovery -- *)
 

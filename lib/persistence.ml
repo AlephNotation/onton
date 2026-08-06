@@ -361,7 +361,18 @@ let patch_agent_to_yojson (a : Patch_agent.t) =
         | Some b -> Branch.yojson_of_t b );
       ("ci_failure_count", `Int a.ci_failure_count);
       ("max_ci_failures", `Int a.max_ci_failures);
-      ("validation_failure_count", `Int a.validation_failure_count);
+      ("validation_failure_count", `Int (Patch_agent.validation_failure_count a));
+      ("validation_repair", Validation_repair.yojson_of_t a.validation_repair);
+      ( "validation_repair_exhausted",
+        `Bool (Validation_repair.is_exhausted a.validation_repair) );
+      ("completion", Patch_agent.yojson_of_completion_state a.completion);
+      ( "completion_blocked",
+        `Bool
+          (match a.completion with
+          | Patch_agent.Completion_blocked _ -> true
+          | Patch_agent.Completion_unattested
+          | Patch_agent.Completion_attested _ ->
+              false) );
       ( "human_messages",
         `List (List.map a.human_messages ~f:(fun s -> `String s)) );
       ( "inflight_human_messages",
@@ -419,6 +430,21 @@ let patch_agent_of_yojson_unsafe json =
   let nullable_branch key =
     Option.map (nullable_string_member key json) ~f:Branch.of_string
   in
+  let validation_repair =
+    match Json.field "validation_repair" json with
+    | None -> None
+    | Some value ->
+        Some
+          (decode_value "validation_repair" Validation_repair.t_of_yojson value)
+  in
+  let completion =
+    match Json.field "completion" json with
+    | None -> None
+    | Some value ->
+        Some
+          (decode_value "completion" Patch_agent.completion_state_of_yojson
+             value)
+  in
   Patch_agent.restore
     ~patch_id:(Patch_id.of_string (string_member "patch_id" json))
     ~branch:(Branch.of_string (string_member "branch" json))
@@ -439,6 +465,7 @@ let patch_agent_of_yojson_unsafe json =
     ~max_ci_failures:(int_member "max_ci_failures" json)
     ~validation_failure_count:
       (int_member_or ~default:0 "validation_failure_count" json)
+    ?validation_repair ?completion
     ~human_messages:(string_list_member "human_messages" json)
     ~inflight_human_messages:(string_list_member "inflight_human_messages" json)
     ~ci_checks:

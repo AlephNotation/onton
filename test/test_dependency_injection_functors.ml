@@ -124,10 +124,13 @@ let _check_narrowed_run :
     kind:Operation_kind.t option ->
     patch_id:Patch_id.t ->
     prompt:string ->
+    resume_prompt:string ->
     agent:Patch_agent.t ->
     on_pr_detected:(Pr_number.t -> unit) ->
     validate_before_push:
-      (worktree:string -> base_branch:Branch.t -> (unit, string) result) ->
+      (worktree:string ->
+      base_branch:Branch.t ->
+      (unit, Orchestrator.publication_failure) result) ->
     backend:Llm_backend.t ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list =
   SD.run
@@ -142,7 +145,9 @@ let _check_narrowed_run_long_lived :
     agent:Patch_agent.t ->
     on_pr_detected:(Pr_number.t -> unit) ->
     validate_before_push:
-      (worktree:string -> base_branch:Branch.t -> (unit, string) result) ->
+      (worktree:string ->
+      base_branch:Branch.t ->
+      (unit, Orchestrator.publication_failure) result) ->
     session:SD.long_lived_session ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list =
   SD.run_long_lived
@@ -219,10 +224,13 @@ let () =
       kind:Operation_kind.t option ->
       patch_id:Patch_id.t ->
       prompt:string ->
+      resume_prompt:string ->
       agent:Patch_agent.t ->
       on_pr_detected:(Pr_number.t -> unit) ->
       validate_before_push:
-        (worktree:string -> base_branch:Branch.t -> (unit, string) result) ->
+        (worktree:string ->
+        base_branch:Branch.t ->
+        (unit, Orchestrator.publication_failure) result) ->
       backend:Llm_backend.t ->
       [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list =
     SD.run
@@ -286,6 +294,7 @@ let () =
         kind:_ ->
         patch_id:_ ->
         prompt:_ ->
+        resume_prompt:_ ->
         agent:_ ->
         on_pr_detected:_ ->
         validate_before_push:_ ->

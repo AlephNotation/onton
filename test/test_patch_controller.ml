@@ -282,14 +282,16 @@ let () =
             ~has_conflict:false ~base_branch:(Some main)
             ~notified_base_branch:(Some main) ~ci_failure_count:0
             ~human_messages:[] ~inflight_human_messages:[] ~ci_checks:[]
-            ~merge_ready:false ~mergeability_unknown:false
-            ~merge_queue_required:false ~merge_queue_entry:None ~is_draft:true
-            ~pr_body_delivered:true ~pr_body_artifact_miss_count:0
-            ~start_attempts_without_pr:0 ~conflict_noop_count:0
-            ~no_commits_push_count:0 ~context_exhaustion_count:0
-            ~push_failure_count:0 ~rebase_failure_count:0
-            ~branch_rebased_onto:(Some main) ~branch_rebased_onto_sha:None
-            ~merge_commit_sha:None ~base_contains_merged_siblings:true
+            ~merge_ready:false ~head_oid:(Some "head")
+            ~completion:(Patch_agent.Completion_attested "head")
+            ~mergeability_unknown:false ~merge_queue_required:false
+            ~merge_queue_entry:None ~is_draft:true ~pr_body_delivered:true
+            ~pr_body_artifact_miss_count:0 ~start_attempts_without_pr:0
+            ~conflict_noop_count:0 ~no_commits_push_count:0
+            ~context_exhaustion_count:0 ~push_failure_count:0
+            ~rebase_failure_count:0 ~branch_rebased_onto:(Some main)
+            ~branch_rebased_onto_sha:None ~merge_commit_sha:None
+            ~base_contains_merged_siblings:true
             ~anchor_history:Onton_core.Anchor_history.empty ~checks_passing:true
             ~generation:0 ~worktree_path:None ~branch_blocked:false
             ~automerge:Patch_agent.Disabled ~delivered_ci_run_ids:[] ()
@@ -609,7 +611,10 @@ let () =
             ~pr_status:(Patch_pr_status.Present (Pr_number.of_int 42))
             ~merged:false ~queue:[] ~base_branch:(Some main) ~is_draft:true
             ~pr_body_delivered:true ~start_attempts_without_pr:0 ()
-          |> fun agent -> Patch_agent.set_branch_rebased_onto agent main
+          |> fun agent ->
+          Patch_agent.set_branch_rebased_onto agent main |> fun agent ->
+          Patch_agent.set_head_oid agent (Some "head") |> fun agent ->
+          Patch_agent.attest_completion agent "head"
         in
         let orch = make_orch patch agent in
         let poll =
@@ -621,7 +626,7 @@ let () =
               is_draft = true;
               merge_state = Pr_state.Mergeable;
               merge_ready = false;
-              head_oid = None;
+              head_oid = Some "head";
               review_decision = None;
               unresolved_comment_count = 0;
               merge_queue_required = false;
@@ -1105,14 +1110,16 @@ let () =
             ~has_conflict:false ~base_branch:(Some main)
             ~notified_base_branch:(Some main) ~ci_failure_count:0
             ~human_messages:[] ~inflight_human_messages:[] ~ci_checks:[]
-            ~merge_ready:false ~mergeability_unknown:false
-            ~merge_queue_required:false ~merge_queue_entry:None ~is_draft:true
-            ~pr_body_delivered:false ~pr_body_artifact_miss_count:0
-            ~start_attempts_without_pr:0 ~conflict_noop_count:0
-            ~no_commits_push_count:0 ~context_exhaustion_count:0
-            ~push_failure_count:0 ~rebase_failure_count:0
-            ~branch_rebased_onto:(Some main) ~branch_rebased_onto_sha:None
-            ~merge_commit_sha:None ~base_contains_merged_siblings:true
+            ~merge_ready:false ~head_oid:(Some "head")
+            ~completion:(Patch_agent.Completion_attested "head")
+            ~mergeability_unknown:false ~merge_queue_required:false
+            ~merge_queue_entry:None ~is_draft:true ~pr_body_delivered:false
+            ~pr_body_artifact_miss_count:0 ~start_attempts_without_pr:0
+            ~conflict_noop_count:0 ~no_commits_push_count:0
+            ~context_exhaustion_count:0 ~push_failure_count:0
+            ~rebase_failure_count:0 ~branch_rebased_onto:(Some main)
+            ~branch_rebased_onto_sha:None ~merge_commit_sha:None
+            ~base_contains_merged_siblings:true
             ~anchor_history:Onton_core.Anchor_history.empty
             ~checks_passing:false ~generation:0 ~worktree_path:None
             ~branch_blocked:false ~automerge:Patch_agent.Disabled

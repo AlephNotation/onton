@@ -125,6 +125,11 @@ let property_controller_owned_outbox_surface () =
              in
              let _rebase_orch, rebase_resolution =
                Onton.Orchestrator.reject_rebase_publication orch patch_id
+                 (Onton.Orchestrator.Repair_required
+                    {
+                      target = Onton_core.Validation_repair.Outside_scope;
+                      detail = "generated contract rejection";
+                    })
              in
              let _conflict_orch, conflict_resolution =
                Onton.Orchestrator.reject_conflict_publication orch patch_id
@@ -133,7 +138,8 @@ let property_controller_owned_outbox_surface () =
              && List.length runnable = 2
              && List.is_empty (Onton.Orchestrator.all_github_effects orch)
              && Onton.Orchestrator.equal_rebase_push_resolution
-                  rebase_resolution Onton.Orchestrator.Rebase_push_error
+                  rebase_resolution
+                  Onton.Orchestrator.Rebase_publication_rejected
              && Onton.Orchestrator.equal_conflict_resolution conflict_resolution
                   Onton.Orchestrator.Conflict_retry_push))
 

@@ -27,18 +27,23 @@ module Make (_ : Worktree.S) (_ : ENV) : sig
     kind:Types.Operation_kind.t option ->
     patch_id:Types.Patch_id.t ->
     prompt:string ->
+    resume_prompt:string ->
     agent:Patch_agent.t ->
     on_pr_detected:(Types.Pr_number.t -> unit) ->
     validate_before_push:
-      (worktree:string -> base_branch:Types.Branch.t -> (unit, string) result) ->
+      (worktree:string ->
+      base_branch:Types.Branch.t ->
+      (unit, Orchestrator.publication_failure) result) ->
     backend:Llm_backend.t ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list
-  (** Returns the supervisor disposition and the list of [(tool_name, status)]
-      pairs for any tool calls that did not reach a [completed] state (used by
-      the Pr_body classifier to disambiguate "agent chose not to write" from
-      "Write was blocked"). Callers may also produce a [`Stale] variant from
-      pre-flight checks before invoking this function — the polymorphic-variant
-      union widens at the call site. *)
+  (** [prompt] is the complete contract for a fresh model session;
+      [resume_prompt] contains only the current turn and is used when resuming
+      an existing model session. Returns the supervisor disposition and the list
+      of [(tool_name, status)] pairs for any tool calls that did not reach a
+      [completed] state (used by the Pr_body classifier to disambiguate "agent
+      chose not to write" from "Write was blocked"). Callers may also produce a
+      [`Stale] variant from pre-flight checks before invoking this function —
+      the polymorphic-variant union widens at the call site. *)
 
   type long_lived_session
   (** Mutable per-patch long-lived backend session state. The backend's
@@ -68,7 +73,9 @@ module Make (_ : Worktree.S) (_ : ENV) : sig
     agent:Patch_agent.t ->
     on_pr_detected:(Types.Pr_number.t -> unit) ->
     validate_before_push:
-      (worktree:string -> base_branch:Types.Branch.t -> (unit, string) result) ->
+      (worktree:string ->
+      base_branch:Types.Branch.t ->
+      (unit, Orchestrator.publication_failure) result) ->
     session:long_lived_session ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list
   (** Long-lived backend counterpart to {!run}. It shares the same supervisor

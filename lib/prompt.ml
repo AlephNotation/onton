@@ -96,6 +96,8 @@ let agents_md_section = function
       "## Project Conventions (AGENTS.md)\n\n" ^ String.rstrip content ^ "\n\n"
   | Some _ | None -> ""
 
+let render_agents_md_layer = agents_md_section
+
 (* === Three-layer prompt structure ===
 
    Every layered prompt is composed as
@@ -259,6 +261,8 @@ The supervisor opens the draft PR after your first commit lands on the remote, w
       ("pr_str", pr_str);
       ("files", format_list patch.Patch.files);
       ("checks", format_checks patch.Patch.checks);
+      ( "completion_claim_path",
+        Project_store.completion_claim_path ~project_name ~patch_id:patch.id );
       ( "dependency_notes_section",
         dependency_notes_section ~project_name ancestors );
       ("base_branch_note", base_branch_note);
@@ -286,6 +290,25 @@ Do not edit outside this scope. If the goal cannot be completed within it, stop 
 
 The controller runs these commands after your turn. They are evidence gates,
 not worker capabilities.
+
+## Completion Claim
+
+At the end of every code-capable turn—including a turn that determines no code
+change is needed—overwrite
+`{{completion_claim_path}}` with exactly one of:
+
+```json
+{"status":"complete"}
+```
+
+```json
+{"status":"blocked","reason":"why the complete patch goal cannot be delivered"}
+```
+
+Claim `complete` only when the entire patch goal is implemented within the
+declared scope. This claim is not a substitute for the controller's checks; it
+prevents knowingly partial work from advancing out of draft. A notes-only PR
+body turn does not write this artifact.
 
 ## Controller Boundary
 - Branch: {{branch}}
@@ -1326,6 +1349,20 @@ let%test "gameplan layer points at the published gameplan artifact copy" =
   (* The pointer is lazy-disclosure only: the layer must keep withholding
      sibling patch detail itself (goals only, per the patches list). *)
   && not (String.is_substring g_layer ~substring:"bin/main.ml")
+
+let%test "patch layer requires the exact per-patch completion claim" =
+  let patch_a, _, gameplan = make_layer_test_fixture () in
+  let layer =
+    render_patch_layer_of_gameplan ~project_name:"onton" patch_a gameplan
+      ~base_branch:"main"
+  in
+  let path =
+    Project_store.completion_claim_path ~project_name:"onton"
+      ~patch_id:patch_a.Patch.id
+  in
+  String.is_substring layer ~substring:("`" ^ path ^ "`")
+  && String.is_substring layer ~substring:"{\"status\":\"complete\"}"
+  && String.is_substring layer ~substring:"{\"status\":\"blocked\""
 
 let%test "patch layer lists ancestor implementation notes for dependents" =
   let patch_a, patch_b, gameplan = make_layer_test_fixture () in

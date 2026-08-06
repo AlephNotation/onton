@@ -282,8 +282,9 @@ let apply_replacement_pr t patch_id ~pr_number ~base_branch ~merged =
 
 (* The mark-for-review "ready for review" fixpoint for a patch, read from
    orchestrator state. A PR has reached it when its expected base is [main]
-   (every dependency merged), its PR body is delivered, no merge conflict is
-   active, its local branch is actually rebased onto that base, and CI is green.
+   (every dependency merged), the worker's completion claim matches the current
+   Git head, its PR body is delivered, no merge conflict is active, its local
+   branch is actually rebased onto that base, and CI is green.
    [branch_rebased_onto] lags [expected_base] until the Rebase action lands,
    and [has_conflict] is set the moment a rebase or push surfaces a conflict —
    both must clear before the fixpoint holds. Gates the draft flip in
@@ -308,6 +309,7 @@ let ready_for_review t patch_id =
     | None -> true
   in
   Branch.equal expected_base (Orchestrator.main_branch t)
+  && Patch_agent.completion_matches_head agent
   && agent.Patch_agent.pr_body_delivered
   && (not agent.Patch_agent.has_conflict)
   && (not rebase_pending) && agent.Patch_agent.checks_passing
@@ -1068,6 +1070,8 @@ let%test "reconcile_patch requests ready-for-review after pr_body on main" =
   let t = Orchestrator.set_pr_number t pid (Pr_number.of_int 42) in
   let t = Orchestrator.set_pr_body_delivered t pid true in
   let t = Orchestrator.set_checks_passing t pid true in
+  let t = Orchestrator.set_head_oid t pid (Some "validated-head") in
+  let t = Orchestrator.attest_completion t pid "validated-head" in
   let t = Orchestrator.complete t pid in
   let t =
     reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
@@ -1083,6 +1087,29 @@ let%test "reconcile_patch requests ready-for-review after pr_body on main" =
       | Github_effect.Request_review _ | Github_effect.Direct_merge _
       | Github_effect.Enqueue _ | Github_effect.Dequeue _ ->
           false)
+
+let%test
+    "reconcile_patch keeps PR draft without a current-head completion claim" =
+  let patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
+  let t = Orchestrator.fire t (Orchestrator.Start (pid, main)) in
+  let t = Orchestrator.set_pr_number t pid (Pr_number.of_int 42) in
+  let t = Orchestrator.set_pr_body_delivered t pid true in
+  let t = Orchestrator.set_checks_passing t pid true in
+  let t = Orchestrator.set_head_oid t pid (Some "current-head") in
+  let t = Orchestrator.attest_completion t pid "older-head" in
+  let t = Orchestrator.complete t pid in
+  let t =
+    reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
+      ~patch
+  in
+  Orchestrator.all_github_effects t
+  |> List.for_all ~f:(fun command ->
+      match command.Github_effect.action with
+      | Github_effect.Set_pr_draft { draft = false; _ } -> false
+      | Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _
+      | Github_effect.Request_review _ | Github_effect.Direct_merge _
+      | Github_effect.Enqueue _ | Github_effect.Dequeue _ ->
+          true)
 
 let%test "reconcile_patch keeps PR draft while CI is not green" =
   let patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in

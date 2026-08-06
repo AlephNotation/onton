@@ -265,6 +265,35 @@ esac
               ~gameplan:new_gameplan ~operation:None
             |> Result.ok_or_failwith
           in
+          let completion_path =
+            Project_store.completion_claim_path ~project_name:"sandbox-test"
+              ~patch_id
+          in
+          assert (
+            String.is_substring
+              (Worker_sandbox.profile codex_sandbox)
+              ~substring:completion_path);
+          let pr_body_sandbox =
+            Worker_sandbox.create ~backend:"codex" ~provider:"codex"
+              ~project_name:"sandbox-test" ~worktree ~patch:new_patch
+              ~gameplan:new_gameplan
+              ~operation:(Some Types.Operation_kind.Pr_body)
+            |> Result.ok_or_failwith
+          in
+          assert (
+            not
+              (String.is_substring
+                 (Worker_sandbox.profile pr_body_sandbox)
+                 ~substring:completion_path));
+          assert (
+            not
+              (String.is_substring
+                 (Worker_sandbox.profile pr_body_sandbox)
+                 ~substring:(Stdlib.Filename.concat worktree "new.txt")));
+          assert (
+            String.is_substring
+              (Worker_sandbox.profile codex_sandbox)
+              ~substring:(Stdlib.Filename.concat worktree "new.txt"));
           assert (
             Result.is_error
               (Worker_sandbox.prepare_spawn codex_sandbox ~overrides:[]

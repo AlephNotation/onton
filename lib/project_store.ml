@@ -54,6 +54,49 @@ let plan_artifact_path project_name =
 let pr_body_artifact_path ~project_name ~patch_id =
   Stdlib.Filename.concat (artifact_dir ~project_name ~patch_id) "pr-body.md"
 
+let completion_claim_path ~project_name ~patch_id =
+  Stdlib.Filename.concat
+    (artifact_dir ~project_name ~patch_id)
+    "completion.json"
+
+let clear_completion_claim ~project_name ~patch_id =
+  let path = completion_claim_path ~project_name ~patch_id in
+  try
+    Unix.unlink path;
+    Ok ()
+  with
+  | Unix.Unix_error (Unix.ENOENT, _, _) -> Ok ()
+  | exn ->
+      Error
+        (Printf.sprintf "cannot clear stale completion claim %s: %s" path
+           (Exn.to_string exn))
+
+let read_completion_claim ~project_name ~patch_id =
+  let path = completion_claim_path ~project_name ~patch_id in
+  try
+    let stat = Unix.lstat path in
+    if Poly.equal stat.Unix.st_kind Unix.S_LNK then
+      Error "completion claim must not be a symlink"
+    else if not (Poly.equal stat.Unix.st_kind Unix.S_REG) then
+      Error "completion claim must be a regular file"
+    else if stat.Unix.st_size > 4096 then
+      Error "completion claim exceeds 4096 bytes"
+    else
+      let channel = Stdlib.open_in_bin path in
+      let content =
+        Stdlib.Fun.protect
+          ~finally:(fun () -> Stdlib.close_in_noerr channel)
+          (fun () -> Stdlib.In_channel.input_all channel)
+      in
+      match Yojson.Safe.from_string content with
+      | json -> Completion_claim.of_yojson json
+      | exception exn ->
+          Error ("completion claim is not valid JSON: " ^ Exn.to_string exn)
+  with
+  | Unix.Unix_error (Unix.ENOENT, _, _) ->
+      Error "worker did not write a completion claim"
+  | exn -> Error ("cannot read completion claim: " ^ Exn.to_string exn)
+
 (** Absolute directory the agent writes per-finding wontfix files to during a
     Findings session ([<slugged_finding_id>.md], reason text only; see
     [Review_service.wontfix_filename_of_id]). Lives alongside [pr-body.md] under
@@ -338,6 +381,24 @@ let dir_entries_for_test path =
 let json_field_for_test name = function
   | `Assoc fields -> List.Assoc.find fields name ~equal:String.equal
   | _ -> None
+
+let%test "completion claims are fresh, bounded, and strictly decoded" =
+  with_temp_data_dir (fun () ->
+      let project_name = "Completion Project" in
+      let patch_id = Types.Patch_id.of_string "patch-claim" in
+      let path = completion_claim_path ~project_name ~patch_id in
+      ensure_dir (Stdlib.Filename.dirname path);
+      match
+        write_file_atomically ~path ~content:"{\"status\":\"complete\"}"
+      with
+      | Error _ -> false
+      | Ok () ->
+          (match read_completion_claim ~project_name ~patch_id with
+            | Ok Completion_claim.Complete -> true
+            | Ok (Completion_claim.Blocked _) | Error _ -> false)
+          && Result.is_ok (clear_completion_claim ~project_name ~patch_id)
+          && (not (Stdlib.Sys.file_exists path))
+          && Result.is_error (read_completion_claim ~project_name ~patch_id))
 
 let%test "ci_check_key uses run id for CheckRuns and slug for id-less checks" =
   let run_check = ci_check_for_test ~id:123 ~name:"CI / Test Suite" () in

@@ -96,8 +96,16 @@ val send_human_message : t -> Patch_id.t -> string -> t
     intervention state, and enqueue [Operation_kind.Human]. *)
 
 val set_pr_number : t -> Patch_id.t -> Pr_number.t -> t
+
+val record_created_pr : t -> Patch_id.t -> Pr_number.t -> t
+(** Atomically associate a PR created with the controller-rendered body and
+    record that its body is already delivered. *)
+
 val clear_pr : t -> Patch_id.t -> t
+
 val set_session_failed : t -> Patch_id.t -> t
+(** Record failure of a resumed session, advancing to the fresh-session retry
+    step. *)
 
 val set_branch_rebased_onto_sha : t -> Patch_id.t -> string option -> t
 (** Record the SHA the base ref resolved to at the moment of a successful rebase
@@ -125,6 +133,8 @@ val record_delivered_ci_run_ids : t -> Patch_id.t -> int list -> t
 val set_checks_passing : t -> Patch_id.t -> bool -> t
 val set_merge_ready : t -> Patch_id.t -> bool -> t
 val set_head_oid : t -> Patch_id.t -> string option -> t
+val attest_completion : t -> Patch_id.t -> string -> t
+val block_completion : t -> Patch_id.t -> string -> t
 val set_review_decision : t -> Patch_id.t -> string option -> t
 val set_unresolved_comment_count : t -> Patch_id.t -> int -> t
 val set_mergeability_unknown : t -> Patch_id.t -> bool -> t
@@ -217,12 +227,21 @@ val agents_map : t -> Patch_agent.t Map.M(Patch_id).t
     the activity log (truncated to ~500 chars) — backend, exit code, stderr
     excerpt. It surfaces in [events.jsonl] via [show_session_result] for
     postmortem diagnosis. *)
+type publication_failure =
+  | Repair_required of { target : Validation_repair.target; detail : string }
+  | Controller_failed of { detail : string }
+[@@deriving show, eq, sexp_of]
+
 type session_result =
   | Session_ok
   | Session_process_error of { is_fresh : bool; detail : string option }
   | Session_no_resume
   | Session_failed of { is_fresh : bool; detail : string option }
-  | Session_validation_failed of { detail : string }
+  | Session_validation_failed of {
+      target : Validation_repair.target;
+      detail : string;
+    }
+  | Session_controller_failed of { detail : string }
   | Session_give_up
   | Session_worktree_missing
   | Session_push_failed of Push_reject_classify.rejection option
@@ -241,13 +260,15 @@ val apply_session_result : t -> Patch_id.t -> session_result -> t
     [Session_ok] -> clear_session_fallback. [Session_process_error] ->
     on_session_failure + on_pre_session_failure + complete_failed.
     [Session_failed] -> on_session_failure + complete_failed.
-    [Session_validation_failed] -> preserve the healthy backend session, queue
-    its actionable detail as a direct message, increment the bounded validation
-    counter, and complete the current worker operation for ordinary replay.
-    [Session_no_resume] -> on_session_failure (not fresh) + clear llm_session_id
-    \+ complete_failed. [Session_give_up] -> set_session_failed +
-    set_tried_fresh + clear llm_session_id + complete_failed.
-    [Session_worktree_missing] -> on_pre_session_failure + complete_failed.
+    [Session_validation_failed] -> preserve or deliberately rotate the healthy
+    backend session according to the failure-local repair budget, queue its
+    actionable detail, and complete the current operation for durable replay.
+    [Session_controller_failed] -> fail closed without asking the capability-
+    bounded worker to repair supervisor or repository state. [Session_no_resume]
+    -> on_session_failure (not fresh) + clear llm_session_id \+ complete_failed.
+    [Session_give_up] -> set_session_given_up + clear llm_session_id +
+    complete_failed. [Session_worktree_missing] -> on_pre_session_failure +
+    complete_failed.
 
     {b Deferred completion}: [Session_push_failed] and [Session_no_commits] do
     NOT complete the agent — they only adjust state ([clear_session_fallback] in
@@ -342,10 +363,8 @@ val apply_force_complete : t -> Patch_id.t -> force_complete_reason -> t
 
     Semantics:
     - Unknown patch: identity.
-    - [Unexpected_exception]: always advances [session_fallback] via
-      [set_session_failed] then [set_tried_fresh] (preserving the prior
-      [mark_session_failed] semantics, which pushed [Fresh_available] all the
-      way to [Given_up]). This still runs even when the agent is not busy.
+    - [Unexpected_exception]: moves [session_fallback] directly to [Given_up].
+      This still runs even when the agent is not busy.
     - [Cancelled]: leaves [session_fallback] alone — a clean cancel should not
       poison the fallback chain.
     - If [busy] AND [inflight_human_messages <> []]: routes through
@@ -402,10 +421,15 @@ type rebase_push_resolution =
   | Rebase_push_failed
   | Rebase_push_queue_locked
   | Rebase_push_error
+  | Rebase_publication_rejected
 [@@deriving show, eq, sexp_of]
 
 val apply_rebase_push_result :
-  t -> Patch_id.t -> Worktree.push_result option -> t * rebase_push_resolution
+  t ->
+  Patch_id.t ->
+  ?rewritten_head:string * string ->
+  Worktree.push_result option ->
+  t * rebase_push_resolution
 (** Pure second stage of rebase handling. Takes the push outcome from executing
     the [Push_branch] effect ([None] when no push was requested). Returns the
     updated state and resolution.
@@ -420,10 +444,14 @@ val apply_rebase_push_result :
       further, and an ejection-as-Conflicting surfaces through the poll path,
       whose conflict-resolution no-op + now-unlocked push syncs the remote.
     - [Rebase_push_error]: infrastructure error; enqueues [Rebase] to retry
-      without entering the conflict path. *)
+      without entering the conflict path.
+    - [Rebase_publication_rejected] is returned only by
+      {!reject_rebase_publication}. *)
 
-val reject_rebase_publication : t -> Patch_id.t -> t * rebase_push_resolution
-(** Record that a rebased branch failed its declared contract before push. *)
+val reject_rebase_publication :
+  t -> Patch_id.t -> publication_failure -> t * rebase_push_resolution
+(** Route a rebased branch's declared-contract failure through the same bounded
+    worker-repair or fail-closed controller lifecycle as session publication. *)
 
 type conflict_rebase_decision =
   | Conflict_resolved

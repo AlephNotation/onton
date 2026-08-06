@@ -14,6 +14,16 @@
  (libraries onton_core qcheck-core))
 
 (test
+ (name test_validation_repair_properties)
+ (modules test_validation_repair_properties)
+ (libraries onton_core qcheck-core qcheck-core.runner))
+
+(test
+ (name test_completion_claim_properties)
+ (modules test_completion_claim_properties)
+ (libraries onton_core qcheck-core qcheck-core.runner))
+
+(test
  (name test_github_effect_properties)
  (modules test_github_effect_properties)
  (libraries onton_core qcheck-core))

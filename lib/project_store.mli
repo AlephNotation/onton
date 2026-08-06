@@ -98,6 +98,23 @@ val pr_body_artifact_path :
     project's data directory at [artifacts/<patch_id>/pr-body.md] — outside the
     worktree so it can never be accidentally committed. *)
 
+val completion_claim_path :
+  project_name:string -> patch_id:Types.Patch_id.t -> string
+(** Exact per-patch artifact path for a code turn's completion claim. *)
+
+val clear_completion_claim :
+  project_name:string -> patch_id:Types.Patch_id.t -> (unit, string) result
+(** Remove the prior turn's claim. Missing is success; any other failure is
+    returned so worker launch can fail closed instead of accepting stale
+    evidence. *)
+
+val read_completion_claim :
+  project_name:string ->
+  patch_id:Types.Patch_id.t ->
+  (Completion_claim.t, string) result
+(** Read and strictly decode a bounded regular-file claim. Symlinks, oversized
+    files, malformed JSON, and missing artifacts are errors. *)
+
 val findings_wontfix_dir :
   project_name:string -> patch_id:Types.Patch_id.t -> string
 (** Absolute path of the [findings_wontfix/] artifact directory for a Findings
