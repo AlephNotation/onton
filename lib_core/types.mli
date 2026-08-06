@@ -75,8 +75,9 @@ module Operation_kind : sig
   *)
 
   val requires_completion_claim : t -> bool
-  (** Whether a turn may author code and therefore must produce a fresh
-      completion claim. [Pr_body] is the sole notes-only turn. *)
+  (** Whether a worker turn may author code and therefore must produce a fresh
+      completion claim. [Rebase] is controller-owned; [Pr_body] is notes-only.
+  *)
 end
 
 (** Wrapper for GitHub comment [databaseId]. Synthetic IDs are always negative;

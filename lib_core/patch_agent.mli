@@ -648,9 +648,12 @@ val reset_automerge_failure_count : t -> t
 val resume_current_message : t -> op:Types.Operation_kind.t option -> t
 (** Resume execution of an already accepted message without reapplying its
     queue-consuming state transition. [~op] restores [current_op] from the
-    outbox so that [complete] can clear [human_messages] correctly. Resets
-    [current_op_state] to [Queued] — the resumed fiber must call [mark_running]
-    when it actually begins work. *)
+    outbox so that [complete] can clear [human_messages] correctly. Resuming a
+    worker-editing message invalidates any prior completion attestation,
+    including snapshots accepted by an older binary. Controller-owned [Rebase]
+    and notes-only [Pr_body] preserve it. Resets [current_op_state] to [Queued]
+    — the resumed fiber must call [mark_running] when it actually begins work.
+*)
 
 val mark_running : t -> t
 (** Transition [current_op_state] from [Queued] to [Running]. Called from the

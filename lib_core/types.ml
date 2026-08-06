@@ -79,8 +79,8 @@ module Operation_kind = struct
     | Findings -> "findings"
 
   let requires_completion_claim = function
-    | Pr_body -> false
-    | Rebase | Human | Merge_conflict | Ci | Review_comments | Findings -> true
+    | Rebase | Pr_body -> false
+    | Human | Merge_conflict | Ci | Review_comments | Findings -> true
 end
 
 module Comment_id = struct

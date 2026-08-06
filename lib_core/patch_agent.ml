@@ -696,6 +696,13 @@ let resume_current_message t ~op =
     t with
     session = start_session t.session;
     activity = Active { operation = op; phase = Queued; message_id };
+    completion =
+      (match op with
+      | None -> Completion_unattested
+      | Some operation when Operation_kind.requires_completion_claim operation
+        ->
+          Completion_unattested
+      | Some _ -> t.completion);
   }
 
 let mark_running t =
@@ -1012,7 +1019,7 @@ let complete t =
   if not (is_busy t) then t
   else { t with activity = Inactive; inflight_human_messages = [] }
 
-let%test "code-capable starts and responses invalidate prior completion" =
+let%test "code-capable starts, responses, and resumes invalidate completion" =
   let patch_id = Patch_id.of_string "completion-turn" in
   let branch = Branch.of_string "onton/completion-turn" in
   let base = Branch.of_string "main" in
@@ -1030,9 +1037,31 @@ let%test "code-capable starts and responses invalidate prior completion" =
   in
   let code_turn = ready Human |> fun agent -> respond agent Human in
   let notes_turn = ready Pr_body |> fun agent -> respond agent Pr_body in
+  let resumed_start =
+    attest_completion (create ~branch patch_id) "old-head" |> fun agent ->
+    resume_current_message agent ~op:None
+  in
+  let resumed_code =
+    attest_completion (create ~branch patch_id) "old-head" |> fun agent ->
+    resume_current_message agent ~op:(Some Human)
+  in
+  let resumed_notes =
+    attest_completion (create ~branch patch_id) "old-head" |> fun agent ->
+    resume_current_message agent ~op:(Some Pr_body)
+  in
+  let resumed_rebase =
+    attest_completion (create ~branch patch_id) "old-head" |> fun agent ->
+    resume_current_message agent ~op:(Some Rebase)
+  in
   equal_completion_state start_turn.completion Completion_unattested
   && equal_completion_state code_turn.completion Completion_unattested
   && equal_completion_state notes_turn.completion
+       (Completion_attested "old-head")
+  && equal_completion_state resumed_start.completion Completion_unattested
+  && equal_completion_state resumed_code.completion Completion_unattested
+  && equal_completion_state resumed_notes.completion
+       (Completion_attested "old-head")
+  && equal_completion_state resumed_rebase.completion
        (Completion_attested "old-head")
 
 (* -- Tests for session failure recovery -- *)
