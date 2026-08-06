@@ -58,8 +58,14 @@ let needs_intervention fields =
       (Option.value
          (int_member fields "max_ci_failures")
          ~default:Patch_agent.default_max_ci_failures)
-    ~validation_failure_count:
-      (Option.value (int_member fields "validation_failure_count") ~default:0)
+    ~validation_repair_exhausted:
+      (match member fields "validation_repair_exhausted" with
+      | Some (`Bool value) -> value
+      | Some _ -> false
+      | None ->
+          Option.value (int_member fields "validation_failure_count") ~default:0
+          >= 3)
+    ~completion_blocked:(bool_member fields "completion_blocked")
     ~start_attempts_without_pr:
       (Option.value (int_member fields "start_attempts_without_pr") ~default:0)
     ~conflict_noop_count:

@@ -1,13 +1,19 @@
 open Base
 open Types
 open Operation_kind
+open Ppx_yojson_conv_lib.Yojson_conv.Primitives
 
 type session_fallback = Fresh_available | Tried_fresh | Given_up
 [@@deriving show, eq, sexp_of, compare, yojson]
 
 type session_state =
   | Not_started
-  | Started of { resume_id : string option; fallback : session_fallback }
+  | Started of {
+      resume_id : string option;
+      fallback : session_fallback;
+      conversation_generation : int;
+      prompt_fingerprint : string option;
+    }
 [@@deriving show, eq, sexp_of, compare]
 
 type op_state = Queued | Running
@@ -37,6 +43,12 @@ type review_state =
   | Review_failed of { head_oid : string; error : string }
 [@@deriving show, eq, sexp_of, compare]
 
+type completion_state =
+  | Completion_unattested
+  | Completion_attested of string
+  | Completion_blocked of string
+[@@deriving show, eq, sexp_of, compare, yojson]
+
 type t = {
   patch_id : Patch_id.t;
   branch : Branch.t;
@@ -52,7 +64,8 @@ type t = {
   notified_base_branch : Branch.t option;
   ci_failure_count : int;
   max_ci_failures : int;
-  validation_failure_count : int;
+  validation_repair : Validation_repair.t;
+  completion : completion_state;
   human_messages : string list;
   inflight_human_messages : string list;
   ci_checks : Ci_check.t list;
@@ -199,7 +212,14 @@ let review_failure t =
   | Review_not_requested | Review_requested _ -> None
 
 let start_session = function
-  | Not_started -> Started { resume_id = None; fallback = Fresh_available }
+  | Not_started ->
+      Started
+        {
+          resume_id = None;
+          fallback = Fresh_available;
+          conversation_generation = 0;
+          prompt_fingerprint = None;
+        }
   | Started _ as session -> session
 
 let default_max_ci_failures = 3
@@ -212,10 +232,11 @@ let default_max_ci_failures = 3
    event log so operators can grep for "why is this patch stuck?" by
    reason. *)
 let intervention_reason_of_fields ~merged ~has_pr ~session_given_up
-    ~human_in_queue ~ci_failure_count ~max_ci_failures ~validation_failure_count
-    ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
-    ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
-    ~pr_body_artifact_miss_count ~review_unresolved_cycle_count =
+    ~human_in_queue ~ci_failure_count ~max_ci_failures
+    ~validation_repair_exhausted ~completion_blocked ~start_attempts_without_pr
+    ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
+    ~push_failure_count ~rebase_failure_count ~pr_body_artifact_miss_count
+    ~review_unresolved_cycle_count =
   if merged then None
   else if session_given_up then Some "session_fallback=given_up"
     (* The Human exemption below lets a newly-arrived human message be delivered
@@ -228,7 +249,8 @@ let intervention_reason_of_fields ~merged ~has_pr ~session_given_up
        [merged] is terminal — a merged agent never needs intervention, so
        short-circuit on it to keep the predicate self-consistent even for
        callers that don't pre-filter by [merged]. *)
-  else if validation_failure_count >= 3 then Some "validation_failure_count>=3"
+  else if validation_repair_exhausted then Some "validation_repair=exhausted"
+  else if completion_blocked then Some "completion=blocked"
   else if human_in_queue then None
   else if ci_failure_count >= max_ci_failures then
     Some (Printf.sprintf "ci_failure_count>=%d" max_ci_failures)
@@ -252,7 +274,12 @@ let intervention_reason t =
       ~human_in_queue:
         (List.mem t.queue Operation_kind.Human ~equal:Operation_kind.equal)
       ~ci_failure_count:t.ci_failure_count ~max_ci_failures:t.max_ci_failures
-      ~validation_failure_count:t.validation_failure_count
+      ~validation_repair_exhausted:
+        (Validation_repair.is_exhausted t.validation_repair)
+      ~completion_blocked:
+        (match t.completion with
+        | Completion_blocked _ -> true
+        | Completion_unattested | Completion_attested _ -> false)
       ~start_attempts_without_pr:t.start_attempts_without_pr
       ~conflict_noop_count:t.conflict_noop_count
       ~no_commits_push_count:t.no_commits_push_count
@@ -278,17 +305,18 @@ let intervention_reason t =
 let needs_intervention t = Option.is_some (intervention_reason t)
 
 let needs_intervention_of_fields ~merged ~has_pr ~session_given_up
-    ~human_in_queue ~ci_failure_count ~max_ci_failures ~validation_failure_count
-    ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
-    ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
-    ~pr_body_artifact_miss_count ~review_unresolved_cycle_count =
+    ~human_in_queue ~ci_failure_count ~max_ci_failures
+    ~validation_repair_exhausted ~completion_blocked ~start_attempts_without_pr
+    ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
+    ~push_failure_count ~rebase_failure_count ~pr_body_artifact_miss_count
+    ~review_unresolved_cycle_count =
   Option.is_some
     (intervention_reason_of_fields ~merged ~has_pr ~session_given_up
        ~human_in_queue ~ci_failure_count ~max_ci_failures
-       ~validation_failure_count ~start_attempts_without_pr ~conflict_noop_count
-       ~no_commits_push_count ~context_exhaustion_count ~push_failure_count
-       ~rebase_failure_count ~pr_body_artifact_miss_count
-       ~review_unresolved_cycle_count)
+       ~validation_repair_exhausted ~completion_blocked
+       ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
+       ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
+       ~pr_body_artifact_miss_count ~review_unresolved_cycle_count)
 
 let create ~branch ?(max_ci_failures = default_max_ci_failures) patch_id =
   {
@@ -306,7 +334,8 @@ let create ~branch ?(max_ci_failures = default_max_ci_failures) patch_id =
     notified_base_branch = None;
     ci_failure_count = 0;
     max_ci_failures;
-    validation_failure_count = 0;
+    validation_repair = Validation_repair.empty;
+    completion = Completion_unattested;
     human_messages = [];
     inflight_human_messages = [];
     ci_checks = [];
@@ -349,8 +378,12 @@ let highest_priority t =
       Int.compare (Priority.priority a) (Priority.priority b))
 
 let enqueue t k =
-  if List.mem t.queue k ~equal:Operation_kind.equal then t
-  else { t with queue = k :: t.queue }
+  let completion =
+    if Operation_kind.requires_completion_claim k then Completion_unattested
+    else t.completion
+  in
+  if List.mem t.queue k ~equal:Operation_kind.equal then { t with completion }
+  else { t with queue = k :: t.queue; completion }
 
 let mark_merged t = { t with merged = true }
 
@@ -367,6 +400,12 @@ let set_session_failed t =
       { t with session = Started { session with fallback = Tried_fresh } }
   | Started { fallback = Tried_fresh | Given_up; _ } -> t
 
+let set_session_given_up t =
+  match t.session with
+  | Not_started -> t
+  | Started session ->
+      { t with session = Started { session with fallback = Given_up } }
+
 let set_tried_fresh t =
   match t.session with
   | Not_started -> t
@@ -382,7 +421,27 @@ let clear_session_fallback t =
   | Started session ->
       { t with session = Started { session with fallback = Fresh_available } }
 
-(** Handle a Claude session failure. Pure decision logic:
+let advance_conversation_generation t =
+  match t.session with
+  | Not_started -> t
+  | Started session ->
+      {
+        t with
+        session =
+          Started
+            {
+              session with
+              conversation_generation = session.conversation_generation + 1;
+            };
+      }
+
+let restart_conversation t =
+  match (advance_conversation_generation t).session with
+  | Not_started -> t
+  | Started session ->
+      { t with session = Started { session with resume_id = None } }
+
+(** Handle a worker session failure. Pure decision logic:
     - Start path (no PR) + fresh failure: reset to Fresh_available for retry
     - Resume failure: escalate to Tried_fresh (will try fresh next)
     - Fresh failure (respond path): escalate one step via set_tried_fresh *)
@@ -391,10 +450,20 @@ let on_session_failure t ~is_fresh =
     (* Start path fresh failure: full reset for clean retry *)
     {
       t with
-      session = Started { resume_id = None; fallback = Fresh_available };
+      session =
+        (match t.session with
+        | Not_started -> start_session Not_started
+        | Started session ->
+            Started
+              {
+                session with
+                resume_id = None;
+                fallback = Fresh_available;
+                conversation_generation = session.conversation_generation + 1;
+              });
     }
-  else if is_fresh then set_tried_fresh t
-  else set_session_failed t
+  else if is_fresh then set_tried_fresh t |> advance_conversation_generation
+  else set_session_failed t |> advance_conversation_generation
 
 let set_has_conflict t = { t with has_conflict = true }
 let clear_has_conflict t = { t with has_conflict = false }
@@ -420,7 +489,13 @@ let on_context_exhausted t =
     session =
       (match t.session with
       | Not_started -> Not_started
-      | Started session -> Started { session with resume_id = None });
+      | Started session ->
+          Started
+            {
+              session with
+              resume_id = None;
+              conversation_generation = session.conversation_generation + 1;
+            });
   }
 
 let reset_context_exhaustion_count t = { t with context_exhaustion_count = 0 }
@@ -539,10 +614,57 @@ let increment_ci_failure_count t =
 
 let reset_ci_failure_count t = { t with ci_failure_count = 0 }
 
-let increment_validation_failure_count t =
-  { t with validation_failure_count = t.validation_failure_count + 1 }
+let validation_failure_count t =
+  Validation_repair.total_attempts t.validation_repair
 
-let reset_validation_failure_count t = { t with validation_failure_count = 0 }
+let on_validation_failure t target =
+  let validation_repair, decision =
+    Validation_repair.record_failure t.validation_repair target
+  in
+  let session =
+    match decision with
+    | Validation_repair.Restart_session -> (
+        match t.session with
+        | Started session ->
+            Started
+              {
+                session with
+                resume_id = None;
+                conversation_generation = session.conversation_generation + 1;
+              }
+        | Not_started -> Not_started)
+    | Validation_repair.Continue | Validation_repair.Exhausted -> t.session
+  in
+  ({ t with validation_repair; session }, decision)
+
+let reset_validation_repair t =
+  { t with validation_repair = Validation_repair.empty }
+
+let attest_completion t head_oid =
+  let head_oid = String.strip head_oid in
+  if String.is_empty head_oid then t
+  else { t with completion = Completion_attested head_oid }
+
+let block_completion t reason =
+  let reason = String.strip reason in
+  if String.is_empty reason then t
+  else { t with completion = Completion_blocked reason }
+
+let carry_completion_forward t ~from_head ~to_head =
+  let from_head = String.strip from_head in
+  let to_head = String.strip to_head in
+  match t.completion with
+  | Completion_attested attested
+    when (not (String.is_empty to_head)) && String.equal attested from_head ->
+      { t with completion = Completion_attested to_head }
+  | Completion_unattested | Completion_attested _ | Completion_blocked _ -> t
+
+let completion_matches_head t =
+  match (t.completion, t.head_oid) with
+  | Completion_attested attested, Some current -> String.equal attested current
+  | ( (Completion_unattested | Completion_blocked _ | Completion_attested _),
+      (None | Some _) ) ->
+      false
 
 (* Config stamp, not a state transition: deliberately does not bump
    [generation], so restoring a snapshot under a different --max-ci-failures
@@ -578,9 +700,58 @@ let set_llm_session_id t resume_id =
   match (t.session, resume_id) with
   | Not_started, None -> t
   | Not_started, Some _ ->
-      { t with session = Started { resume_id; fallback = Fresh_available } }
+      {
+        t with
+        session =
+          Started
+            {
+              resume_id;
+              fallback = Fresh_available;
+              conversation_generation = 0;
+              prompt_fingerprint = None;
+            };
+      }
   | Started session, _ ->
       { t with session = Started { session with resume_id } }
+
+let conversation_generation t =
+  match t.session with
+  | Not_started -> 0
+  | Started session -> session.conversation_generation
+
+let prompt_fingerprint t =
+  match t.session with
+  | Not_started -> None
+  | Started session -> session.prompt_fingerprint
+
+let align_prompt_fingerprint t fingerprint =
+  let fingerprint = String.strip fingerprint in
+  if String.is_empty fingerprint then t
+  else
+    match t.session with
+    | Not_started -> t
+    | Started session -> (
+        match session.prompt_fingerprint with
+        | Some current when String.equal current fingerprint -> t
+        | None when Option.is_none session.resume_id ->
+            {
+              t with
+              session =
+                Started { session with prompt_fingerprint = Some fingerprint };
+            }
+        | None | Some _ ->
+            {
+              t with
+              session =
+                Started
+                  {
+                    resume_id = None;
+                    fallback = Fresh_available;
+                    conversation_generation =
+                      session.conversation_generation + 1;
+                    prompt_fingerprint = Some fingerprint;
+                  };
+            })
 
 let mark_inflight_human_messages_delivered t =
   { t with inflight_human_messages = [] }
@@ -632,6 +803,13 @@ let resume_current_message t ~op =
     t with
     session = start_session t.session;
     activity = Active { operation = op; phase = Queued; message_id };
+    completion =
+      (match op with
+      | None -> Completion_unattested
+      | Some operation when Operation_kind.requires_completion_claim operation
+        ->
+          Completion_unattested
+      | Some _ -> t.completion);
   }
 
 let mark_running t =
@@ -641,14 +819,45 @@ let mark_running t =
       { t with activity = Active { active with phase = Running } }
 
 let reset_intervention_state t =
+  let restart_validation_session =
+    Validation_repair.is_exhausted t.validation_repair
+  in
+  let restart_completion_session =
+    match t.completion with
+    | Completion_blocked _ -> true
+    | Completion_unattested | Completion_attested _ -> false
+  in
+  let restart_failed_session =
+    match t.session with
+    | Started { fallback = Tried_fresh | Given_up; _ } -> true
+    | Not_started | Started { fallback = Fresh_available; _ } -> false
+  in
   {
     t with
     session =
       (match t.session with
       | Not_started -> Not_started
-      | Started session -> Started { session with fallback = Fresh_available });
+      | Started session ->
+          let restart =
+            restart_validation_session || restart_completion_session
+            || restart_failed_session
+          in
+          Started
+            {
+              session with
+              fallback = Fresh_available;
+              resume_id = (if restart then None else session.resume_id);
+              conversation_generation =
+                (if restart then session.conversation_generation + 1
+                 else session.conversation_generation);
+            });
     ci_failure_count = 0;
-    validation_failure_count = 0;
+    validation_repair = Validation_repair.empty;
+    completion =
+      (match t.completion with
+      | Completion_blocked _ -> Completion_unattested
+      | (Completion_unattested | Completion_attested _) as completion ->
+          completion);
     start_attempts_without_pr = 0;
     conflict_noop_count = 0;
     no_commits_push_count = 0;
@@ -678,11 +887,13 @@ let reset_busy t =
 let restore ~patch_id ~branch ~pr_status ~session ~activity ~merged ~queue
     ~satisfies ~changed ~has_conflict ~base_branch ~notified_base_branch
     ~ci_failure_count ?(max_ci_failures = default_max_ci_failures)
-    ?(validation_failure_count = 0) ~human_messages ~inflight_human_messages
-    ~ci_checks ~merge_ready ?(head_oid = None) ?(review_decision = None)
-    ?(unresolved_comment_count = 0) ~mergeability_unknown ~merge_queue_required
-    ~merge_queue_entry ~merge_commit_sha ~base_contains_merged_siblings
-    ~is_draft ~pr_body_delivered ~pr_body_artifact_miss_count
+    ?(validation_failure_count = 0) ?validation_repair
+    ?(completion = Completion_unattested) ~human_messages
+    ~inflight_human_messages ~ci_checks ~merge_ready ?(head_oid = None)
+    ?(review_decision = None) ?(unresolved_comment_count = 0)
+    ~mergeability_unknown ~merge_queue_required ~merge_queue_entry
+    ~merge_commit_sha ~base_contains_merged_siblings ~is_draft
+    ~pr_body_delivered ~pr_body_artifact_miss_count
     ?(review_unresolved_cycle_count = 0) ~start_attempts_without_pr
     ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
     ~push_failure_count ~rebase_failure_count ~branch_rebased_onto
@@ -704,7 +915,10 @@ let restore ~patch_id ~branch ~pr_status ~session ~activity ~merged ~queue
     notified_base_branch;
     ci_failure_count;
     max_ci_failures;
-    validation_failure_count;
+    validation_repair =
+      Option.value validation_repair
+        ~default:(Validation_repair.of_legacy_count validation_failure_count);
+    completion;
     human_messages;
     inflight_human_messages;
     ci_checks;
@@ -813,6 +1027,7 @@ let start t ~base_branch =
        so the drift detector knows the branch is on the right base. *)
     branch_rebased_onto = Some base_branch;
     ci_checks = [];
+    completion = Completion_unattested;
   }
 
 let set_branch_rebased_onto t branch =
@@ -912,11 +1127,98 @@ let respond t k =
     merge_ready = false;
     mergeability_unknown = false;
     checks_passing = false;
+    completion =
+      (if Operation_kind.requires_completion_claim k then Completion_unattested
+       else t.completion);
   }
 
 let complete t =
-  if not (is_busy t) then t
-  else { t with activity = Inactive; inflight_human_messages = [] }
+  match t.activity with
+  | Inactive -> t
+  | Active _ | Interrupted _ ->
+      { t with activity = Inactive; inflight_human_messages = [] }
+
+let%test "code-capable starts, responses, and resumes invalidate completion" =
+  let patch_id = Patch_id.of_string "completion-turn" in
+  let branch = Branch.of_string "onton/completion-turn" in
+  let base = Branch.of_string "main" in
+  let ready operation =
+    create ~branch patch_id |> fun agent ->
+    start agent ~base_branch:base |> complete |> fun agent ->
+    set_pr_number agent (Pr_number.of_int 7) |> fun agent ->
+    attest_completion agent "old-head" |> fun agent -> enqueue agent operation
+  in
+  let start_turn =
+    create ~branch patch_id |> fun agent ->
+    set_pr_number agent (Pr_number.of_int 7) |> fun agent ->
+    attest_completion agent "old-head" |> clear_pr |> fun agent ->
+    start agent ~base_branch:base
+  in
+  let queued_code = ready Human in
+  let duplicate_code = enqueue queued_code Human in
+  let code_turn = respond queued_code Human in
+  let notes_turn = ready Pr_body |> fun agent -> respond agent Pr_body in
+  let resumed_start =
+    attest_completion (create ~branch patch_id) "old-head" |> fun agent ->
+    resume_current_message agent ~op:None
+  in
+  let resumed_code =
+    attest_completion (create ~branch patch_id) "old-head" |> fun agent ->
+    resume_current_message agent ~op:(Some Human)
+  in
+  let resumed_notes =
+    attest_completion (create ~branch patch_id) "old-head" |> fun agent ->
+    resume_current_message agent ~op:(Some Pr_body)
+  in
+  let resumed_rebase =
+    attest_completion (create ~branch patch_id) "old-head" |> fun agent ->
+    resume_current_message agent ~op:(Some Rebase)
+  in
+  equal_completion_state start_turn.completion Completion_unattested
+  && equal_completion_state queued_code.completion Completion_unattested
+  && equal_completion_state duplicate_code.completion Completion_unattested
+  && equal_completion_state code_turn.completion Completion_unattested
+  && equal_completion_state notes_turn.completion
+       (Completion_attested "old-head")
+  && equal_completion_state resumed_start.completion Completion_unattested
+  && equal_completion_state resumed_code.completion Completion_unattested
+  && equal_completion_state resumed_notes.completion
+       (Completion_attested "old-head")
+  && equal_completion_state resumed_rebase.completion
+       (Completion_attested "old-head")
+
+let%test "stable prompt identity rotates legacy and changed conversations once"
+    =
+  let branch = Branch.of_string "onton/prompt-identity" in
+  let patch_id = Patch_id.of_string "prompt-identity" in
+  let initial =
+    create ~branch patch_id |> fun agent ->
+    start agent ~base_branch:(Branch.of_string "main") |> fun agent ->
+    set_llm_session_id agent (Some "legacy-session")
+  in
+  let aligned = align_prompt_fingerprint initial "prefix-a" in
+  let same = align_prompt_fingerprint aligned "prefix-a" in
+  let changed = align_prompt_fingerprint same "prefix-b" in
+  Option.is_none (llm_session_id aligned)
+  && conversation_generation aligned = 1
+  && equal aligned same
+  && conversation_generation changed = 2
+  && Option.equal String.equal (prompt_fingerprint changed) (Some "prefix-b")
+
+let%test "intervention restarts a terminal conversation" =
+  let agent =
+    create
+      ~branch:(Branch.of_string "onton/intervention")
+      (Patch_id.of_string "intervention")
+    |> fun agent ->
+    start agent ~base_branch:(Branch.of_string "main") |> fun agent ->
+    set_llm_session_id agent (Some "failed-session") |> set_session_given_up
+  in
+  let generation = conversation_generation agent in
+  let reset = reset_intervention_state agent in
+  Option.is_none (llm_session_id reset)
+  && equal_session_fallback (session_fallback reset) Fresh_available
+  && conversation_generation reset = generation + 1
 
 (* -- Tests for session failure recovery -- *)
 
@@ -928,7 +1230,14 @@ let%test
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Tried_fresh };
+      session =
+        Started
+          {
+            resume_id = None;
+            fallback = Tried_fresh;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:true in
@@ -940,11 +1249,20 @@ let%test "on_session_failure: resume failure escalates to Tried_fresh" =
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Fresh_available };
+      session =
+        Started
+          {
+            resume_id = Some "failed-resume";
+            fallback = Fresh_available;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:false in
   equal_session_fallback (session_fallback t) Tried_fresh
+  && Option.equal String.equal (llm_session_id t) (Some "failed-resume")
+  && conversation_generation t = 1
 
 let%test "on_session_failure: respond path fresh escalates to Tried_fresh" =
   let t = create ~branch:(Branch.of_string "b1") (Patch_id.of_string "1") in
@@ -953,11 +1271,20 @@ let%test "on_session_failure: respond path fresh escalates to Tried_fresh" =
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Fresh_available };
+      session =
+        Started
+          {
+            resume_id = Some "failed-fresh";
+            fallback = Fresh_available;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:true in
   equal_session_fallback (session_fallback t) Tried_fresh
+  && Option.equal String.equal (llm_session_id t) (Some "failed-fresh")
+  && conversation_generation t = 1
 
 let%test
     "on_session_failure: respond path second fresh failure escalates to \
@@ -968,7 +1295,14 @@ let%test
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Tried_fresh };
+      session =
+        Started
+          {
+            resume_id = None;
+            fallback = Tried_fresh;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:true in
@@ -982,7 +1316,14 @@ let%test
     {
       t with
       activity = Active { operation = None; phase = Running; message_id = None };
-      session = Started { resume_id = None; fallback = Tried_fresh };
+      session =
+        Started
+          {
+            resume_id = None;
+            fallback = Tried_fresh;
+            conversation_generation = 0;
+            prompt_fingerprint = None;
+          };
     }
   in
   let t = on_session_failure t ~is_fresh:true in

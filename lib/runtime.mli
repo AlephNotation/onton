@@ -16,6 +16,8 @@ type snapshot = {
 type t
 type durable_store = snapshot -> (unit, string) result
 
+exception Durable_store_failed of string
+
 val create :
   gameplan:Gameplan.t ->
   main_branch:Branch.t ->
@@ -62,6 +64,14 @@ val commit_orchestrator :
 
 val commit_orchestrator_returning :
   t -> (Orchestrator.t -> Orchestrator.t * 'a) -> ('a, string) result
+
+val commit_orchestrator_exn : t -> (Orchestrator.t -> Orchestrator.t) -> unit
+(** Durable orchestrator commit that raises [Durable_store_failed] when the
+    snapshot cannot be written. Use for controller transitions whose external
+    outcome has already happened and therefore must not be forgotten. *)
+
+val commit_orchestrator_returning_exn :
+  t -> (Orchestrator.t -> Orchestrator.t * 'a) -> 'a
 
 val update_activity_log : t -> (Activity_log.t -> Activity_log.t) -> unit
 (** Convenience: update only the activity log. *)

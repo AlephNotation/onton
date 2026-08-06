@@ -252,7 +252,8 @@ let activity_of_yojson json =
 
 let session_to_yojson = function
   | Patch_agent.Not_started -> `Assoc [ ("state", `String "not_started") ]
-  | Patch_agent.Started { resume_id; fallback } ->
+  | Patch_agent.Started
+      { resume_id; fallback; conversation_generation; prompt_fingerprint } ->
       `Assoc
         [
           ("state", `String "started");
@@ -260,6 +261,10 @@ let session_to_yojson = function
             Option.value_map resume_id ~default:`Null ~f:(fun id -> `String id)
           );
           ("fallback", Patch_agent.yojson_of_session_fallback fallback);
+          ("conversation_generation", `Int conversation_generation);
+          ( "prompt_fingerprint",
+            Option.value_map prompt_fingerprint ~default:`Null ~f:(fun value ->
+                `String value) );
         ]
 
 let session_of_yojson json =
@@ -271,10 +276,54 @@ let session_of_yojson json =
           resume_id = nullable_string_member "resume_id" json;
           fallback =
             decode_member "fallback" Patch_agent.session_fallback_of_yojson json;
+          conversation_generation =
+            int_member_or ~default:0 "conversation_generation" json;
+          prompt_fingerprint =
+            (match Json.field "prompt_fingerprint" json with
+            | None | Some `Null -> None
+            | Some (`String value) -> Some value
+            | Some _ ->
+                raise
+                  (Decode_error "prompt_fingerprint: expected a string or null"));
         }
   | state ->
       raise
         (Decode_error (Printf.sprintf "session.state: unknown value %S" state))
+
+let%test "session conversation identity round-trips and legacy state is fresh" =
+  let session =
+    Patch_agent.Started
+      {
+        resume_id = Some "resume";
+        fallback = Patch_agent.Tried_fresh;
+        conversation_generation = 7;
+        prompt_fingerprint = Some "prompt";
+      }
+  in
+  let legacy =
+    `Assoc
+      [
+        ("state", `String "started");
+        ("resume_id", `Null);
+        ( "fallback",
+          Patch_agent.yojson_of_session_fallback Patch_agent.Fresh_available );
+      ]
+  in
+  Patch_agent.equal_session_state
+    (session_of_yojson (session_to_yojson session))
+    session
+  &&
+  match session_of_yojson legacy with
+  | Patch_agent.Started
+      {
+        resume_id = None;
+        fallback;
+        conversation_generation;
+        prompt_fingerprint = None;
+      } ->
+      Patch_agent.equal_session_fallback fallback Patch_agent.Fresh_available
+      && conversation_generation = 0
+  | Patch_agent.Not_started | Patch_agent.Started _ -> false
 
 let json_number key = function
   | `Float value -> value
@@ -361,7 +410,18 @@ let patch_agent_to_yojson (a : Patch_agent.t) =
         | Some b -> Branch.yojson_of_t b );
       ("ci_failure_count", `Int a.ci_failure_count);
       ("max_ci_failures", `Int a.max_ci_failures);
-      ("validation_failure_count", `Int a.validation_failure_count);
+      ("validation_failure_count", `Int (Patch_agent.validation_failure_count a));
+      ("validation_repair", Validation_repair.yojson_of_t a.validation_repair);
+      ( "validation_repair_exhausted",
+        `Bool (Validation_repair.is_exhausted a.validation_repair) );
+      ("completion", Patch_agent.yojson_of_completion_state a.completion);
+      ( "completion_blocked",
+        `Bool
+          (match a.completion with
+          | Patch_agent.Completion_blocked _ -> true
+          | Patch_agent.Completion_unattested
+          | Patch_agent.Completion_attested _ ->
+              false) );
       ( "human_messages",
         `List (List.map a.human_messages ~f:(fun s -> `String s)) );
       ( "inflight_human_messages",
@@ -419,6 +479,21 @@ let patch_agent_of_yojson_unsafe json =
   let nullable_branch key =
     Option.map (nullable_string_member key json) ~f:Branch.of_string
   in
+  let validation_repair =
+    match Json.field "validation_repair" json with
+    | None -> None
+    | Some value ->
+        Some
+          (decode_value "validation_repair" Validation_repair.t_of_yojson value)
+  in
+  let completion =
+    match Json.field "completion" json with
+    | None -> None
+    | Some value ->
+        Some
+          (decode_value "completion" Patch_agent.completion_state_of_yojson
+             value)
+  in
   Patch_agent.restore
     ~patch_id:(Patch_id.of_string (string_member "patch_id" json))
     ~branch:(Branch.of_string (string_member "branch" json))
@@ -439,6 +514,7 @@ let patch_agent_of_yojson_unsafe json =
     ~max_ci_failures:(int_member "max_ci_failures" json)
     ~validation_failure_count:
       (int_member_or ~default:0 "validation_failure_count" json)
+    ?validation_repair ?completion
     ~human_messages:(string_list_member "human_messages" json)
     ~inflight_human_messages:(string_list_member "inflight_human_messages" json)
     ~ci_checks:
@@ -655,6 +731,7 @@ let orchestrator_to_yojson (o : Orchestrator.t) =
                   (match msg.status with
                   | Orchestrator.Pending -> "Pending"
                   | Orchestrator.Acked -> "Acked"
+                  | Orchestrator.Awaiting_publication -> "Awaiting_publication"
                   | Orchestrator.Completed -> "Completed"
                   | Orchestrator.Obsolete -> "Obsolete") );
             ] ))
@@ -707,6 +784,7 @@ let action_of_yojson json =
 let message_status_of_string = function
   | "Pending" -> Ok Orchestrator.Pending
   | "Acked" -> Ok Orchestrator.Acked
+  | "Awaiting_publication" -> Ok Orchestrator.Awaiting_publication
   | "Completed" -> Ok Orchestrator.Completed
   | "Obsolete" -> Ok Orchestrator.Obsolete
   | other -> Error (Printf.sprintf "unknown message status: %s" other)
@@ -960,6 +1038,8 @@ let%test_module "session_id_sidecars" =
             {
               resume_id = llm_session_id;
               fallback = Patch_agent.Fresh_available;
+              conversation_generation = 0;
+              prompt_fingerprint = None;
             }
         else Patch_agent.Not_started
       in

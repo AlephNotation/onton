@@ -114,6 +114,10 @@ let () =
     "Controller validation rejected publication. Command: dune build\n\
      Failure output: unbound module Removed"
   in
+  let target =
+    Validation_repair.Check
+      { Check.run = "dune build"; proves = "the patch compiles" }
+  in
   let orch = Orchestrator.send_human_message orch pid human in
   let orch, first = next_start orch gameplan pid in
   assert (List.equal String.equal (Orchestrator.message_payload first) [ human ]);
@@ -137,11 +141,11 @@ let () =
   let orch = Orchestrator.mark_inflight_human_messages_delivered orch pid in
   let orch =
     Orchestrator.apply_session_result orch pid
-      (Orchestrator.Session_validation_failed { detail = failure })
+      (Orchestrator.Session_validation_failed { target; detail = failure })
   in
   let rejected = Orchestrator.agent orch pid in
   assert (not (Patch_agent.is_busy rejected));
-  assert (rejected.Patch_agent.validation_failure_count = 1);
+  assert (Patch_agent.validation_failure_count rejected = 1);
   assert (
     Option.equal String.equal
       (Patch_agent.llm_session_id rejected)
@@ -184,7 +188,7 @@ let () =
   let orch =
     Orchestrator.apply_session_result orch pid Orchestrator.Session_ok
   in
-  assert ((Orchestrator.agent orch pid).Patch_agent.validation_failure_count = 0);
+  assert (Patch_agent.validation_failure_count (Orchestrator.agent orch pid) = 0);
   let orch =
     Orchestrator.apply_start_outcome orch pid Orchestrator.Start_ok
     |> fun orch ->
@@ -203,13 +207,67 @@ let () =
     | None -> false);
   Stdlib.print_endline "AO-1c passed"
 
-(* ========== AO-1d: three validation failures fail closed; a human message
-   explicitly resets the cap and is delivered after the last failure ========== *)
+(* ========== AO-1c2: successful Start publication is a distinct durable phase
+   and a transient forge failure never replays the model action. ========== *)
 
 let () =
   let orch, _patches, gameplan, pid = bootstrap_pre_pr () in
+  let orch, start_message = next_start orch gameplan pid in
+  let message_id = Orchestrator.message_id start_message in
+  let orch, accepted = Orchestrator.accept_message orch message_id in
+  assert (Option.is_some accepted);
+  let orch = Orchestrator.mark_start_awaiting_publication orch pid in
+  assert (
+    match Orchestrator.find_message orch message_id with
+    | Some message ->
+        Orchestrator.equal_message_status
+          (Orchestrator.message_status message)
+          Orchestrator.Awaiting_publication
+    | None -> false);
+  let orch = Orchestrator.defer_start_publication orch pid in
+  assert (not (Patch_agent.is_busy (Orchestrator.agent orch pid)));
+  assert (
+    List.exists (Orchestrator.runnable_messages orch) ~f:(fun message ->
+        Message_id.equal (Orchestrator.message_id message) message_id
+        && Orchestrator.equal_message_status
+             (Orchestrator.message_status message)
+             Orchestrator.Awaiting_publication));
+  let planned =
+    Patch_controller.plan_messages orch ~patches:gameplan.Gameplan.patches
+  in
+  assert (List.length planned = 1);
+  assert (
+    match planned with
+    | [ message ] ->
+        Message_id.equal (Orchestrator.message_id message) message_id
+        && Orchestrator.equal_message_status
+             (Orchestrator.message_status message)
+             Orchestrator.Awaiting_publication
+    | [] | _ :: _ :: _ -> false);
+  let orch = Orchestrator.record_created_pr orch pid (Pr_number.of_int 42) in
+  let orch = Orchestrator.complete orch pid in
+  assert (Patch_agent.has_pr (Orchestrator.agent orch pid));
+  assert (
+    match Orchestrator.find_message orch message_id with
+    | Some message ->
+        Orchestrator.equal_message_status
+          (Orchestrator.message_status message)
+          Orchestrator.Completed
+    | None -> false);
+  Stdlib.print_endline "AO-1c2 passed"
+
+(* ========== AO-1d: one validation gate gets a bounded resumed window and one
+   fresh window; human intervention resets the lifecycle ========== *)
+
+let () =
+  let orch, _patches, gameplan, pid = bootstrap_pre_pr () in
+  let orch = Orchestrator.set_llm_session_id orch pid (Some "repair-session") in
+  let target =
+    Validation_repair.Check
+      { Check.run = "dune build"; proves = "the patch compiles" }
+  in
   let rec reject orch attempt =
-    if attempt > 3 then orch
+    if attempt > 6 then orch
     else
       let orch, message = next_start orch gameplan pid in
       let orch, accepted =
@@ -220,18 +278,22 @@ let () =
       let orch =
         Orchestrator.apply_session_result orch pid
           (Orchestrator.Session_validation_failed
-             { detail = Printf.sprintf "validation failure %d" attempt })
+             { target; detail = Printf.sprintf "validation failure %d" attempt })
       in
+      if attempt = 3 then
+        assert (
+          Option.is_none
+            (Patch_agent.llm_session_id (Orchestrator.agent orch pid)));
       reject orch (attempt + 1)
   in
   let capped = reject orch 1 in
   let agent = Orchestrator.agent capped pid in
-  assert (agent.Patch_agent.validation_failure_count = 3);
+  assert (Patch_agent.validation_failure_count agent = 6);
   assert (Patch_agent.needs_intervention agent);
   assert (
     Option.equal String.equal
       (Patch_agent.intervention_reason agent)
-      (Some "validation_failure_count>=3"));
+      (Some "validation_repair=exhausted"));
   let _, blocked =
     Patch_controller.plan_tick_messages capped ~project_name:"test-project"
       ~gameplan
@@ -242,13 +304,78 @@ let () =
       "Try the narrower implementation."
   in
   assert (
-    (Orchestrator.agent reopened pid).Patch_agent.validation_failure_count = 0);
+    Patch_agent.validation_failure_count (Orchestrator.agent reopened pid) = 0);
+  assert (
+    Option.is_none
+      (Patch_agent.llm_session_id (Orchestrator.agent reopened pid)));
   let _, start = next_start reopened gameplan pid in
   assert (
     List.equal String.equal
       (Orchestrator.message_payload start)
-      [ "validation failure 3"; "Try the narrower implementation." ]);
+      [ "validation failure 6"; "Try the narrower implementation." ]);
   Stdlib.print_endline "AO-1d passed"
+
+(* ========== AO-1e: supervisor/repository failures never re-enter the worker
+   repair loop ========== *)
+
+let () =
+  let orch, _patches, gameplan, pid = bootstrap_pre_pr () in
+  let orch =
+    Orchestrator.set_llm_session_id orch pid (Some "healthy-session")
+  in
+  let orch, message = next_start orch gameplan pid in
+  let orch, accepted =
+    Orchestrator.accept_message orch (Orchestrator.message_id message)
+  in
+  assert (Option.is_some accepted);
+  let detail = "controller could not update the Git index" in
+  let orch =
+    Orchestrator.apply_session_result orch pid
+      (Orchestrator.Session_controller_failed { detail })
+  in
+  let agent = Orchestrator.agent orch pid in
+  assert (not (Patch_agent.is_busy agent));
+  assert (Patch_agent.needs_intervention agent);
+  assert (
+    Option.equal String.equal
+      (Patch_agent.intervention_reason agent)
+      (Some "session_fallback=given_up"));
+  assert (Option.is_none (Patch_agent.llm_session_id agent));
+  assert (List.equal String.equal agent.Patch_agent.human_messages [ detail ]);
+  Stdlib.print_endline "AO-1e passed"
+
+(* ========== AO-1f: an explicit incomplete claim blocks review readiness and
+   human intervention restarts from a fresh session ========== *)
+
+let () =
+  let orch, _patches, _gameplan, pid = bootstrap_pre_pr () in
+  let orch =
+    Orchestrator.set_llm_session_id orch pid (Some "partial-session")
+  in
+  let orch = Orchestrator.set_head_oid orch pid (Some "head-a") in
+  let orch = Orchestrator.attest_completion orch pid "head-a" in
+  assert (Patch_agent.completion_matches_head (Orchestrator.agent orch pid));
+  let orch =
+    Orchestrator.block_completion orch pid
+      "Worker reported the patch incomplete: missing lifecycle wiring"
+  in
+  let blocked = Orchestrator.agent orch pid in
+  assert (Patch_agent.needs_intervention blocked);
+  assert (
+    Option.equal String.equal
+      (Patch_agent.intervention_reason blocked)
+      (Some "completion=blocked"));
+  assert (not (Patch_agent.completion_matches_head blocked));
+  let reopened =
+    Orchestrator.send_human_message orch pid "Finish the wiring."
+  in
+  let reopened = Orchestrator.agent reopened pid in
+  assert (not (Patch_agent.needs_intervention reopened));
+  assert (Option.is_none (Patch_agent.llm_session_id reopened));
+  assert (
+    Patch_agent.equal_completion_state reopened.Patch_agent.completion
+      Patch_agent.Completion_unattested);
+  Stdlib.print_endline "AO-1f passed"
 
 (* ========== AO-2: Non-stale respond outcomes produce busy=false ========== *)
 

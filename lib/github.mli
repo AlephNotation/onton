@@ -27,6 +27,10 @@ val response_error_message_contains : string -> substring:string -> bool
     distinct 422 cases (e.g. "pull request already exists" vs "no commits
     between"). Pure; safe on malformed input. *)
 
+val pull_request_already_exists : error -> bool
+(** Classify only the specific 422 validation response proving that the head
+    branch already has a pull request. *)
+
 val extract_github_message : string -> string
 (** Summarize an HTTP error response body for activity-log display. When the
     body is a GitHub JSON error, returns the [message] field (and any

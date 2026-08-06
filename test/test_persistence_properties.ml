@@ -254,29 +254,80 @@ let outbox_survives_restart =
                 [ direct_message ]
           | _ -> false))
 
-let validation_counter_roundtrip_and_legacy_default =
+let validation_repair_roundtrip_and_legacy_default =
   QCheck2.Test.make
-    ~name:"validation failure count persists and defaults to zero for v7 state"
+    ~name:
+      "validation repair state persists, migrates the old count, and defaults"
     QCheck2.Gen.unit (fun () ->
+      let target =
+        Onton_core.Validation_repair.Check
+          { Check.run = "dune build"; proves = "the patch compiles" }
+      in
       let agent =
         Onton_core.Patch_agent.create
           ~branch:(Branch.of_string "onton/durable")
           (Patch_id.of_string "durable")
-        |> Onton_core.Patch_agent.increment_validation_failure_count
-        |> Onton_core.Patch_agent.increment_validation_failure_count
+        |> fun agent ->
+        Onton_core.Patch_agent.on_validation_failure agent target |> fst
+        |> fun agent ->
+        Onton_core.Patch_agent.on_validation_failure agent target |> fst
       in
       let json = Onton.Persistence.patch_agent_to_yojson agent in
       let persisted =
         match Onton.Persistence.patch_agent_of_yojson json with
-        | Ok restored -> restored.validation_failure_count = 2
+        | Ok restored ->
+            Onton_core.Patch_agent.validation_failure_count restored = 2
+        | Error _ -> false
+      in
+      let migrated =
+        match
+          Onton.Persistence.patch_agent_of_yojson
+            (remove_field "validation_repair" json)
+        with
+        | Ok restored ->
+            Onton_core.Patch_agent.validation_failure_count restored = 2
+        | Error _ -> false
+      in
+      let legacy_default =
+        match
+          Onton.Persistence.patch_agent_of_yojson
+            (json
+            |> remove_field "validation_repair"
+            |> remove_field "validation_failure_count")
+        with
+        | Ok restored ->
+            Onton_core.Patch_agent.validation_failure_count restored = 0
+        | Error _ -> false
+      in
+      persisted && migrated && legacy_default)
+
+let completion_attestation_roundtrip_and_legacy_default =
+  QCheck2.Test.make
+    ~name:"completion attestation round-trips and legacy state is unattested"
+    QCheck2.Gen.unit (fun () ->
+      let agent =
+        Onton_core.Patch_agent.create
+          ~branch:(Branch.of_string "onton/completion")
+          (Patch_id.of_string "completion")
+        |> fun agent ->
+        Onton_core.Patch_agent.attest_completion agent "validated-head"
+      in
+      let json = Onton.Persistence.patch_agent_to_yojson agent in
+      let persisted =
+        match Onton.Persistence.patch_agent_of_yojson json with
+        | Ok restored ->
+            Onton_core.Patch_agent.equal_completion_state restored.completion
+              (Onton_core.Patch_agent.Completion_attested "validated-head")
         | Error _ -> false
       in
       let legacy =
         match
           Onton.Persistence.patch_agent_of_yojson
-            (remove_field "validation_failure_count" json)
+            (remove_field "completion" json)
         with
-        | Ok restored -> restored.validation_failure_count = 0
+        | Ok restored ->
+            Onton_core.Patch_agent.equal_completion_state restored.completion
+              Onton_core.Patch_agent.Completion_unattested
         | Error _ -> false
       in
       persisted && legacy)
@@ -396,7 +447,8 @@ let () =
         strict_agent_requires_identity_fields;
         current_version_is_required;
         outbox_survives_restart;
-        validation_counter_roundtrip_and_legacy_default;
+        validation_repair_roundtrip_and_legacy_default;
+        completion_attestation_roundtrip_and_legacy_default;
         legacy_outbox_payload_defaults_empty;
         patch_agent_override_snapshot_compatibility;
       ]

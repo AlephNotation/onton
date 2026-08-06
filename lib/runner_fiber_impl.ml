@@ -3,6 +3,36 @@ open Onton_core.Types
 let log_event runtime ?patch_id msg =
   Runtime_logging.log_event runtime ?patch_id msg
 
+let conversation_fingerprint ~gameplan_prompt ~patch_prompt ~backend ~model
+    ~provider ~effort =
+  `Assoc
+    [
+      ("gameplan_prompt", `String gameplan_prompt);
+      ("patch_prompt", `String patch_prompt);
+      ("backend", `String backend);
+      ( "model",
+        Base.Option.value_map model ~default:`Null ~f:(fun value ->
+            `String value) );
+      ("provider", `String provider);
+      ("effort", `String effort);
+    ]
+  |> Yojson.Safe.to_string |> Digestif.SHA256.digest_string
+  |> Digestif.SHA256.to_hex
+
+let%test "conversation fingerprint separates prompt fields and backend identity"
+    =
+  let fingerprint ?(gameplan_prompt = "a") ?(patch_prompt = "bc")
+      ?(backend = "codex") ?(model = Some "luna") ?(provider = "openai")
+      ?(effort = "medium") () =
+    conversation_fingerprint ~gameplan_prompt ~patch_prompt ~backend ~model
+      ~provider ~effort
+  in
+  (not
+     (String.equal (fingerprint ())
+        (fingerprint ~gameplan_prompt:"ab" ~patch_prompt:"c" ())))
+  && (not (String.equal (fingerprint ()) (fingerprint ~model:(Some "sol") ())))
+  && not (String.equal (fingerprint ()) (fingerprint ~provider:"anthropic" ()))
+
 module Runner_env = struct
   module type S = sig
     include Run_env.S
@@ -35,8 +65,6 @@ module Make
     (W : Worktree.S)
     (Env : Runner_env.S) =
 struct
-  exception Durable_commit_failed of string
-
   module WS_Env : Worktree_setup.ENV = struct
     let runtime = Env.runtime
     let clock = Env.clock
@@ -76,9 +104,7 @@ struct
   module Worktree_plan_executor = Worktree_plan_executor.Make (W) (WS_Env)
 
   let durable_commit runtime f =
-    match Runtime.commit_orchestrator_returning runtime f with
-    | Ok value -> value
-    | Error message -> raise (Durable_commit_failed message)
+    Runtime.commit_orchestrator_returning_exn runtime f
 
   let github_command_label (command : Github_effect.t) =
     let pr_number =
@@ -319,7 +345,7 @@ struct
             log_event runtime ~patch_id
               "Controller staged conflict resolutions and continued the rebase";
             Ok ()
-        | Error (Patch_validator.Validation_failed failure) -> (
+        | Error (Patch_validator.Validation_failed failure) -> begin
             match failure with
             | Patch_validator.Outside_scope paths ->
                 let detail =
@@ -333,15 +359,18 @@ struct
                        (Base.List.map paths ~f:(fun path -> "- " ^ path)))
                 in
                 log_event runtime ~patch_id detail;
-                Error detail
+                Error
+                  (Orchestrator.Repair_required
+                     { target = Validation_repair.Outside_scope; detail })
             | Patch_validator.Scope_read_failed failure ->
                 let detail =
-                  "Controller validation could not read the patch diff. Fix \
-                   the underlying repository error, then retry:\n"
+                  "Controller validation could not read the patch diff; the \
+                   capability-bounded worker cannot repair this repository \
+                   failure:\n"
                   ^ command_failure_text failure
                 in
                 log_event runtime ~patch_id detail;
-                Error detail
+                Error (Orchestrator.Controller_failed { detail })
             | Patch_validator.Check_failed (check, failure) ->
                 let detail =
                   Printf.sprintf
@@ -357,19 +386,56 @@ struct
                     (command_failure_text failure)
                 in
                 log_event runtime ~patch_id detail;
-                Error detail)
+                Error
+                  (Orchestrator.Repair_required
+                     { target = Validation_repair.Check check; detail })
+            | Patch_validator.Check_modified_repository (check, paths) ->
+                let detail =
+                  Printf.sprintf
+                    "Controller validation rejected publication because a \
+                     required check modified repository state. Checks must be \
+                     read-only evidence for the exact tree being published.\n\n\
+                     Command: %s\n\
+                     Proves: %s\n\n\
+                     Changed state:\n\
+                     %s"
+                    check.Check.run check.Check.proves
+                    (Base.String.concat ~sep:"\n"
+                       (Base.List.map paths ~f:(fun path -> "- " ^ path)))
+                in
+                log_event runtime ~patch_id detail;
+                Error
+                  (Orchestrator.Repair_required
+                     { target = Validation_repair.Check check; detail })
+          end
         | Error (Patch_validator.Git_failed failure) ->
             let detail =
-              "Controller could not record the validated worker changes. Fix \
-               the repository error, then retry:\n"
+              "Controller could not record the validated worker changes; the \
+               capability-bounded worker cannot repair this repository failure:\n"
               ^ command_failure_text failure
             in
             log_event runtime ~patch_id detail;
-            Error detail)
+            Error (Orchestrator.Controller_failed { detail })
+        | Error (Patch_validator.Rebase_conflict_remaining (paths, failure)) ->
+            let detail =
+              Printf.sprintf
+                "Continuing the rebase exposed another conflict. Resolve the \
+                 conflicted files and leave the rebase in progress for the \
+                 controller:\n\
+                 %s\n\n\
+                 %s"
+                (Base.String.concat ~sep:"\n"
+                   (Base.List.map paths ~f:(fun path -> "- " ^ path)))
+                (command_failure_text failure)
+            in
+            log_event runtime ~patch_id detail;
+            Error (Orchestrator.Rebase_conflict_remaining { detail }))
     | None ->
         log_event runtime ~patch_id
           "Publication rejected: patch has no declared contract";
-        Error "patch has no declared contract"
+        Error
+          (Orchestrator.Controller_failed
+             { detail = "patch has no declared contract" })
 
   let read_optional_file path =
     try
@@ -384,6 +450,78 @@ struct
   (** Read an artifact file. Returns [Some contents] if the file exists and is
       readable, [None] otherwise. *)
   let read_artifact_file = read_optional_file
+
+  let initial_pr_body ~project_name patch =
+    Prompt.render_pr_description ~project_name patch
+    ^ Prompt.render_check_suffix patch
+
+  let current_base ~runtime ~gameplan patch_id =
+    Runtime.read runtime (fun snap ->
+        let orch = snap.Runtime.orchestrator in
+        let has_merged pid = (Orchestrator.agent orch pid).Patch_agent.merged in
+        let branch_of pid =
+          match
+            Base.List.find gameplan.Gameplan.patches
+              ~f:(fun (patch : Patch.t) -> Patch_id.equal patch.Patch.id pid)
+          with
+          | Some patch -> patch.Patch.branch
+          | None -> Orchestrator.main_branch orch
+        in
+        Graph.initial_base (Orchestrator.graph orch) patch_id ~has_merged
+          ~branch_of
+          ~main:(Orchestrator.main_branch orch))
+
+  let publish_start_pr ~runtime ~project_name ~patch_id ~base ~recovery patch =
+    let body = initial_pr_body ~project_name patch in
+    let record pr_number =
+      durable_commit runtime (fun orch ->
+          let orch = Orchestrator.record_created_pr orch patch_id pr_number in
+          (Orchestrator.complete orch patch_id, ()));
+      Env.register_pr ~patch_id ~pr_number;
+      log_event runtime ~patch_id
+        (Printf.sprintf
+           (if recovery then
+              "Recovered accepted Start as PR #%d without replaying the model \
+               turn"
+            else "PR #%d created")
+           (Pr_number.to_int pr_number));
+      true
+    in
+    match
+      Forge.create_pull_request
+        ~title:(Patch_validator.pr_title patch)
+        ~head:patch.Patch.branch ~base ~body ~draft:true
+    with
+    | Ok pr_number -> record pr_number
+    | Error error when Github.pull_request_already_exists error -> (
+        match Forge.list_prs ~branch:patch.Patch.branch ~state:`Open () with
+        | Ok ((pr_number, _, _) :: _) -> (
+            match Forge.update_pr_body ~pr_number ~body with
+            | Ok () -> record pr_number
+            | Error update_error ->
+                log_event runtime ~patch_id
+                  (Printf.sprintf
+                     "PR #%d exists but its deterministic body could not be \
+                      restored — %s"
+                     (Pr_number.to_int pr_number)
+                     (Forge.show_error update_error));
+                false)
+        | Ok [] ->
+            log_event runtime ~patch_id
+              "PR creation reported an existing pull request, but discovery \
+               found none";
+            false
+        | Error discovery_error ->
+            log_event runtime ~patch_id
+              (Printf.sprintf
+                 "PR creation reported an existing pull request and discovery \
+                  failed — %s"
+                 (Forge.show_error discovery_error));
+            false)
+    | Error error ->
+        log_event runtime ~patch_id
+          (Printf.sprintf "PR creation failed — %s" (Forge.show_error error));
+        false
 
   (** Apply the agent-authored notes artifact to the PR. Composes the final body
       as: gameplan description + specs + Implementation Notes (from artifact).
@@ -434,7 +572,7 @@ struct
       [Respond] action always has a matching close in the JSONL log. *)
   let mark_session_failed event_log runtime patch_id =
     let snapshot = ref None in
-    Runtime.update_orchestrator runtime (fun orch ->
+    Runtime.commit_orchestrator_exn runtime (fun orch ->
         match Orchestrator.find_agent orch patch_id with
         | None -> orch
         | Some before ->
@@ -551,7 +689,7 @@ struct
       Base.Option.value Env.patch_agent_effort ~default:"medium"
     in
     let run_llm_session ~sw ~gameplan_prompt ~patch_prompt ~kind ~patch_id
-        ~prompt ~agent ~on_pr_detected =
+        ~prompt ~resume_prompt ~agent:_ ~on_pr_detected =
       let gameplan =
         Runtime.read runtime (fun snapshot -> snapshot.Runtime.gameplan)
       in
@@ -577,6 +715,44 @@ struct
         Backend_registry.get Env.backend_registry ~backend:selection.backend
           ~model:selection.model
       in
+      let selected_provider =
+        match selected_backend with
+        | Backend_registry.Ephemeral _ -> (
+            let backend = selection.Backend_routing.backend in
+            match
+              (Base.String.lowercase backend, selection.Backend_routing.model)
+            with
+            | ("opencode" | "pi"), Some model ->
+                Base.String.lsplit2 (Base.String.lowercase model) ~on:'/'
+                |> Base.Option.map ~f:fst
+                |> Base.Option.value ~default:backend
+            | _ -> backend)
+        | Backend_registry.Long_lived _ -> patch_agent_provider
+      in
+      let prompt_fingerprint =
+        conversation_fingerprint ~gameplan_prompt ~patch_prompt
+          ~backend:selection.Backend_routing.backend
+          ~model:selection.Backend_routing.model ~provider:selected_provider
+          ~effort:patch_agent_effort
+      in
+      let agent =
+        let current =
+          Runtime.read runtime (fun snap ->
+              Orchestrator.agent snap.Runtime.orchestrator patch_id)
+        in
+        if
+          Option.equal String.equal
+            (Patch_agent.prompt_fingerprint current)
+            (Some prompt_fingerprint)
+        then current
+        else
+          durable_commit runtime (fun orch ->
+              let orch =
+                Orchestrator.align_prompt_fingerprint orch patch_id
+                  prompt_fingerprint
+              in
+              (orch, Orchestrator.agent orch patch_id))
+      in
       let validate_before_push ~worktree ~base_branch =
         prepare_patch_contract ~runtime ~patch_id ~worktree ~base_branch
       in
@@ -584,28 +760,26 @@ struct
         match patch with
         | None -> Error "worker has no declared patch contract"
         | Some patch ->
-            let provider =
-              match selected_backend with
-              | Backend_registry.Ephemeral _ -> (
-                  let backend = selection.Backend_routing.backend in
-                  match
-                    ( Base.String.lowercase backend,
-                      selection.Backend_routing.model )
-                  with
-                  | ("opencode" | "pi"), Some model ->
-                      Base.String.lsplit2 (Base.String.lowercase model) ~on:'/'
-                      |> Base.Option.map ~f:fst
-                      |> Base.Option.value ~default:backend
-                  | _ -> backend)
-              | Backend_registry.Long_lived _ -> patch_agent_provider
+            let completion_reset =
+              let required =
+                match kind with
+                | None -> true
+                | Some operation ->
+                    Operation_kind.requires_completion_claim operation
+              in
+              if required then
+                Project_store.clear_completion_claim ~project_name ~patch_id
+              else Ok ()
             in
-            Worker_sandbox.create ~backend:selection.Backend_routing.backend
-              ~provider ~project_name ~worktree ~patch ~gameplan ~operation:kind
+            Base.Result.bind completion_reset ~f:(fun () ->
+                Worker_sandbox.create ~backend:selection.Backend_routing.backend
+                  ~provider:selected_provider ~project_name ~worktree ~patch
+                  ~gameplan ~operation:kind)
       in
       match selected_backend with
       | Backend_registry.Ephemeral backend ->
           Session_driver.run ~sandbox_for_worktree ~kind ~patch_id ~prompt
-            ~agent ~on_pr_detected ~validate_before_push ~backend
+            ~resume_prompt ~agent ~on_pr_detected ~validate_before_push ~backend
       | Backend_registry.Long_lived backend -> (
           let patch_agent_model_result =
             match selection.Backend_routing.model with
@@ -624,8 +798,10 @@ struct
               let session =
                 match Long_lived_sessions.find long_lived_sessions patch_id with
                 | Some session ->
-                    Session_driver.update_long_lived_session_prompts session
-                      ~gameplan_prompt ~patch_prompt;
+                    Session_driver.update_long_lived_session session
+                      ~gameplan_prompt ~patch_prompt
+                      ~conversation_generation:
+                        (Patch_agent.conversation_generation agent);
                     session
                 | None ->
                     let session =
@@ -633,14 +809,16 @@ struct
                         ~provider:patch_agent_provider ~model:patch_agent_model
                         ~effort:patch_agent_effort ~gameplan_prompt
                         ~patch_prompt
+                        ~conversation_generation:
+                          (Patch_agent.conversation_generation agent)
                     in
                     Long_lived_sessions.register long_lived_sessions patch_id
                       session;
                     session
               in
               Session_driver.run_long_lived ~sw ~sandbox_for_worktree ~kind
-                ~patch_id ~prompt ~agent ~on_pr_detected ~validate_before_push
-                ~session)
+                ~patch_id ~prompt:resume_prompt ~agent ~on_pr_detected
+                ~validate_before_push ~session)
     in
     let shutdown_finished_long_lived_sessions ~sw () =
       let finished =
@@ -703,6 +881,7 @@ struct
                       Some (pid, Orchestrator.agent orch pid)
                   | Orchestrator.Pending, Orchestrator.Start _
                   | Orchestrator.Acked, _
+                  | Orchestrator.Awaiting_publication, _
                   | Orchestrator.Completed, _
                   | Orchestrator.Obsolete, _ ->
                       None)
@@ -736,6 +915,7 @@ struct
                         | None -> dispatched
                       in
                       (acc, dispatched)
+                  | Orchestrator.Awaiting_publication -> (acc, msg :: dispatched)
                   | Orchestrator.Completed | Orchestrator.Obsolete ->
                       (acc, dispatched))
             in
@@ -761,6 +941,38 @@ struct
                       (Orchestrator.message_patch_id msg))
           in
           Event_log.log_action event_log ~action ~agent_before);
+      let messages =
+        Base.List.filter messages
+          ~f:(fun (msg : Orchestrator.patch_agent_message) ->
+            match
+              (Orchestrator.message_status msg, Orchestrator.message_action msg)
+            with
+            | Orchestrator.Awaiting_publication, Orchestrator.Start (patch_id, _)
+              -> (
+                match
+                  Base.List.find gameplan.Gameplan.patches
+                    ~f:(fun (patch : Patch.t) ->
+                      Patch_id.equal patch.id patch_id)
+                with
+                | Some patch ->
+                    if
+                      not
+                        (publish_start_pr ~runtime ~project_name ~patch_id
+                           ~base:(current_base ~runtime ~gameplan patch_id)
+                           ~recovery:true patch)
+                    then
+                      Runtime.commit_orchestrator_exn runtime (fun orch ->
+                          Orchestrator.defer_start_publication orch patch_id);
+                    false
+                | None -> true)
+            | ( ( Orchestrator.Pending | Orchestrator.Completed
+                | Orchestrator.Obsolete ),
+                _ )
+            | Orchestrator.Acked, Orchestrator.Start _
+            | ( (Orchestrator.Acked | Orchestrator.Awaiting_publication),
+                (Orchestrator.Respond _ | Orchestrator.Rebase _) ) ->
+                true)
+      in
       (* Spawn all actions concurrently, limited by max_concurrency semaphore *)
       let action_fibers =
         Base.List.filter_map messages
@@ -808,7 +1020,7 @@ struct
                                         ()
                                     with
                                     | Worktree_setup.Missing ->
-                                        Runtime.update_orchestrator runtime
+                                        Runtime.commit_orchestrator_exn runtime
                                           (fun orch ->
                                             Orchestrator.apply_session_result
                                               orch patch_id
@@ -846,8 +1058,8 @@ struct
                                         (match start_anchor_events with
                                         | [] -> ()
                                         | _ ->
-                                            Runtime.update_orchestrator runtime
-                                              (fun orch ->
+                                            Runtime.commit_orchestrator_exn
+                                              runtime (fun orch ->
                                                 Orchestrator.apply_anchor_events
                                                   orch patch_id
                                                   start_anchor_events));
@@ -865,17 +1077,6 @@ struct
                                           then []
                                           else Orchestrator.message_payload msg
                                         in
-                                        let prompt =
-                                          Prompt.render_direct_messages_prompt
-                                            direct_messages
-                                          ^ Prompt.render_patch_prompt
-                                              ~project_name ?agents_md
-                                              ?pr_number:
-                                                (Patch_agent.pr_number agent)
-                                              patch gameplan
-                                              ~base_branch:
-                                                (Branch.to_string base_branch)
-                                        in
                                         (* PR detection from stream text is a hint
                                      only — always confirmed via the GitHub
                                      REST API after the
@@ -886,18 +1087,32 @@ struct
                                             ~project_name gameplan
                                         in
                                         let patch_prompt =
-                                          Prompt.render_patch_layer_of_gameplan
-                                            ~project_name
-                                            ?pr_number:
-                                              (Patch_agent.pr_number agent)
-                                            patch gameplan
-                                            ~base_branch:
-                                              (Branch.to_string base_branch)
+                                          Prompt.render_agents_md_layer
+                                            agents_md
+                                          ^ Prompt
+                                            .render_patch_layer_of_gameplan
+                                              ~project_name
+                                              ?pr_number:
+                                                (Patch_agent.pr_number agent)
+                                              patch gameplan
+                                              ~base_branch:
+                                                (Branch.to_string base_branch)
+                                        in
+                                        let resume_prompt =
+                                          Prompt.render_direct_messages_prompt
+                                            direct_messages
+                                          ^ Prompt.render_turn_layer_start
+                                              ~project_name
+                                        in
+                                        let prompt =
+                                          gameplan_prompt ^ patch_prompt
+                                          ^ resume_prompt
                                         in
                                         let r, _tool_failures =
                                           run_llm_session ~sw ~gameplan_prompt
                                             ~patch_prompt ~kind:None ~patch_id
-                                            ~prompt ~agent ~on_pr_detected
+                                            ~prompt ~resume_prompt ~agent
+                                            ~on_pr_detected
                                         in
                                         (r
                                           :> [ `Failed
@@ -913,7 +1128,7 @@ struct
                                   Orchestrator.Start_failed
                               | `Ok -> Orchestrator.Start_ok
                             in
-                            Runtime.update_orchestrator runtime (fun orch ->
+                            Runtime.commit_orchestrator_exn runtime (fun orch ->
                                 Orchestrator.apply_start_outcome orch patch_id
                                   start_outcome);
                             match start_outcome with
@@ -942,115 +1157,19 @@ struct
                                  merged while the agent session was running,
                                  making the base captured at dispatch time
                                  stale. *)
-                                let fresh_base =
-                                  Runtime.read runtime (fun snap ->
-                                      let orch = snap.Runtime.orchestrator in
-                                      let has_merged pid =
-                                        (Orchestrator.agent orch pid)
-                                          .Patch_agent.merged
-                                      in
-                                      let branch_of pid =
-                                        match
-                                          Base.List.find
-                                            gameplan.Gameplan.patches
-                                            ~f:(fun (p : Patch.t) ->
-                                              Patch_id.equal p.Patch.id pid)
-                                        with
-                                        | Some p -> p.Patch.branch
-                                        | None -> Orchestrator.main_branch orch
-                                      in
-                                      Graph.initial_base
-                                        (Orchestrator.graph orch) patch_id
-                                        ~has_merged ~branch_of
-                                        ~main:(Orchestrator.main_branch orch))
-                                in
-                                let pr_title = Patch_validator.pr_title patch in
-                                let pr_body =
-                                  Prompt.render_pr_description ~project_name
-                                    patch
-                                  ^ Prompt.render_check_suffix patch
-                                in
-                                (match
-                                   Forge.create_pull_request ~title:pr_title
-                                     ~head:patch.Patch.branch ~base:fresh_base
-                                     ~body:pr_body ~draft:true
-                                 with
-                                | Ok pr_number ->
-                                    log_event runtime ~patch_id
-                                      (Printf.sprintf "PR #%d created"
-                                         (Pr_number.to_int pr_number));
-                                    Env.register_pr ~patch_id ~pr_number;
-                                    Runtime.update_orchestrator runtime
-                                      (fun orch ->
-                                        Orchestrator.set_pr_number orch patch_id
-                                          pr_number)
-                                | Error e -> (
-                                    match e with
-                                    | Github.Http_error
-                                        { status = 422; body; _ }
-                                      when Github
-                                           .response_error_message_contains body
-                                             ~substring:
-                                               "pull request already exists"
-                                      -> (
-                                        (* PR already exists — discover it rather
-                                         than treating this as failure. We
-                                         only fall back on this specific 422;
-                                         other 422s (no commits, head missing,
-                                         etc.) propagate with the original
-                                         error message. *)
-                                        match
-                                          Forge.list_prs
-                                            ~branch:patch.Patch.branch
-                                            ~state:`Open ()
-                                        with
-                                        | Ok ((pr_number, _, _) :: _) ->
-                                            log_event runtime ~patch_id
-                                              (Printf.sprintf
-                                                 "PR #%d already existed, \
-                                                  associated"
-                                                 (Pr_number.to_int pr_number));
-                                            Env.register_pr ~patch_id ~pr_number;
-                                            Runtime.update_orchestrator runtime
-                                              (fun orch ->
-                                                Orchestrator.set_pr_number orch
-                                                  patch_id pr_number)
-                                        | Ok [] ->
-                                            log_event runtime ~patch_id
-                                              "PR creation failed (422 \
-                                               already-exists) and discovery \
-                                               found no open PRs";
-                                            Runtime.update_orchestrator runtime
-                                              (fun orch ->
-                                                Orchestrator
-                                                .on_pr_discovery_failure orch
-                                                  patch_id)
-                                        | Error disc_err ->
-                                            log_event runtime ~patch_id
-                                              (Printf.sprintf
-                                                 "PR creation failed (422 \
-                                                  already-exists) and \
-                                                  discovery also failed — %s"
-                                                 (Forge.show_error disc_err));
-                                            Runtime.update_orchestrator runtime
-                                              (fun orch ->
-                                                Orchestrator
-                                                .on_pr_discovery_failure orch
-                                                  patch_id))
-                                    | Github.Http_error _
-                                    | Github.Json_parse_error _
-                                    | Github.Graphql_error _ | Github.Timeout _
-                                    | Github.Transport_error _ ->
-                                        log_event runtime ~patch_id
-                                          (Printf.sprintf
-                                             "PR creation failed — %s"
-                                             (Forge.show_error e));
-                                        Runtime.update_orchestrator runtime
-                                          (fun orch ->
-                                            Orchestrator.on_pr_discovery_failure
-                                              orch patch_id)));
-                                Runtime.update_orchestrator runtime (fun orch ->
-                                    Orchestrator.complete orch patch_id)
+                                if
+                                  not
+                                    (publish_start_pr ~runtime ~project_name
+                                       ~patch_id
+                                       ~base:
+                                         (current_base ~runtime ~gameplan
+                                            patch_id)
+                                       ~recovery:false patch)
+                                then
+                                  Runtime.commit_orchestrator_exn runtime
+                                    (fun orch ->
+                                      Orchestrator.defer_start_publication orch
+                                        patch_id)
                             | Orchestrator.Start_stale -> ())))
             | Orchestrator.Rebase (patch_id, new_base) ->
                 Some
@@ -1115,8 +1234,8 @@ struct
                             log_event runtime ~patch_id
                               (Printf.sprintf "Rebase failed — %s" msg));
                         let agent_before, (agent_after, effects) =
-                          Runtime.update_orchestrator_returning runtime
-                            (fun orch ->
+                          Runtime.read runtime (fun orch ->
+                              let orch = orch.Runtime.orchestrator in
                               let agent_before =
                                 Orchestrator.agent orch patch_id
                               in
@@ -1127,7 +1246,7 @@ struct
                               let agent_after =
                                 Orchestrator.agent orch patch_id
                               in
-                              (orch, (agent_before, (agent_after, effects))))
+                              (agent_before, (agent_after, effects)))
                         in
                         let push_record =
                           Base.List.find_map effects
@@ -1151,7 +1270,7 @@ struct
                                 prepare_patch_contract ~runtime ~patch_id
                                   ~worktree:wt_path ~base_branch:new_base
                               with
-                              | Error _ -> Some `Rejected
+                              | Error failure -> Some (`Rejected failure)
                               | Ok () ->
                                   let result =
                                     W.force_push_with_lease ~path:wt_path
@@ -1194,20 +1313,28 @@ struct
                         in
                         let push_outcome =
                           Base.Option.bind push_record ~f:(function
-                            | `Rejected -> None
+                            | `Rejected _ -> None
                             | `Pushed (result, _, _, _) -> Some result)
                         in
+                        let rewritten_head =
+                          match (pre_rebase_head, post_rebase_head) with
+                          | Some before, Some after -> Some (before, after)
+                          | None, _ | _, None -> None
+                        in
                         let resolution, push_agent_after =
-                          Runtime.update_orchestrator_returning runtime
-                            (fun orch ->
+                          durable_commit runtime (fun orch ->
+                              let orch, _effects =
+                                Orchestrator.apply_rebase_with_anchor orch
+                                  patch_id rebase_result new_base anchor_events
+                              in
                               let orch, resolution =
                                 match push_record with
-                                | Some `Rejected ->
+                                | Some (`Rejected failure) ->
                                     Orchestrator.reject_rebase_publication orch
-                                      patch_id
+                                      patch_id failure
                                 | Some (`Pushed _) | None ->
                                     Orchestrator.apply_rebase_push_result orch
-                                      patch_id push_outcome
+                                      patch_id ?rewritten_head push_outcome
                               in
                               let push_agent_after =
                                 Orchestrator.agent orch patch_id
@@ -1224,9 +1351,13 @@ struct
                               ~local_sha ~remote_tracking_sha ~base_sha
                               ~agent_before:agent_after
                               ~agent_after:push_agent_after
-                        | Some `Rejected | None -> ());
+                        | Some (`Rejected _) | None -> ());
                         (match resolution with
                         | Orchestrator.Rebase_push_ok -> ()
+                        | Orchestrator.Rebase_completion_unbound ->
+                            log_event runtime ~patch_id
+                              "Rebase published without an exact head rewrite; \
+                               queued completion re-attestation"
                         | Orchestrator.Rebase_push_failed ->
                             log_event runtime ~patch_id
                               "Enqueued merge-conflict after rebase push \
@@ -1237,7 +1368,11 @@ struct
                                queue; dropping (queue will merge or eject)"
                         | Orchestrator.Rebase_push_error ->
                             log_event runtime ~patch_id
-                              "Enqueued rebase retry after push error");
+                              "Enqueued rebase retry after push error"
+                        | Orchestrator.Rebase_publication_rejected ->
+                            log_event runtime ~patch_id
+                              "Rebase publication rejected by the declared \
+                               contract");
                         Event_log.log_rebase event_log ~patch_id
                           ~result:rebase_result ~pre_rebase_head
                           ~post_rebase_head
@@ -1540,11 +1675,11 @@ struct
                                             (Stdlib.Filename.concat wt_path
                                                "AGENTS.md")
                                         in
-                                        let prompt =
+                                        let resume_prompt =
                                           let raw =
-                                            Prompt.render_merge_conflict_prompt
-                                              ~project_name ?agents_md
-                                              ?pr_number ?patch ~gameplan
+                                            Prompt
+                                            .render_turn_layer_merge_conflict
+                                              ~project_name ?pr_number
                                               ~base_branch:base ~git_status
                                               ~git_diff ?conflict_info ()
                                           in
@@ -1554,17 +1689,26 @@ struct
                                         in
                                         let on_pr_detected _pr_number = () in
                                         let gameplan_prompt =
-                                          Prompt.render_gameplan_layer
-                                            ~project_name gameplan
+                                          match patch with
+                                          | Some _ ->
+                                              Prompt.render_gameplan_layer
+                                                ~project_name gameplan
+                                          | None -> ""
                                         in
                                         let patch_prompt =
                                           match patch with
                                           | Some p ->
-                                              Prompt
-                                              .render_patch_layer_of_gameplan
-                                                ~project_name ?pr_number p
-                                                gameplan ~base_branch:base
+                                              Prompt.render_agents_md_layer
+                                                agents_md
+                                              ^ Prompt
+                                                .render_patch_layer_of_gameplan
+                                                  ~project_name ?pr_number p
+                                                  gameplan ~base_branch:base
                                           | None -> ""
+                                        in
+                                        let prompt =
+                                          gameplan_prompt ^ patch_prompt
+                                          ^ resume_prompt
                                         in
                                         let result, _tool_failures =
                                           run_llm_session ~sw ~gameplan_prompt
@@ -1572,8 +1716,8 @@ struct
                                             ~kind:
                                               (Some
                                                  Operation_kind.Merge_conflict)
-                                            ~patch_id ~prompt ~agent
-                                            ~on_pr_detected
+                                            ~patch_id ~prompt ~resume_prompt
+                                            ~agent ~on_pr_detected
                                         in
                                         (match result with
                                         | `Ok
@@ -1990,13 +2134,8 @@ struct
                                                 Base.List.is_empty failed_checks
                                               then
                                                 Prompt
-                                                .render_ci_failure_unknown_prompt
-                                                  ~project_name ?agents_md
-                                                  ?pr_number
-                                                  ?patch:patch_for_layer
-                                                  ~gameplan
-                                                  ~base_branch:
-                                                    base_branch_for_layer ()
+                                                .render_turn_layer_ci_unknown
+                                                  ~project_name ?pr_number ()
                                               else
                                                 let fetch_cap = 10 in
                                                 let checks_to_fetch, extra =
@@ -2131,13 +2270,8 @@ struct
                                                         (check, None))
                                                 in
                                                 Prompt
-                                                .render_ci_failure_prompt_detailed
-                                                  ~project_name ?agents_md
-                                                  ?pr_number
-                                                  ?patch:patch_for_layer
-                                                  ~gameplan
-                                                  ~base_branch:
-                                                    base_branch_for_layer
+                                                .render_turn_layer_ci_detailed
+                                                  ~project_name ?pr_number
                                                   detailed_checks
                                           | Patch_decision.Review_payload
                                               { comments } ->
@@ -2161,14 +2295,11 @@ struct
                                              replayed as a duplicate reply. *)
                                               Project_store.reset_artifact_dir
                                                 artifact_dir;
-                                              Prompt.render_review_prompt
-                                                ~project_name ?agents_md
-                                                ?pr_number ?current_head_sha
+                                              Prompt.render_turn_layer_review
+                                                ~project_name ?pr_number
+                                                ?current_head_sha
                                                 ?viewer_login:
                                                   (Forge.viewer_login ())
-                                                ?patch:patch_for_layer ~gameplan
-                                                ~base_branch:
-                                                  base_branch_for_layer
                                                 ~artifact_dir comments
                                           | Patch_decision.Findings_payload
                                               { findings } ->
@@ -2184,13 +2315,10 @@ struct
                                               in
                                               Project_store.reset_artifact_dir
                                                 artifact_dir;
-                                              Prompt.render_findings_prompt
-                                                ~project_name ?agents_md
-                                                ?pr_number ?current_head_sha
-                                                ?patch:patch_for_layer ~gameplan
-                                                ~base_branch:
-                                                  base_branch_for_layer
-                                                ~artifact_dir findings
+                                              Prompt.render_turn_layer_findings
+                                                ~project_name ?pr_number
+                                                ?current_head_sha ~artifact_dir
+                                                findings
                                           | Patch_decision.Human_payload
                                               { messages } ->
                                               Prompt.render_human_message_prompt
@@ -2253,7 +2381,7 @@ struct
                                          in the dedicated match arm above *)
                                               assert false
                                         in
-                                        let prompt =
+                                        let resume_prompt =
                                           if String.equal base_changed_prefix ""
                                           then prompt
                                           else
@@ -2307,25 +2435,34 @@ struct
                                                ~project_name ~patch_id)
                                         in
                                         let gameplan_prompt =
-                                          Prompt.render_gameplan_layer
-                                            ~project_name gameplan
+                                          match patch_for_layer with
+                                          | Some _ ->
+                                              Prompt.render_gameplan_layer
+                                                ~project_name gameplan
+                                          | None -> ""
                                         in
                                         let patch_prompt =
                                           match patch_for_layer with
                                           | Some p ->
-                                              Prompt
-                                              .render_patch_layer_of_gameplan
-                                                ~project_name ?pr_number p
-                                                gameplan
-                                                ~base_branch:
-                                                  base_branch_for_layer
+                                              Prompt.render_agents_md_layer
+                                                agents_md
+                                              ^ Prompt
+                                                .render_patch_layer_of_gameplan
+                                                  ~project_name ?pr_number p
+                                                  gameplan
+                                                  ~base_branch:
+                                                    base_branch_for_layer
                                           | None -> ""
+                                        in
+                                        let prompt =
+                                          gameplan_prompt ^ patch_prompt
+                                          ^ resume_prompt
                                         in
                                         let result, tool_failures =
                                           run_llm_session ~sw ~gameplan_prompt
                                             ~patch_prompt ~kind:(Some kind)
-                                            ~patch_id ~prompt ~agent
-                                            ~on_pr_detected
+                                            ~patch_id ~prompt ~resume_prompt
+                                            ~agent ~on_pr_detected
                                         in
                                         let result =
                                           (result
@@ -2728,7 +2865,7 @@ struct
                               Orchestrator.Respond_review_unresolved
                           | `Ok -> Orchestrator.Respond_ok
                         in
-                        Runtime.update_orchestrator runtime (fun orch ->
+                        Runtime.commit_orchestrator_exn runtime (fun orch ->
                             Orchestrator.apply_respond_outcome orch patch_id
                               kind respond_outcome);
                         match respond_outcome with

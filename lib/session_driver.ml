@@ -33,6 +33,41 @@ let session_mode (agent : Patch_agent.t) :
       | Some id -> `Resume id
       | None -> `Fresh)
 
+let prompt_for_session_mode mode ~prompt ~resume_prompt =
+  match mode with `Resume _ -> resume_prompt | `Fresh -> prompt
+
+let%test "fresh sessions receive the full prompt and resumes receive the delta"
+    =
+  String.equal
+    (prompt_for_session_mode `Fresh ~prompt:"full" ~resume_prompt:"delta")
+    "full"
+  && String.equal
+       (prompt_for_session_mode (`Resume "session") ~prompt:"full"
+          ~resume_prompt:"delta")
+       "delta"
+
+let completion_claim_is_authoritative = function
+  | Orchestrator.Session_ok | Orchestrator.Session_no_commits -> true
+  | Orchestrator.Session_process_error _ | Orchestrator.Session_no_resume
+  | Orchestrator.Session_failed _ | Orchestrator.Session_validation_failed _
+  | Orchestrator.Session_rebase_conflict_remaining _
+  | Orchestrator.Session_controller_failed _ | Orchestrator.Session_give_up
+  | Orchestrator.Session_worktree_missing | Orchestrator.Session_push_failed _
+  | Orchestrator.Session_context_exhausted ->
+      false
+
+let%test "completion claims are authoritative only after a completed turn" =
+  completion_claim_is_authoritative Orchestrator.Session_ok
+  && completion_claim_is_authoritative Orchestrator.Session_no_commits
+  && (not
+        (completion_claim_is_authoritative
+           (Orchestrator.Session_process_error
+              { is_fresh = false; detail = None })))
+  && not
+       (completion_claim_is_authoritative
+          (Orchestrator.Session_validation_failed
+             { target = Validation_repair.Outside_scope; detail = "rejected" }))
+
 let extract_pr_number_from_text ?(at_end_of_stream = false) ~owner ~repo text =
   let needle = Printf.sprintf "github.com/%s/%s/pull/" owner repo in
   let needle_len = String.length needle in
@@ -141,7 +176,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
   module WS = Worktree_setup.Make (W) (Env)
 
   let run_with_backend ~session_mode_for_agent ~sandbox_for_worktree
-      ~(kind : Types.Operation_kind.t option) ~patch_id ~prompt
+      ~(kind : Types.Operation_kind.t option) ~patch_id ~prompt ~resume_prompt
       ~(agent : Patch_agent.t) ~on_pr_detected ~validate_before_push
       ~backend_name ~run_backend =
     let runtime = Env.runtime in
@@ -157,11 +192,12 @@ module Make (W : Worktree.S) (Env : ENV) = struct
         log_event runtime ~patch_id
           "Session fallback exhausted — continue and fresh both failed, needs \
            intervention";
-        Runtime.update_orchestrator runtime (fun orch ->
+        Runtime.commit_orchestrator_exn runtime (fun orch ->
             Orchestrator.apply_session_result orch patch_id
               Orchestrator.Session_give_up);
         (`Failed, [])
     | (`Resume _ | `Fresh) as mode -> (
+        let prompt = prompt_for_session_mode mode ~prompt ~resume_prompt in
         let resume_session, is_fresh =
           match mode with
           | `Resume id -> (Some id, false)
@@ -169,7 +205,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
         in
         match WS.ensure_worktree ~patch_id ~agent () with
         | Worktree_setup.Missing ->
-            Runtime.update_orchestrator runtime (fun orch ->
+            Runtime.commit_orchestrator_exn runtime (fun orch ->
                 Orchestrator.apply_session_result orch patch_id
                   Orchestrator.Session_worktree_missing);
             (`Failed, [])
@@ -179,7 +215,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
             | Error detail ->
                 log_event runtime ~patch_id
                   ("Worker sandbox refused session — " ^ detail);
-                Runtime.update_orchestrator runtime (fun orch ->
+                Runtime.commit_orchestrator_exn runtime (fun orch ->
                     Orchestrator.apply_session_result orch patch_id
                       (Orchestrator.Session_process_error
                          { is_fresh; detail = Some detail }));
@@ -310,7 +346,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                     let mark_backend_accepted_turn () =
                       if not !backend_accepted_turn then (
                         backend_accepted_turn := true;
-                        Runtime.update_orchestrator runtime (fun orch ->
+                        Runtime.commit_orchestrator_exn runtime (fun orch ->
                             Orchestrator.mark_inflight_human_messages_delivered
                               orch patch_id))
                     in
@@ -485,6 +521,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                       | Eio.Cancel.Cancelled _ as exn ->
                           cancelled := Some exn;
                           Error (Stdlib.Printexc.to_string exn)
+                      | Runtime.Durable_store_failed _ as exn -> raise exn
                       | exn -> Error (Stdlib.Printexc.to_string exn)
                     in
                     let open Run_classification in
@@ -678,35 +715,25 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                              "Session ended with %d non-completed tool call(s) \
                               (%s): %s"
                              (List.length failures) backend_name rendered));
-                    let apply_result_and_emit_complete final_session_result =
-                      let agent_before, agent_after =
-                        Runtime.update_orchestrator_returning runtime
-                          (fun orch ->
-                            let agent_before =
-                              Orchestrator.agent orch patch_id
-                            in
-                            (* Store the captured session_id BEFORE applying the session
-                     result. [apply_session_result] clears [llm_session_id] on
-                     start-path fresh failure (via [on_session_failure]) and on
-                     [Session_no_resume] / [Session_give_up]; doing the set
-                     afterwards would overwrite that reset and break the
-                     clean-retry path. *)
-                            let orch =
-                              match !captured_session_id with
-                              | Some _ ->
-                                  Orchestrator.set_llm_session_id orch patch_id
-                                    !captured_session_id
-                              | None -> orch
-                            in
-                            let orch =
-                              Orchestrator.apply_session_result orch patch_id
-                                final_session_result
-                            in
-                            let agent_after =
-                              Orchestrator.agent orch patch_id
-                            in
-                            (orch, (agent_before, agent_after)))
+                    let apply_session_transition orch final_session_result =
+                      (* Store the captured session_id BEFORE applying the
+                         session result. [apply_session_result] clears
+                         [llm_session_id] on start-path fresh failure (via
+                         [on_session_failure]) and on [Session_no_resume] /
+                         [Session_give_up]; doing the set afterwards would
+                         overwrite that reset and break the clean-retry path. *)
+                      let orch =
+                        match !captured_session_id with
+                        | Some _ ->
+                            Orchestrator.set_llm_session_id orch patch_id
+                              !captured_session_id
+                        | None -> orch
                       in
+                      Orchestrator.apply_session_result orch patch_id
+                        final_session_result
+                    in
+                    let emit_complete final_session_result ~agent_before
+                        ~agent_after =
                       Telemetry_dispatch.emit
                         (Telemetry.Event.Complete
                            {
@@ -727,13 +754,26 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                                      Persistence.patch_agent_to_yojson
                                        agent_after );
                                  ];
-                           });
-                      (agent_before, agent_after)
+                           })
                     in
                     (match !cancelled with
                     | None -> ()
                     | Some exn ->
-                        ignore (apply_result_and_emit_complete session_result);
+                        let agent_before, agent_after =
+                          Runtime.commit_orchestrator_returning_exn runtime
+                            (fun orch ->
+                              let agent_before =
+                                Orchestrator.agent orch patch_id
+                              in
+                              let orch =
+                                apply_session_transition orch session_result
+                              in
+                              let agent_after =
+                                Orchestrator.agent orch patch_id
+                              in
+                              (orch, (agent_before, agent_after)))
+                        in
+                        emit_complete session_result ~agent_before ~agent_after;
                         raise exn);
                     (* The supervisor is the sole publication boundary. Agent
              commits remain local until the declared patch contract accepts
@@ -750,6 +790,20 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                     in
                     let branch_str = Types.Branch.to_string branch in
                     let base_str = Types.Branch.to_string base in
+                    let completion_claim =
+                      let required =
+                        match kind with
+                        | None -> true
+                        | Some operation ->
+                            Types.Operation_kind.requires_completion_claim
+                              operation
+                      in
+                      if required then
+                        Some
+                          (Project_store.read_completion_claim ~project_name
+                             ~patch_id)
+                      else None
+                    in
                     let preparation =
                       validate_before_push ~worktree:worktree_path
                         ~base_branch:base
@@ -785,7 +839,14 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                                ~base)
                     in
                     (match publication with
-                    | `Rejected reason ->
+                    | `Rejected failure ->
+                        let reason =
+                          match failure with
+                          | Orchestrator.Repair_required { detail; _ }
+                          | Orchestrator.Rebase_conflict_remaining { detail }
+                          | Orchestrator.Controller_failed { detail } ->
+                              detail
+                        in
                         log_event runtime ~patch_id
                           ("runner: publication rejected — " ^ reason)
                     | `Pushed push_outcome -> (
@@ -870,14 +931,24 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                     in
                     let final_session_result =
                       match publication with
-                      | `Rejected reason ->
-                          (* Validation is controller-authored repair feedback,
-                             regardless of whether this was the initial Start
-                             or a post-PR response.  Preserve the healthy LLM
-                             session and enqueue only this bounded diagnostic
-                             for the next Human turn. *)
+                      | `Rejected
+                          (Orchestrator.Repair_required { target; detail }) ->
+                          (* Repairable contract failures re-enter the durable
+                             Human lifecycle. The pure patch state decides
+                             whether to resume, rotate to a fresh session, or
+                             fail closed. *)
                           Orchestrator.Session_validation_failed
-                            { detail = reason }
+                            { target; detail }
+                      | `Rejected
+                          (Orchestrator.Rebase_conflict_remaining { detail }) ->
+                          Orchestrator.Session_rebase_conflict_remaining
+                            { detail }
+                      | `Rejected (Orchestrator.Controller_failed { detail }) ->
+                          (* The worker has neither Git metadata authority nor
+                             supervisor capabilities. Asking it to repair a
+                             controller/repository failure would be a false
+                             recovery loop, so surface the boundary failure. *)
+                          Orchestrator.Session_controller_failed { detail }
                       | `Pushed push_outcome -> (
                           let combined =
                             Orchestrator.combine_session_and_push
@@ -894,6 +965,8 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                           | Orchestrator.Session_no_resume
                           | Orchestrator.Session_failed _
                           | Orchestrator.Session_validation_failed _
+                          | Orchestrator.Session_rebase_conflict_remaining _
+                          | Orchestrator.Session_controller_failed _
                           | Orchestrator.Session_give_up
                           | Orchestrator.Session_worktree_missing
                           | Orchestrator.Session_push_failed _
@@ -914,14 +987,76 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                       | Orchestrator.Session_no_resume
                       | Orchestrator.Session_failed _
                       | Orchestrator.Session_validation_failed _
+                      | Orchestrator.Session_rebase_conflict_remaining _
+                      | Orchestrator.Session_controller_failed _
                       | Orchestrator.Session_give_up
                       | Orchestrator.Session_worktree_missing
                       | Orchestrator.Session_context_exhausted ->
                           `Failed
                     in
-                    let _, push_agent_after =
-                      apply_result_and_emit_complete final_session_result
+                    let completion_claim =
+                      if completion_claim_is_authoritative final_session_result
+                      then completion_claim
+                      else None
                     in
+                    let agent_before, push_agent_after =
+                      Runtime.commit_orchestrator_returning_exn runtime
+                        (fun orch ->
+                          let agent_before = Orchestrator.agent orch patch_id in
+                          let orch =
+                            apply_session_transition orch final_session_result
+                          in
+                          let orch =
+                            match (kind, final_user_result) with
+                            | None, `Ok ->
+                                Orchestrator.mark_start_awaiting_publication
+                                  orch patch_id
+                            | ( None,
+                                ( `Failed | `No_commits | `Pr_body_miss
+                                | `Retry_push | `Review_unresolved ) )
+                            | Some _, _ ->
+                                orch
+                          in
+                          let orch =
+                            match (completion_claim, publication) with
+                            | ( None,
+                                `Pushed
+                                  ( Worktree.Push_ok | Worktree.Push_up_to_date
+                                  | Worktree.Push_no_commits ) ) ->
+                                orch
+                            | ( Some claim,
+                                `Pushed
+                                  ( Worktree.Push_ok | Worktree.Push_up_to_date
+                                  | Worktree.Push_no_commits ) ) -> (
+                                match (claim, push_local_sha) with
+                                | Ok Completion_claim.Complete, Some head_oid ->
+                                    Orchestrator.attest_completion orch patch_id
+                                      head_oid
+                                | Ok Completion_claim.Complete, None ->
+                                    Orchestrator.block_completion orch patch_id
+                                      "Controller accepted the completion \
+                                       claim but could not bind it to a Git \
+                                       head."
+                                | Ok (Completion_claim.Blocked reason), _ ->
+                                    Orchestrator.block_completion orch patch_id
+                                      ("Worker reported the patch incomplete: "
+                                     ^ reason)
+                                | Error reason, _ ->
+                                    Orchestrator.block_completion orch patch_id
+                                      ("Completion claim rejected: " ^ reason))
+                            | ( (None | Some _),
+                                ( `Rejected _
+                                | `Pushed
+                                    ( Worktree.Push_rejected _
+                                    | Worktree.Push_error _
+                                    | Worktree.Push_worktree_missing ) ) ) ->
+                                orch
+                          in
+                          let agent_after = Orchestrator.agent orch patch_id in
+                          (orch, (agent_before, agent_after)))
+                    in
+                    emit_complete final_session_result ~agent_before
+                      ~agent_after:push_agent_after;
                     (match publication with
                     | `Rejected _ -> ()
                     | `Pushed push_outcome ->
@@ -935,10 +1070,11 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                     (final_user_result, List.rev !tool_failures))))
 
   let run ~sandbox_for_worktree ~(kind : Types.Operation_kind.t option)
-      ~patch_id ~prompt ~(agent : Patch_agent.t) ~on_pr_detected
+      ~patch_id ~prompt ~resume_prompt ~(agent : Patch_agent.t) ~on_pr_detected
       ~validate_before_push ~backend =
-    run_with_backend ~sandbox_for_worktree ~kind ~patch_id ~prompt ~agent
-      ~on_pr_detected ~validate_before_push ~session_mode_for_agent:session_mode
+    run_with_backend ~sandbox_for_worktree ~kind ~patch_id ~prompt
+      ~resume_prompt ~agent ~on_pr_detected ~validate_before_push
+      ~session_mode_for_agent:session_mode
       ~backend_name:backend.Llm_backend.name
       ~run_backend:backend.Llm_backend.run_streaming
 
@@ -964,12 +1100,13 @@ module Make (W : Worktree.S) (Env : ENV) = struct
         effort : string;
         mutable gameplan_prompt : string;
         mutable patch_prompt : string;
+        mutable conversation_generation : int;
         timeout : float;
       }
         -> long_lived_session
 
   let create_long_lived_session ~(backend : Llm_backend_long_lived.t) ~provider
-      ~model ~effort ~gameplan_prompt ~patch_prompt =
+      ~model ~effort ~gameplan_prompt ~patch_prompt ~conversation_generation =
     let (Llm_backend_long_lived.T
            { name; timeout; start; prompt = prompt_backend; shutdown; _ }) =
       backend
@@ -990,24 +1127,31 @@ module Make (W : Worktree.S) (Env : ENV) = struct
         effort;
         gameplan_prompt;
         patch_prompt;
+        conversation_generation;
         timeout;
       }
 
-  let update_long_lived_session_prompts session ~gameplan_prompt ~patch_prompt =
+  let update_long_lived_session session ~gameplan_prompt ~patch_prompt
+      ~conversation_generation =
     let (Long_lived_session session) = session in
     let changed =
       (not (String.equal session.gameplan_prompt gameplan_prompt))
-      || not (String.equal session.patch_prompt patch_prompt)
+      || (not (String.equal session.patch_prompt patch_prompt))
+      || session.conversation_generation <> conversation_generation
     in
-    if changed && Option.is_some session.handle then (
-      let handle = session.handle in
-      session.handle <- None;
-      session.pending_shutdown_handle <- handle;
-      session.failed <- true;
-      session.failure_reason <-
-        Some "long-lived backend prompt prefix changed after session start");
+    if changed then (
+      (match session.handle with
+      | None -> ()
+      | Some handle -> (
+          session.handle <- None;
+          session.sandbox_profile <- None;
+          try session.shutdown handle with _ -> ()));
+      session.pending_shutdown_handle <- None;
+      session.failed <- false;
+      session.failure_reason <- None);
     session.gameplan_prompt <- gameplan_prompt;
-    session.patch_prompt <- patch_prompt
+    session.patch_prompt <- patch_prompt;
+    session.conversation_generation <- conversation_generation
 
   let long_lived_session_failed = function
     | Long_lived_session session -> session.failed
@@ -1115,6 +1259,7 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                   Some "long-lived backend prompt cancelled";
                 (try session.shutdown handle with _ -> ());
                 raise exn
+            | Runtime.Durable_store_failed _ as exn -> raise exn
             | exn ->
                 session.handle <- None;
                 session.sandbox_profile <- None;
@@ -1127,8 +1272,8 @@ module Make (W : Worktree.S) (Env : ENV) = struct
                 session.failure_reason <- Some message;
                 failed_result message)
     in
-    run_with_backend ~sandbox_for_worktree ~kind ~patch_id ~prompt ~agent
-      ~on_pr_detected ~validate_before_push
+    run_with_backend ~sandbox_for_worktree ~kind ~patch_id ~prompt
+      ~resume_prompt:prompt ~agent ~on_pr_detected ~validate_before_push
       ~session_mode_for_agent:(fun _ -> `Fresh)
       ~backend_name:session.name ~run_backend
 end

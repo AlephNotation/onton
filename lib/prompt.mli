@@ -16,7 +16,12 @@ val substitute_variables : string -> (string * string) list -> string
       ^ render_turn_layer_<kind>
     ]}
 
-    so prefix-cache hits accumulate at the layer boundaries:
+    The complete composition is delivered when a model session starts fresh.
+    Resumed sessions receive only the turn layer; long-lived backends load the
+    two stable layers when their process starts and receive turn layers through
+    their prompt channel.
+
+    The stable layers retain these identity guarantees:
 
     - {!render_gameplan_layer} is byte-identical across every layered prompt in
       a single gameplan run.
@@ -33,6 +38,9 @@ val substitute_variables : string -> (string * string) list -> string
 val render_gameplan_layer : project_name:string -> Gameplan.t -> string
 (** Plan-stable prefix containing repository identity, merge policy, terminal
     checks, patch goals, and a pointer to the read-only plan artifact. *)
+
+val render_agents_md_layer : string option -> string
+(** Repository instructions captured with the patch-session prefix. *)
 
 val render_patch_layer_of_gameplan :
   project_name:string ->
@@ -70,6 +78,14 @@ val render_turn_layer_review :
     whose thread already ends with onton's own reply as
     [response already posted] — those need no fresh response file, only a
     resolve retry. *)
+
+val render_turn_layer_findings :
+  project_name:string ->
+  ?pr_number:Pr_number.t ->
+  ?current_head_sha:string ->
+  artifact_dir:string ->
+  Review_service.finding list ->
+  string
 
 val render_turn_layer_ci :
   project_name:string -> ?pr_number:Pr_number.t -> Ci_check.t list -> string
@@ -124,11 +140,10 @@ val render_direct_messages_prompt : string list -> string
 
 val render_pr_description : project_name:string -> Patch.t -> string
 
-(** Pure: choose between the agent-authored PR body artifact and a deterministic
-    fallback (typically the gameplan-derived body). Returns [fallback] when
-    [artifact] is [None] or contains only whitespace; returns the artifact
-    contents otherwise. Used by the supervisor when composing the final PR body
-    for the implementation-notes phase. *)
+(** Pure: choose between an agent-authored PR body artifact and a deterministic
+    fallback. Retained for replaying Pr_body operations already present in old
+    snapshots; newly created PRs use the controller-rendered body directly and
+    do not enqueue this model phase. *)
 
 val render_check_suffix : Types.Patch.t -> string
 (** Pure: render executable patch checks for immutable PR evidence. *)

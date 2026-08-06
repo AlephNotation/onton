@@ -282,8 +282,9 @@ let apply_replacement_pr t patch_id ~pr_number ~base_branch ~merged =
 
 (* The mark-for-review "ready for review" fixpoint for a patch, read from
    orchestrator state. A PR has reached it when its expected base is [main]
-   (every dependency merged), its PR body is delivered, no merge conflict is
-   active, its local branch is actually rebased onto that base, and CI is green.
+   (every dependency merged), the worker's completion claim matches the current
+   Git head, its PR body is delivered, no merge conflict is active, its local
+   branch is actually rebased onto that base, and CI is green.
    [branch_rebased_onto] lags [expected_base] until the Rebase action lands,
    and [has_conflict] is set the moment a rebase or push surfaces a conflict —
    both must clear before the fixpoint holds. Gates the draft flip in
@@ -291,6 +292,15 @@ let apply_replacement_pr t patch_id ~pr_number ~base_branch ~merged =
 
    With more than one open dep the expected base is not yet a single branch
    ([Graph.initial_base] would raise), so the fixpoint is unreachable: [false]. *)
+let completion_is_current_and_quiescent agent =
+  Patch_agent.completion_matches_head agent
+  && (not (Patch_agent.is_busy agent))
+  && List.is_empty agent.Patch_agent.queue
+  && (not (Patch_agent.needs_intervention agent))
+  && (not agent.Patch_agent.branch_blocked)
+  && (not agent.Patch_agent.mergeability_unknown)
+  && agent.Patch_agent.unresolved_comment_count = 0
+
 let ready_for_review t patch_id =
   let agent = Orchestrator.agent t patch_id in
   let graph = Orchestrator.graph t in
@@ -308,18 +318,20 @@ let ready_for_review t patch_id =
     | None -> true
   in
   Branch.equal expected_base (Orchestrator.main_branch t)
+  && completion_is_current_and_quiescent agent
   && agent.Patch_agent.pr_body_delivered
   && (not agent.Patch_agent.has_conflict)
   && (not rebase_pending) && agent.Patch_agent.checks_passing
 
 (* The gate a child's Start waits on for its sole open-PR dependency: the
-   dependency's PR body is delivered, no merge conflict is active, and CI is
-   green. This is the [ready_for_review] set MINUS its "targets main / rebased
-   onto main" conjuncts — a child may legitimately start stacked on a
+   dependency has a current completion attestation and no pending work,
+   its PR body is delivered, no merge conflict is active, and CI is green.
+   This is the [ready_for_review] set MINUS its "targets main / rebased onto
+   main" conjuncts — a child may legitimately start stacked on a
    dependency that is itself still mid-chain (not yet drained to main), so
    requiring the dependency to be on main would needlessly serialize deep
    stacks. It strengthens the older deps-notes-ready gate ([pr_body_delivered]
-   alone) with the dependency's mergeability ([not has_conflict]) and CI health.
+   alone) with completion, quiescence, mergeability, and CI health.
 
    Deadlock-free: every conjunct is a property of the dependency itself, never
    of the dependent, so gating introduces no wait cycle. Merged deps are exempt
@@ -327,7 +339,8 @@ let ready_for_review t patch_id =
    parent that never delivered notes / went green cannot strand its child. *)
 let open_dep_review_ready t pid =
   let a = Orchestrator.agent t pid in
-  a.Patch_agent.pr_body_delivered
+  completion_is_current_and_quiescent a
+  && a.Patch_agent.pr_body_delivered
   && (not a.Patch_agent.has_conflict)
   && a.Patch_agent.checks_passing
 
@@ -518,7 +531,10 @@ let reconcile_messages t ~patches =
     List.fold patch_ids ~init:t ~f:(fun acc patch_id ->
         let keep =
           match Orchestrator.current_message acc patch_id with
-          | Some msg when Orchestrator.equal_message_status msg.status Acked ->
+          | Some msg
+            when Orchestrator.equal_message_status msg.status Acked
+                 || Orchestrator.equal_message_status msg.status
+                      Awaiting_publication ->
               [ msg.message_id ]
           | _ -> []
         in
@@ -528,7 +544,10 @@ let reconcile_messages t ~patches =
   let t, desired_ids =
     List.fold patch_ids ~init:(t, []) ~f:(fun (acc, ids) patch_id ->
         match Orchestrator.current_message acc patch_id with
-        | Some msg when Orchestrator.equal_message_status msg.status Acked ->
+        | Some msg
+          when Orchestrator.equal_message_status msg.status Acked
+               || Orchestrator.equal_message_status msg.status
+                    Awaiting_publication ->
             (acc, msg.message_id :: ids)
         | _ -> (
             match plan_action_for_patch acc ~branch_map patch_id with
@@ -1068,6 +1087,8 @@ let%test "reconcile_patch requests ready-for-review after pr_body on main" =
   let t = Orchestrator.set_pr_number t pid (Pr_number.of_int 42) in
   let t = Orchestrator.set_pr_body_delivered t pid true in
   let t = Orchestrator.set_checks_passing t pid true in
+  let t = Orchestrator.set_head_oid t pid (Some "validated-head") in
+  let t = Orchestrator.attest_completion t pid "validated-head" in
   let t = Orchestrator.complete t pid in
   let t =
     reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
@@ -1083,6 +1104,29 @@ let%test "reconcile_patch requests ready-for-review after pr_body on main" =
       | Github_effect.Request_review _ | Github_effect.Direct_merge _
       | Github_effect.Enqueue _ | Github_effect.Dequeue _ ->
           false)
+
+let%test
+    "reconcile_patch keeps PR draft without a current-head completion claim" =
+  let patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
+  let t = Orchestrator.fire t (Orchestrator.Start (pid, main)) in
+  let t = Orchestrator.set_pr_number t pid (Pr_number.of_int 42) in
+  let t = Orchestrator.set_pr_body_delivered t pid true in
+  let t = Orchestrator.set_checks_passing t pid true in
+  let t = Orchestrator.set_head_oid t pid (Some "current-head") in
+  let t = Orchestrator.attest_completion t pid "older-head" in
+  let t = Orchestrator.complete t pid in
+  let t =
+    reconcile_patch t ~project_name:"proj" ~gameplan:(test_gameplan [ patch ])
+      ~patch
+  in
+  Orchestrator.all_github_effects t
+  |> List.for_all ~f:(fun command ->
+      match command.Github_effect.action with
+      | Github_effect.Set_pr_draft { draft = false; _ } -> false
+      | Github_effect.Set_pr_draft _ | Github_effect.Set_pr_base _
+      | Github_effect.Request_review _ | Github_effect.Direct_merge _
+      | Github_effect.Enqueue _ | Github_effect.Dequeue _ ->
+          true)
 
 let%test "reconcile_patch keeps PR draft while CI is not green" =
   let patch, t = make_orchestrator ~patch_id:pid ~main_branch:main in
@@ -1240,11 +1284,13 @@ let%test
   && (not
         (plans_child_start ~child_id ~patches
            (Orchestrator.set_pr_body_delivered t parent_id true)))
-  (* Once the dep is both notes-delivered and CI-green it is ready for review,
-     and the child becomes startable. *)
+  (* Once the dep is notes-delivered, CI-green, and attested at its current
+     head, it is ready for review and the child becomes startable. *)
   &&
   let t = Orchestrator.set_pr_body_delivered t parent_id true in
   let t = Orchestrator.set_checks_passing t parent_id true in
+  let t = Orchestrator.set_head_oid t parent_id (Some "parent-head") in
+  let t = Orchestrator.attest_completion t parent_id "parent-head" in
   plans_child_start ~child_id ~patches t
 
 let%test "plan_actions does not gate child Start on a merged dep" =

@@ -72,6 +72,25 @@ let () =
         with _ -> false)
   in
 
+  let prop_created_pr_already_has_controller_body =
+    Test.make
+      ~name:"record_created_pr atomically records the controller-rendered body"
+      gen_patch_list_unique (fun patches ->
+        match patches with
+        | [] -> true
+        | patch :: _ ->
+            let orch = Orchestrator.create ~patches ~main_branch:main in
+            let pr_number = Pr_number.of_int 17 in
+            let orch =
+              Orchestrator.record_created_pr orch patch.Patch.id pr_number
+            in
+            let agent = Orchestrator.agent orch patch.Patch.id in
+            Option.equal Pr_number.equal
+              (Patch_agent.pr_number agent)
+              (Some pr_number)
+            && agent.Patch_agent.pr_body_delivered)
+  in
+
   (* Every Respond action targets a patch that has_pr, not merged, not busy,
      not needs_intervention *)
   let prop_respond_preconditions =
@@ -833,6 +852,114 @@ let () =
               in
               Orchestrator.equal_rebase_push_resolution resolution
                 Orchestrator.Rebase_push_ok
+        with _ -> false)
+  in
+
+  let prop_rebase_push_carries_exact_completion =
+    Test.make
+      ~name:
+        "apply_rebase_push_result: validated rewrite carries only the exact \
+         prior completion" gen_patch_list_unique (fun patches ->
+        try
+          match patches with
+          | [] -> true
+          | first :: _ ->
+              let pid = first.Patch.id in
+              let initial = Orchestrator.create ~patches ~main_branch:main in
+              let initial, _actions = tick initial ~patches in
+              let matching =
+                Orchestrator.attest_completion initial pid "old-head"
+              in
+              let matching, resolution =
+                Orchestrator.apply_rebase_push_result matching pid
+                  ~rewritten_head:("old-head", "new-head")
+                  (Some Worktree.Push_ok)
+              in
+              let mismatched =
+                Orchestrator.attest_completion initial pid "other-head"
+              in
+              let mismatched, mismatched_resolution =
+                Orchestrator.apply_rebase_push_result mismatched pid
+                  ~rewritten_head:("old-head", "new-head")
+                  (Some Worktree.Push_ok)
+              in
+              Orchestrator.equal_rebase_push_resolution resolution
+                Orchestrator.Rebase_push_ok
+              && Patch_agent.equal_completion_state
+                   (Orchestrator.agent matching pid).Patch_agent.completion
+                   (Patch_agent.Completion_attested "new-head")
+              && Patch_agent.equal_completion_state
+                   (Orchestrator.agent mismatched pid).Patch_agent.completion
+                   Patch_agent.Completion_unattested
+              && Orchestrator.equal_rebase_push_resolution mismatched_resolution
+                   Orchestrator.Rebase_completion_unbound
+        with _ -> false)
+  in
+
+  let prop_rebase_push_without_rewrite_requires_reattestation =
+    Test.make
+      ~name:"apply_rebase_push_result: missing rewrite cannot retain completion"
+      gen_patch_list_unique (fun patches ->
+        try
+          match patches with
+          | [] -> true
+          | first :: _ ->
+              let pid = first.Patch.id in
+              let initial = Orchestrator.create ~patches ~main_branch:main in
+              let initial =
+                Orchestrator.attest_completion initial pid "old-head"
+              in
+              let updated, resolution =
+                Orchestrator.apply_rebase_push_result initial pid
+                  (Some Worktree.Push_ok)
+              in
+              let agent = Orchestrator.agent updated pid in
+              Orchestrator.equal_rebase_push_resolution resolution
+                Orchestrator.Rebase_completion_unbound
+              && Patch_agent.equal_completion_state agent.Patch_agent.completion
+                   Patch_agent.Completion_unattested
+              && List.mem agent.Patch_agent.queue Operation_kind.Human
+                   ~equal:Operation_kind.equal
+              && not (List.is_empty agent.Patch_agent.human_messages)
+        with _ -> false)
+  in
+
+  let prop_rebase_publication_uses_failure_lifecycle =
+    Test.make
+      ~name:
+        "reject_rebase_publication routes repair to Human and controller \
+         failure to intervention" gen_patch_list_unique (fun patches ->
+        try
+          match patches with
+          | [] -> true
+          | first :: _ ->
+              let pid = first.Patch.id in
+              let initial = Orchestrator.create ~patches ~main_branch:main in
+              let initial, _actions = tick initial ~patches in
+              let target = Validation_repair.Outside_scope in
+              let repaired, repair_resolution =
+                Orchestrator.reject_rebase_publication initial pid
+                  (Orchestrator.Repair_required
+                     { target; detail = "repair the declared scope" })
+              in
+              let repair_agent = Orchestrator.agent repaired pid in
+              let failed, failure_resolution =
+                Orchestrator.reject_rebase_publication initial pid
+                  (Orchestrator.Controller_failed
+                     { detail = "controller Git state failed" })
+              in
+              let failed_agent = Orchestrator.agent failed pid in
+              Orchestrator.equal_rebase_push_resolution repair_resolution
+                Orchestrator.Rebase_publication_rejected
+              && Orchestrator.equal_rebase_push_resolution failure_resolution
+                   Orchestrator.Rebase_publication_rejected
+              && Patch_agent.validation_failure_count repair_agent = 1
+              && List.mem repair_agent.Patch_agent.queue Operation_kind.Human
+                   ~equal:Operation_kind.equal
+              && Patch_agent.needs_intervention failed_agent
+              && Option.equal String.equal
+                   (Patch_agent.intervention_reason failed_agent)
+                   (Some "session_fallback=given_up")
         with _ -> false)
   in
 
@@ -1811,6 +1938,7 @@ let () =
     ~f:(fun t -> QCheck2.Test.check_exn t)
     [
       prop_start_targets_no_pr;
+      prop_created_pr_already_has_controller_body;
       prop_respond_preconditions;
       prop_respond_highest_priority;
       prop_tick_no_double_start;
@@ -1838,6 +1966,9 @@ let () =
       prop_rebase_cascade_skips_merge_queue_dependents;
       prop_rebase_push_ok;
       prop_rebase_push_up_to_date;
+      prop_rebase_push_carries_exact_completion;
+      prop_rebase_push_without_rewrite_requires_reattestation;
+      prop_rebase_publication_uses_failure_lifecycle;
       prop_rebase_push_rejected;
       prop_rebase_push_queue_locked;
       prop_rebase_push_error;

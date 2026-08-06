@@ -27,18 +27,23 @@ module Make (_ : Worktree.S) (_ : ENV) : sig
     kind:Types.Operation_kind.t option ->
     patch_id:Types.Patch_id.t ->
     prompt:string ->
+    resume_prompt:string ->
     agent:Patch_agent.t ->
     on_pr_detected:(Types.Pr_number.t -> unit) ->
     validate_before_push:
-      (worktree:string -> base_branch:Types.Branch.t -> (unit, string) result) ->
+      (worktree:string ->
+      base_branch:Types.Branch.t ->
+      (unit, Orchestrator.publication_failure) result) ->
     backend:Llm_backend.t ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list
-  (** Returns the supervisor disposition and the list of [(tool_name, status)]
-      pairs for any tool calls that did not reach a [completed] state (used by
-      the Pr_body classifier to disambiguate "agent chose not to write" from
-      "Write was blocked"). Callers may also produce a [`Stale] variant from
-      pre-flight checks before invoking this function — the polymorphic-variant
-      union widens at the call site. *)
+  (** [prompt] is the complete contract for a fresh model session;
+      [resume_prompt] contains only the current turn and is used when resuming
+      an existing model session. Returns the supervisor disposition and the list
+      of [(tool_name, status)] pairs for any tool calls that did not reach a
+      [completed] state (used by the Pr_body classifier to disambiguate "agent
+      chose not to write" from "Write was blocked"). Callers may also produce a
+      [`Stale] variant from pre-flight checks before invoking this function —
+      the polymorphic-variant union widens at the call site. *)
 
   type long_lived_session
   (** Mutable per-patch long-lived backend session state. The backend's
@@ -51,10 +56,18 @@ module Make (_ : Worktree.S) (_ : ENV) : sig
     effort:string ->
     gameplan_prompt:string ->
     patch_prompt:string ->
+    conversation_generation:int ->
     long_lived_session
 
-  val update_long_lived_session_prompts :
-    long_lived_session -> gameplan_prompt:string -> patch_prompt:string -> unit
+  val update_long_lived_session :
+    long_lived_session ->
+    gameplan_prompt:string ->
+    patch_prompt:string ->
+    conversation_generation:int ->
+    unit
+  (** Restart the backend handle when either stable prompt content or the
+      durable conversation generation changes. This makes controller-directed
+      fresh starts effective for backends that have no resume-id API. *)
 
   val long_lived_session_failed : long_lived_session -> bool
   val shutdown_long_lived_session : long_lived_session -> unit
@@ -68,7 +81,9 @@ module Make (_ : Worktree.S) (_ : ENV) : sig
     agent:Patch_agent.t ->
     on_pr_detected:(Types.Pr_number.t -> unit) ->
     validate_before_push:
-      (worktree:string -> base_branch:Types.Branch.t -> (unit, string) result) ->
+      (worktree:string ->
+      base_branch:Types.Branch.t ->
+      (unit, Orchestrator.publication_failure) result) ->
     session:long_lived_session ->
     [ `Ok | `Failed | `Retry_push | `No_commits ] * (string * string) list
   (** Long-lived backend counterpart to {!run}. It shares the same supervisor

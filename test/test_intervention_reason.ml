@@ -159,10 +159,10 @@ let assert_raw_fields ~merged ~has_pr ~session_given_up ~human_in_queue
     Patch_agent.intervention_reason_of_fields ~merged ~has_pr ~session_given_up
       ~human_in_queue ~ci_failure_count
       ~max_ci_failures:Patch_agent.default_max_ci_failures
-      ~validation_failure_count:0 ~start_attempts_without_pr
-      ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
-      ~push_failure_count ~rebase_failure_count ~pr_body_artifact_miss_count
-      ~review_unresolved_cycle_count
+      ~validation_repair_exhausted:false ~completion_blocked:false
+      ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
+      ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
+      ~pr_body_artifact_miss_count ~review_unresolved_cycle_count
   in
   assert (Option.equal String.equal reason expected);
   assert (
@@ -170,10 +170,10 @@ let assert_raw_fields ~merged ~has_pr ~session_given_up ~human_in_queue
       (Patch_agent.needs_intervention_of_fields ~merged ~has_pr
          ~session_given_up ~human_in_queue ~ci_failure_count
          ~max_ci_failures:Patch_agent.default_max_ci_failures
-         ~validation_failure_count:0 ~start_attempts_without_pr
-         ~conflict_noop_count ~no_commits_push_count ~context_exhaustion_count
-         ~push_failure_count ~rebase_failure_count ~pr_body_artifact_miss_count
-         ~review_unresolved_cycle_count)
+         ~validation_repair_exhausted:false ~completion_blocked:false
+         ~start_attempts_without_pr ~conflict_noop_count ~no_commits_push_count
+         ~context_exhaustion_count ~push_failure_count ~rebase_failure_count
+         ~pr_body_artifact_miss_count ~review_unresolved_cycle_count)
       (Option.is_some expected))
 
 let () =
@@ -209,11 +209,11 @@ let () =
   let reason_with_custom_cap =
     Patch_agent.intervention_reason_of_fields ~merged:false ~has_pr:true
       ~session_given_up:false ~human_in_queue:false ~ci_failure_count:5
-      ~max_ci_failures:5 ~validation_failure_count:0
-      ~start_attempts_without_pr:0 ~conflict_noop_count:0
-      ~no_commits_push_count:0 ~context_exhaustion_count:0 ~push_failure_count:0
-      ~rebase_failure_count:0 ~pr_body_artifact_miss_count:0
-      ~review_unresolved_cycle_count:0
+      ~max_ci_failures:5 ~validation_repair_exhausted:false
+      ~completion_blocked:false ~start_attempts_without_pr:0
+      ~conflict_noop_count:0 ~no_commits_push_count:0
+      ~context_exhaustion_count:0 ~push_failure_count:0 ~rebase_failure_count:0
+      ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
   in
   assert (
     Option.equal String.equal reason_with_custom_cap
@@ -331,41 +331,41 @@ let () =
            Patch_agent.intervention_reason_of_fields ~merged:false ~has_pr:false
              ~session_given_up:false ~human_in_queue:flag ~ci_failure_count:3
              ~max_ci_failures:Patch_agent.default_max_ci_failures
-             ~validation_failure_count:0 ~start_attempts_without_pr:0
-             ~conflict_noop_count:0 ~no_commits_push_count:0
-             ~context_exhaustion_count:0 ~push_failure_count:0
-             ~rebase_failure_count:0 ~pr_body_artifact_miss_count:0
-             ~review_unresolved_cycle_count:0
+             ~validation_repair_exhausted:false ~completion_blocked:false
+             ~start_attempts_without_pr:0 ~conflict_noop_count:0
+             ~no_commits_push_count:0 ~context_exhaustion_count:0
+             ~push_failure_count:0 ~rebase_failure_count:0
+             ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
          in
          let needs_from_fields =
            Patch_agent.needs_intervention_of_fields ~merged:false ~has_pr:false
              ~session_given_up:false ~human_in_queue:flag ~ci_failure_count:3
              ~max_ci_failures:Patch_agent.default_max_ci_failures
-             ~validation_failure_count:0 ~start_attempts_without_pr:0
-             ~conflict_noop_count:0 ~no_commits_push_count:0
-             ~context_exhaustion_count:0 ~push_failure_count:0
-             ~rebase_failure_count:0 ~pr_body_artifact_miss_count:0
-             ~review_unresolved_cycle_count:0
+             ~validation_repair_exhausted:false ~completion_blocked:false
+             ~start_attempts_without_pr:0 ~conflict_noop_count:0
+             ~no_commits_push_count:0 ~context_exhaustion_count:0
+             ~push_failure_count:0 ~rebase_failure_count:0
+             ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
          in
          let rebase_reason =
            Patch_agent.intervention_reason_of_fields ~merged:false ~has_pr:true
              ~session_given_up:false ~human_in_queue:false ~ci_failure_count:0
              ~max_ci_failures:Patch_agent.default_max_ci_failures
-             ~validation_failure_count:0 ~start_attempts_without_pr:0
-             ~conflict_noop_count:0 ~no_commits_push_count:0
-             ~context_exhaustion_count:0 ~push_failure_count:0
-             ~rebase_failure_count:2 ~pr_body_artifact_miss_count:0
-             ~review_unresolved_cycle_count:0
+             ~validation_repair_exhausted:false ~completion_blocked:false
+             ~start_attempts_without_pr:0 ~conflict_noop_count:0
+             ~no_commits_push_count:0 ~context_exhaustion_count:0
+             ~push_failure_count:0 ~rebase_failure_count:2
+             ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
          in
          let rebase_needs_intervention =
            Patch_agent.needs_intervention_of_fields ~merged:false ~has_pr:true
              ~session_given_up:false ~human_in_queue:false ~ci_failure_count:0
              ~max_ci_failures:Patch_agent.default_max_ci_failures
-             ~validation_failure_count:0 ~start_attempts_without_pr:0
-             ~conflict_noop_count:0 ~no_commits_push_count:0
-             ~context_exhaustion_count:0 ~push_failure_count:0
-             ~rebase_failure_count:2 ~pr_body_artifact_miss_count:0
-             ~review_unresolved_cycle_count:0
+             ~validation_repair_exhausted:false ~completion_blocked:false
+             ~start_attempts_without_pr:0 ~conflict_noop_count:0
+             ~no_commits_push_count:0 ~context_exhaustion_count:0
+             ~push_failure_count:0 ~rebase_failure_count:2
+             ~pr_body_artifact_miss_count:0 ~review_unresolved_cycle_count:0
          in
          Bool.equal needs_from_fields (Option.is_some reason_from_fields)
          && Bool.equal rebase_needs_intervention (Option.is_some rebase_reason)

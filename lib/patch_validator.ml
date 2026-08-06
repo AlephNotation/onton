@@ -13,6 +13,7 @@ type failure =
   | Scope_read_failed of command_failure
   | Outside_scope of string list
   | Check_failed of Check.t * command_failure
+  | Check_modified_repository of Check.t * string list
 [@@deriving show, eq]
 
 type preparation = No_changes | Committed | Rebase_continued
@@ -21,6 +22,7 @@ type preparation = No_changes | Committed | Rebase_continued
 type prepare_failure =
   | Validation_failed of failure
   | Git_failed of command_failure
+  | Rebase_conflict_remaining of string list * command_failure
 [@@deriving show, eq]
 
 let timeout_seconds = 600.0
@@ -95,6 +97,96 @@ let run_checks ~process_mgr ~clock ~fs ~cwd checks =
       | Ok _ -> Ok ()
       | Error failure -> Error (Check_failed (check, failure)))
 
+type repository_state = { head : string; index_tree : string } [@@deriving eq]
+
+let repository_state ~process_mgr ~clock ~fs ~cwd =
+  Result.bind
+    (run_command ~process_mgr ~clock ~fs ~cwd [ "git"; "rev-parse"; "HEAD" ])
+    ~f:(fun head ->
+      Result.map
+        (run_command ~process_mgr ~clock ~fs ~cwd [ "git"; "write-tree" ])
+        ~f:(fun index_tree ->
+          { head = String.strip head; index_tree = String.strip index_tree }))
+
+let unstaged_files ~process_mgr ~clock ~fs ~cwd =
+  read_changed_files ~process_mgr ~clock ~fs ~cwd
+    [
+      [ "git"; "diff"; "--name-only"; "--no-renames" ];
+      [ "git"; "ls-files"; "--others"; "--exclude-standard" ];
+    ]
+
+let restore_repository_state ~process_mgr ~clock ~fs ~cwd before =
+  let git command = run_command ~process_mgr ~clock ~fs ~cwd command in
+  let ( let* ) result f = Result.bind result ~f in
+  let* _ = git [ "git"; "reset"; "--soft"; before.head ] in
+  let* _ = git [ "git"; "read-tree"; "--reset"; "-u"; before.index_tree ] in
+  let* remaining = unstaged_files ~process_mgr ~clock ~fs ~cwd in
+  let* _ =
+    match remaining with
+    | [] -> Ok ""
+    | paths -> git ([ "git"; "clean"; "-fd"; "--" ] @ paths)
+  in
+  let* restored = repository_state ~process_mgr ~clock ~fs ~cwd in
+  let* remaining = unstaged_files ~process_mgr ~clock ~fs ~cwd in
+  if equal_repository_state restored before && List.is_empty remaining then
+    Ok ()
+  else
+    Error
+      {
+        command = "restore repository after mutating check";
+        exit_code = None;
+        stdout = "";
+        stderr =
+          "controller could not restore the exact pre-check HEAD, index, and \
+           worktree";
+      }
+
+let unresolved_files ~process_mgr ~clock ~fs ~cwd =
+  read_changed_files ~process_mgr ~clock ~fs ~cwd
+    [ [ "git"; "diff"; "--name-only"; "--no-renames"; "--diff-filter=U" ] ]
+
+let run_checks_unchanged ~process_mgr ~clock ~fs ~cwd checks =
+  let check_one check =
+    match repository_state ~process_mgr ~clock ~fs ~cwd with
+    | Error failure -> Error (`Git failure)
+    | Ok before -> begin
+        let check_result =
+          run_command ~process_mgr ~clock ~fs ~cwd
+            [ "/bin/sh"; "-lc"; check.Check.run ]
+        in
+        match repository_state ~process_mgr ~clock ~fs ~cwd with
+        | Error failure -> Error (`Git failure)
+        | Ok after -> begin
+            match unstaged_files ~process_mgr ~clock ~fs ~cwd with
+            | Error failure -> Error (`Git failure)
+            | Ok unstaged -> (
+                let metadata_changed =
+                  not (equal_repository_state before after)
+                in
+                if metadata_changed || not (List.is_empty unstaged) then
+                  let changed =
+                    (if metadata_changed then [ "<Git HEAD or index changed>" ]
+                     else [])
+                    @ unstaged
+                  in
+                  match
+                    restore_repository_state ~process_mgr ~clock ~fs ~cwd before
+                  with
+                  | Ok () ->
+                      Error
+                        (`Validation
+                           (Check_modified_repository (check, changed)))
+                  | Error failure -> Error (`Git failure)
+                else
+                  match check_result with
+                  | Ok _ -> Ok ()
+                  | Error failure ->
+                      Error (`Validation (Check_failed (check, failure))))
+          end
+      end
+  in
+  List.fold_result checks ~init:() ~f:(fun () check -> check_one check)
+
 let run ~process_mgr ~clock ~fs ~cwd ~base_branch patch =
   match changed_files ~process_mgr ~clock ~fs ~cwd ~base_branch with
   | Error _ as error -> error
@@ -111,50 +203,65 @@ let pr_title (patch : Patch.t) =
 
 let prepare ~process_mgr ~clock ~fs ~cwd ~base_branch ~project_name
     ~rebase_in_progress patch =
-  let validate () =
-    Result.map_error (run ~process_mgr ~clock ~fs ~cwd ~base_branch patch)
-      ~f:(fun failure -> Validation_failed failure)
+  let validate_scope () =
+    match changed_files ~process_mgr ~clock ~fs ~cwd ~base_branch with
+    | Error failure -> Error (Validation_failed failure)
+    | Ok changed -> (
+        match Patch_scope.outside_scope ~allowed:patch.Patch.files ~changed with
+        | _ :: _ as paths -> Error (Validation_failed (Outside_scope paths))
+        | [] -> Ok ())
   in
   let git command =
     Result.map_error (run_command ~process_mgr ~clock ~fs ~cwd command)
       ~f:(fun failure -> Git_failed failure)
   in
-  Result.bind (validate ()) ~f:(fun () ->
-      Result.bind
-        (pending_files ~process_mgr ~clock ~fs ~cwd
-        |> Result.map_error ~f:(fun failure -> Git_failed failure))
-        ~f:(fun pending ->
-          Result.bind
-            (match pending with
-            | [] -> Ok ""
-            | files -> git ([ "git"; "add"; "-A"; "--" ] @ files))
-            ~f:(fun _ ->
-              Result.bind (validate ()) ~f:(fun () ->
-                  if rebase_in_progress then
-                    Result.map
-                      (git
-                         [
-                           "git";
-                           "-c";
-                           "core.editor=true";
-                           "rebase";
-                           "--continue";
-                         ])
-                      ~f:(fun _ -> Rebase_continued)
-                  else
-                    Result.bind
-                      (git [ "git"; "diff"; "--cached"; "--name-only" ])
-                      ~f:(fun staged ->
-                        if String.is_empty (String.strip staged) then
-                          Ok No_changes
-                        else
-                          Result.map
-                            (git
-                               [
-                                 "git";
-                                 "commit";
-                                 "--no-verify";
-                                 "-m";
-                                 commit_subject ~project_name patch;
-                               ])
-                            ~f:(fun _ -> Committed))))))
+  let validate_checks () =
+    match
+      run_checks_unchanged ~process_mgr ~clock ~fs ~cwd patch.Patch.checks
+    with
+    | Ok () -> Ok ()
+    | Error (`Validation failure) -> Error (Validation_failed failure)
+    | Error (`Git failure) -> Error (Git_failed failure)
+  in
+  let ( let* ) result f = Result.bind result ~f in
+  let* () = validate_scope () in
+  let* pending =
+    pending_files ~process_mgr ~clock ~fs ~cwd
+    |> Result.map_error ~f:(fun failure -> Git_failed failure)
+  in
+  let* _ =
+    match pending with
+    | [] -> Ok ""
+    | files -> git ([ "git"; "add"; "-A"; "--" ] @ files)
+  in
+  let* continued =
+    if rebase_in_progress then
+      match
+        run_command ~process_mgr ~clock ~fs ~cwd
+          [ "git"; "-c"; "core.editor=true"; "rebase"; "--continue" ]
+      with
+      | Ok _ -> Ok true
+      | Error failure -> (
+          match unresolved_files ~process_mgr ~clock ~fs ~cwd with
+          | Ok (_ :: _ as paths) ->
+              Error (Rebase_conflict_remaining (paths, failure))
+          | Ok [] | Error _ -> Error (Git_failed failure))
+    else Ok false
+  in
+  let* () = validate_scope () in
+  let* () = validate_checks () in
+  if continued then Ok Rebase_continued
+  else
+    let* staged = git [ "git"; "diff"; "--cached"; "--name-only" ] in
+    if String.is_empty (String.strip staged) then Ok No_changes
+    else
+      Result.map
+        (git
+           [
+             "git";
+             "commit";
+             "--no-verify";
+             "-m";
+             commit_subject ~project_name patch;
+           ])
+        ~f:(fun _ -> Committed)

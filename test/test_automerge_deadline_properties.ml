@@ -64,7 +64,12 @@ let make_agent ~patch_id ~branch ~merge_ready ~mergeability_unknown
   let session =
     if busy then
       Patch_agent.Started
-        { resume_id = None; fallback = Patch_agent.Fresh_available }
+        {
+          resume_id = None;
+          fallback = Patch_agent.Fresh_available;
+          conversation_generation = 0;
+          prompt_fingerprint = None;
+        }
     else Patch_agent.Not_started
   in
   let automerge =

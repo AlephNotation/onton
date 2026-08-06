@@ -11,7 +11,12 @@ type session_fallback = Fresh_available | Tried_fresh | Given_up
 
 type session_state =
   | Not_started
-  | Started of { resume_id : string option; fallback : session_fallback }
+  | Started of {
+      resume_id : string option;
+      fallback : session_fallback;
+      conversation_generation : int;
+      prompt_fingerprint : string option;
+    }
 [@@deriving show, eq, sexp_of, compare]
 
 type op_state = Queued | Running
@@ -41,6 +46,12 @@ type review_state =
   | Review_failed of { head_oid : string; error : string }
 [@@deriving show, eq, sexp_of, compare]
 
+type completion_state =
+  | Completion_unattested
+  | Completion_attested of string
+  | Completion_blocked of string
+[@@deriving show, eq, sexp_of, compare, yojson]
+
 type t = private {
   patch_id : Types.Patch_id.t;
   branch : Types.Branch.t;
@@ -66,10 +77,13 @@ type t = private {
           construction (and re-stamped on snapshot restore via
           {!Orchestrator.set_max_ci_failures}) from the [--max-ci-failures] flag
           / stored project config; defaults to {!default_max_ci_failures}. *)
-  validation_failure_count : int;
-      (** Consecutive controller validation failures before PR publication. At
-          three failures the patch fails closed even while its last feedback is
-          still queued. A human message resets the counter. *)
+  validation_repair : Validation_repair.t;
+      (** Controller-owned, failure-local validation repair budget. Each exact
+          gate gets a bounded current-session window and one fresh-session
+          window; alternating gates remain bounded by a patch-wide ceiling. *)
+  completion : completion_state;
+      (** Worker completion attestation bound to an exact validated Git head, or
+          the reason the worker explicitly could not complete the goal. *)
   human_messages : string list;
   inflight_human_messages : string list;
   ci_checks : Types.Ci_check.t list;
@@ -226,7 +240,8 @@ val intervention_reason_of_fields :
   human_in_queue:bool ->
   ci_failure_count:int ->
   max_ci_failures:int ->
-  validation_failure_count:int ->
+  validation_repair_exhausted:bool ->
+  completion_blocked:bool ->
   start_attempts_without_pr:int ->
   conflict_noop_count:int ->
   no_commits_push_count:int ->
@@ -247,6 +262,7 @@ val needs_intervention : t -> bool
     - [Human] not in queue AND any of: [ci_failure_count >= max_ci_failures],
       [(not has_pr) && start_attempts_without_pr >= 2],
       [conflict_noop_count >= 2], [no_commits_push_count >= 2],
+      [validation_repair] is exhausted, [completion] is blocked,
       [context_exhaustion_count >= 2], [push_failure_count >= 3],
       [rebase_failure_count >= 2], [pr_body_artifact_miss_count >= 2],
       [review_unresolved_cycle_count >= 2]. *)
@@ -258,7 +274,8 @@ val needs_intervention_of_fields :
   human_in_queue:bool ->
   ci_failure_count:int ->
   max_ci_failures:int ->
-  validation_failure_count:int ->
+  validation_repair_exhausted:bool ->
+  completion_blocked:bool ->
   start_attempts_without_pr:int ->
   conflict_noop_count:int ->
   no_commits_push_count:int ->
@@ -278,7 +295,8 @@ val start : t -> base_branch:Types.Branch.t -> t
     externally. Postconditions: [has_session], [busy], [satisfies],
     [base_branch = Some base_branch]. Pending direct messages move atomically to
     [inflight_human_messages], and a queued [Human] operation is consumed by the
-    Start turn so pre-PR feedback does not require a parallel operation. *)
+    Start turn so pre-PR feedback does not require a parallel operation. The
+    code-capable turn invalidates any prior completion attestation. *)
 
 val rebase : t -> base_branch:Types.Branch.t -> t
 (** [PatchCtx ~> Rebase] — orchestrator-executed rebase. Preconditions:
@@ -291,7 +309,8 @@ val respond : t -> Types.Operation_kind.t -> t
     (checked): [has_pr], [~merged], [~busy], [~needs_intervention], [k] in
     [queue], [k] is [highest_priority]. Postconditions per spec: sets
     [has_session], [busy]; dequeues [k]; conditionally updates [satisfies],
-    [changed], [has_conflict], and resolves [pending_comments]. *)
+    [changed], [has_conflict], and resolves [pending_comments]. Code-capable
+    operations invalidate any prior completion attestation. *)
 
 val complete : t -> t
 (** [PatchCtx ~> Complete] — session finished. Preconditions (checked): [busy].
@@ -302,7 +321,8 @@ val complete : t -> t
 (** {2 State mutation helpers} *)
 
 val enqueue : t -> Types.Operation_kind.t -> t
-(** Add an operation to the queue (idempotent). *)
+(** Add an operation to the queue (idempotent). Worker-editing work invalidates
+    any prior completion attestation as soon as the work becomes required. *)
 
 val mark_merged : t -> t
 (** Mark the patch as merged. *)
@@ -314,7 +334,11 @@ val add_human_messages : t -> string list -> t
 (** Prepend multiple messages to the pending list, preserving their order. *)
 
 val set_session_failed : t -> t
-(** Mark session fallback as [Given_up]. *)
+(** Record failure of a resumed session by advancing [Fresh_available] to
+    [Tried_fresh]. *)
+
+val set_session_given_up : t -> t
+(** Move a started session directly to terminal [Given_up]. *)
 
 val set_tried_fresh : t -> t
 (** Advance session fallback to [Tried_fresh]. No-op if already [Tried_fresh] or
@@ -324,18 +348,20 @@ val clear_session_fallback : t -> t
 (** Reset session fallback to [Fresh_available]. *)
 
 val on_session_failure : t -> is_fresh:bool -> t
-(** Handle a Claude session failure. Pure decision:
+(** Handle a worker session failure. Pure decision:
     - Start path (no PR) + fresh failure: reset to [Fresh_available] for retry
-    - Resume failure: escalate to [Tried_fresh] (will try fresh next)
-    - Respond path fresh failure: escalate to [Given_up] → needs_intervention *)
+    - Resume failure: escalate toward a fresh retry
+    - Respond-path fresh failure: advance toward [Given_up] Every non-start
+      failure advances the backend-neutral conversation generation so long-lived
+      providers cannot silently reuse the failed handle. *)
 
 val on_pr_discovery_failure : t -> t
-(** Handle a successful Claude run where PR discovery failed. Increments the
+(** Handle a successful worker run where PR discovery failed. Increments the
     durable attempt counter so [needs_intervention] fires after repeated
     failures. No-op when the agent already has a PR. *)
 
 val on_pre_session_failure : t -> t
-(** Handle a failure that occurs before a Claude session starts (worktree
+(** Handle a failure that occurs before a worker session starts (worktree
     creation, process spawn error). Increments [start_attempts_without_pr] for
     no-PR agents so they hit [needs_intervention] after 2 failures instead of
     retrying indefinitely. No-op for agents that already have a PR. *)
@@ -570,13 +596,50 @@ val set_llm_session_id : t -> string option -> t
     after intervention. Cleared on start-path fresh-failure reset (clean retry)
     and when the session is known dead (no-resume, give-up). *)
 
+val conversation_generation : t -> int
+(** Durable identity of the model conversation. Incremented whenever the
+    controller requires a genuinely fresh conversation, including for long-lived
+    backends that do not use resume ids. *)
+
+val prompt_fingerprint : t -> string option
+
+val restart_conversation : t -> t
+(** Clear the ephemeral resume id and advance the backend-neutral conversation
+    generation. *)
+
+val align_prompt_fingerprint : t -> string -> t
+(** Bind the current conversation to the stable prompt prefix. A changed prefix,
+    or a legacy resumed conversation with no recorded fingerprint, starts a new
+    conversation. Idempotent for the current fingerprint. *)
+
 val mark_inflight_human_messages_delivered : t -> t
 (** Clear [inflight_human_messages] once the backend has emitted evidence that
     it accepted the turn. Start and Human turns can both carry direct messages.
     Does not complete the session or change fallback state. *)
 
-val increment_validation_failure_count : t -> t
-val reset_validation_failure_count : t -> t
+val validation_failure_count : t -> int
+(** Total controller validation rejections in the current repair lifecycle.
+    Retained as an observation for telemetry and legacy snapshot migration; it
+    is not the intervention decision. *)
+
+val on_validation_failure :
+  t -> Validation_repair.target -> t * Validation_repair.decision
+(** Record one repairable controller rejection. [Restart_session] clears the
+    resume id in the returned agent; [Exhausted] makes the agent need
+    intervention. *)
+
+val reset_validation_repair : t -> t
+val attest_completion : t -> string -> t
+val block_completion : t -> string -> t
+
+val carry_completion_forward : t -> from_head:string -> to_head:string -> t
+(** Rebind an attested completion across a controller-owned, validated Git
+    rewrite. Does nothing unless the existing attestation exactly matches
+    [from_head]. *)
+
+val completion_matches_head : t -> bool
+(** True only when the worker's complete claim is bound to the exact current
+    polled PR head. *)
 
 val set_automerge_enabled : t -> bool -> t
 (** Enable or disable automerge for this patch. When the value actually changes,
@@ -609,9 +672,12 @@ val reset_automerge_failure_count : t -> t
 val resume_current_message : t -> op:Types.Operation_kind.t option -> t
 (** Resume execution of an already accepted message without reapplying its
     queue-consuming state transition. [~op] restores [current_op] from the
-    outbox so that [complete] can clear [human_messages] correctly. Resets
-    [current_op_state] to [Queued] — the resumed fiber must call [mark_running]
-    when it actually begins work. *)
+    outbox so that [complete] can clear [human_messages] correctly. Resuming a
+    worker-editing message invalidates any prior completion attestation,
+    including snapshots accepted by an older binary. Controller-owned [Rebase]
+    and notes-only [Pr_body] preserve it. Resets [current_op_state] to [Queued]
+    — the resumed fiber must call [mark_running] when it actually begins work.
+*)
 
 val mark_running : t -> t
 (** Transition [current_op_state] from [Queued] to [Running]. Called from the
@@ -658,6 +724,8 @@ val restore :
   ci_failure_count:int ->
   ?max_ci_failures:int ->
   ?validation_failure_count:int ->
+  ?validation_repair:Validation_repair.t ->
+  ?completion:completion_state ->
   human_messages:string list ->
   inflight_human_messages:string list ->
   ci_checks:Types.Ci_check.t list ->

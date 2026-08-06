@@ -73,6 +73,11 @@ module Operation_kind : sig
   val to_label : t -> string
   (** Human-readable label for log messages (e.g. ["ci"], ["review-comments"]).
   *)
+
+  val requires_completion_claim : t -> bool
+  (** Whether a worker turn may author code and therefore must produce a fresh
+      completion claim. [Rebase] is controller-owned; [Pr_body] is notes-only.
+  *)
 end
 
 (** Wrapper for GitHub comment [databaseId]. Synthetic IDs are always negative;

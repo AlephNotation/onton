@@ -278,6 +278,46 @@ checks committed, staged, unstaged, and untracked paths; runs only the checks
 declared by the patch; stages only declared paths; creates the deterministic
 patch commit; and performs any rebase, push, or GitHub mutation itself.
 
+A failed declared scope/check gate returns a bounded diagnostic through the
+durable Human-message lifecycle. Repair accounting is local to the exact gate:
+formatting, compilation, and tests do not consume one shared three-strike
+counter. One gate gets three turns in the current model session and three more
+after a controller-forced fresh-session rollover. Twelve validation rejections
+across the patch is the hard ceiling even when failures alternate; exhaustion
+fails closed until a human message resets the lifecycle, and that intervention
+starts a fresh model session. Plans should therefore declare independent checks
+as independent `checks` entries instead of hiding several gates behind one
+`&&` command: the controller cannot identify stages inside an opaque shell
+pipeline. Failures reading or committing the Git worktree are controller
+failures, not worker feedback, and surface immediately for intervention because
+the sandboxed worker has no capability to repair controller-owned Git state.
+
+Every code-capable turn also gets one exact writable `completion.json` artifact
+outside the worktree. The controller removes the prior artifact before launch
+and invalidates the prior attestation when the turn is dispatched. It accepts
+only strict `complete` or `blocked` JSON. A `complete` claim is bound to the exact
+Git head after scope checks, declared checks, and the controller-owned commit
+succeed; the PR cannot leave draft until GitHub reports that same head. A
+missing, malformed, or explicit `blocked` claim after a completed turn leaves
+the PR draft and surfaces for intervention. Failed or interrupted turns stay in
+the existing session-recovery lifecycle. This is deliberately an attestation
+of the worker's own completion judgment—not proof of correctness—so CI, review,
+and the declared controller checks remain independent gates. The controller
+creates the draft PR with the deterministic gameplan body and records that body
+as delivered in the same state transition; a fresh patch does not spend a model
+turn rewriting it. When the controller performs a clean rebase, it reruns the
+declared contract before carrying a prior attestation from the exact old head to
+the rewritten head. A repairable post-rebase failure enters the same bounded
+worker-repair lifecycle; a controller failure stops for intervention.
+
+An ephemeral model session receives the complete gameplan, repository
+instructions, patch contract, and current turn only when it starts fresh.
+Resumed turns receive only their turn-specific delta; if resume fails and the
+controller deliberately rolls over to a fresh session, the complete contract is
+sent again. Long-lived backends load the stable prefix when their process starts
+and likewise receive only turn deltas. A real change to that prefix cleanly
+restarts the long-lived process with the new contract.
+
 The limitations matter. `/usr/bin/sandbox-exec` and Apple's bundled
 `system.sb` are deprecated/private macOS facilities, so Liquid Onton verifies their
 presence and fails closed elsewhere rather than claiming portable isolation.

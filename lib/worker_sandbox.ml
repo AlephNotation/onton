@@ -450,15 +450,26 @@ let ancestor_notes ~project_name (patch : Types.Patch.t)
   |> List.map ~f:(fun patch_id ->
       Project_store.pr_body_artifact_path ~project_name ~patch_id)
 
-let writable_outputs ~project_name ~patch_id = function
-  | Some Types.Operation_kind.Pr_body ->
-      ([ Project_store.pr_body_artifact_path ~project_name ~patch_id ], [])
-  | Some Types.Operation_kind.Review_comments ->
-      ([], [ Project_store.comment_responses_dir ~project_name ~patch_id ])
-  | Some Types.Operation_kind.Findings ->
-      ([], [ Project_store.findings_wontfix_dir ~project_name ~patch_id ])
-  | Some (Types.Operation_kind.Rebase | Human | Merge_conflict | Ci) | None ->
-      ([], [])
+let operation_requires_completion = function
+  | None -> true
+  | Some operation -> Types.Operation_kind.requires_completion_claim operation
+
+let writable_outputs ~project_name ~patch_id operation =
+  let files, dirs =
+    match operation with
+    | Some Types.Operation_kind.Pr_body ->
+        ([ Project_store.pr_body_artifact_path ~project_name ~patch_id ], [])
+    | Some Types.Operation_kind.Review_comments ->
+        ([], [ Project_store.comment_responses_dir ~project_name ~patch_id ])
+    | Some Types.Operation_kind.Findings ->
+        ([], [ Project_store.findings_wontfix_dir ~project_name ~patch_id ])
+    | Some (Types.Operation_kind.Rebase | Human | Merge_conflict | Ci) | None ->
+        ([], [])
+  in
+  let requires_completion = operation_requires_completion operation in
+  if requires_completion then
+    (Project_store.completion_claim_path ~project_name ~patch_id :: files, dirs)
+  else (files, dirs)
 
 let capability_segment label value =
   let value = String.lowercase (String.strip value) in
@@ -538,11 +549,16 @@ let create ~backend ~provider ~project_name ~worktree ~(patch : Types.Patch.t)
     Project_store.plan_artifact_path project_name
     :: ancestor_notes ~project_name patch gameplan
   in
+  let code_capable = operation_requires_completion operation in
   let writable_files =
-    List.map declared_paths ~f:(fun path -> path.file) @ output_files
+    (if code_capable then List.map declared_paths ~f:(fun path -> path.file)
+     else [])
+    @ output_files
   in
   let creatable_dirs =
-    List.concat_map declared_paths ~f:(fun path -> path.creatable_dirs)
+    if code_capable then
+      List.concat_map declared_paths ~f:(fun path -> path.creatable_dirs)
+    else []
   in
   let* policy =
     Worker_sandbox_policy.create ~worktree ~read_only_paths ~read_only_dirs

@@ -77,6 +77,10 @@ module Operation_kind = struct
     | Review_comments -> "review-comments"
     | Pr_body -> "pr-body"
     | Findings -> "findings"
+
+  let requires_completion_claim = function
+    | Rebase | Pr_body -> false
+    | Human | Merge_conflict | Ci | Review_comments | Findings -> true
 end
 
 module Comment_id = struct
